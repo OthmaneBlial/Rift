@@ -25,6 +25,9 @@ def main() -> int:
         output = Path(temporary) / "output"
         source.mkdir()
         output.mkdir()
+        nested_output = Path(temporary) / "nested-output"
+        nested_output.mkdir()
+        (source / "nested").mkdir()
         (source / "message").write_text("FROM_HOST\n")
         file_source = Path(temporary) / "config with space"
         file_source.write_text("FILE_FROM_HOST\n")
@@ -50,6 +53,9 @@ def main() -> int:
         copied = run(binary, "-v", f"{output}:/data:rw", "-v", f"{source}:/data/input:ro", "alpine", "sh", "-c", "cat /data/input/message > /data/copy")
         if copied.returncode != 0 or (output / "copy").read_text() != "FROM_HOST\n":
             raise RuntimeError(f"nested writable volume failed: {copied!r}")
+        readonly_parent = run(binary, "-v", f"{source}:/data:ro", "-v", f"{nested_output}:/data/nested:rw", "alpine", "sh", "-c", "echo CHILD_CHANGED > /data/nested/child; echo PARENT_CHANGED > /data/message")
+        if readonly_parent.returncode == 0 or (nested_output / "child").read_text() != "CHILD_CHANGED\n" or (source / "message").read_text() != "FROM_HOST\n":
+            raise RuntimeError(f"nested writable volume escaped its read-only parent: {readonly_parent!r}")
         many = [item for index in range(16) for item in ("-v", f"{source}:/volume/{index}")]
         maximum = run(binary, *many, "alpine", "cat", "/volume/15/message")
         if maximum.returncode != 0 or maximum.stdout.strip() != "FROM_HOST":
@@ -111,7 +117,7 @@ def main() -> int:
     after = set(runtime.iterdir()) if runtime.exists() else set()
     if after != before:
         raise RuntimeError(f"volume runs left runtime staging behind: {after - before}")
-    print("Rift volume check passed: read-only and writable file/directory shares, nested, detached, 16 shares, and symlink-target rejection")
+    print("Rift volume check passed: read-only and writable file/directory shares, nested mounts, detached, 16 shares, and symlink-target rejection")
     return 0
 
 
