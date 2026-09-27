@@ -1,18 +1,39 @@
 #!/usr/bin/env python3
 """Check detached exec input/output, arguments, environment, filesystem, namespace, and exit behavior."""
 
+import fcntl
 import os
+import pty
 import re
 import select
 import shutil
+import signal
+import struct
 import subprocess
 import sys
+import termios
 import tempfile
 import time
 
 
 def call(rift: str, *args: str, timeout: int = 90) -> subprocess.CompletedProcess[str]:
     return subprocess.run([rift, *args], capture_output=True, text=True, timeout=timeout)
+
+
+def read_line(stream, timeout: float) -> bytes:
+    deadline = time.monotonic() + timeout
+    line = bytearray()
+    while time.monotonic() < deadline:
+        ready, _, _ = select.select([stream], [], [], min(0.1, deadline - time.monotonic()))
+        if not ready:
+            continue
+        byte = os.read(stream.fileno(), 1)
+        if not byte:
+            break
+        if byte == b"\n":
+            return bytes(line).rstrip(b"\r")
+        line.extend(byte)
+    raise RuntimeError(f"timed out waiting for exec output line: {bytes(line)!r}")
 
 
 def main() -> int:
@@ -149,6 +170,116 @@ def main() -> int:
         if piped.returncode != 0 or piped.stdout != "RIFT_EXEC_INPUT_EOF\n":
             raise RuntimeError(f"exec did not forward stdin data and EOF: {piped!r}")
 
+        terminal_master, terminal_slave = pty.openpty()
+        fcntl.ioctl(terminal_slave, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 120, 0, 0))
+        original_terminal = termios.tcgetattr(terminal_slave)
+        terminal = subprocess.Popen(
+            [
+                rift,
+                "exec",
+                "-it",
+                identifier,
+                "/bin/sh",
+                "-c",
+                "test -t 0 && test -t 1 && test -t 2 || exit 90; trap 'printf RIFT_TTY_SIGNAL_INT\\n; exit 0' INT; printf 'RIFT_TTY_READY\\n'; stty size; IFS= read -r line; printf 'RIFT_TTY_INPUT:%s\\n' \"$line\"; stty size; while :; do sleep 1; done",
+            ],
+            stdin=terminal_slave,
+            stdout=terminal_slave,
+            stderr=terminal_slave,
+        )
+        terminal_output = bytearray()
+
+        def read_terminal_until(marker: bytes, timeout: float) -> None:
+            deadline = time.monotonic() + timeout
+            while marker not in terminal_output and time.monotonic() < deadline:
+                ready, _, _ = select.select([terminal_master], [], [], min(0.1, deadline - time.monotonic()))
+                if ready:
+                    terminal_output.extend(os.read(terminal_master, 4096))
+            if marker not in terminal_output:
+                raise RuntimeError(f"TTY exec did not print {marker!r}: {bytes(terminal_output)!r}")
+
+        try:
+            read_terminal_until(b"RIFT_TTY_READY", 30)
+            read_terminal_until(b"40 120", 5)
+            fcntl.ioctl(terminal_slave, termios.TIOCSWINSZ, struct.pack("HHHH", 50, 140, 0, 0))
+            os.kill(terminal.pid, signal.SIGWINCH)
+            time.sleep(0.2)
+            os.write(terminal_master, b"RIFT_TTY_INPUT_LIVE\n")
+            read_terminal_until(b"RIFT_TTY_INPUT:RIFT_TTY_INPUT_LIVE", 10)
+            read_terminal_until(b"50 140", 5)
+            os.write(terminal_master, b"\x03")
+            read_terminal_until(b"RIFT_TTY_SIGNAL_INT", 10)
+            if terminal.wait(timeout=10) != 0:
+                raise RuntimeError(f"TTY exec failed: {terminal.returncode}, {bytes(terminal_output)!r}")
+            if termios.tcgetattr(terminal_slave) != original_terminal:
+                raise RuntimeError(f"TTY exec did not restore the host terminal settings: {original_terminal!r} != {termios.tcgetattr(terminal_slave)!r}")
+        finally:
+            if terminal.poll() is None:
+                terminal.terminate()
+                terminal.wait(timeout=5)
+            os.close(terminal_slave)
+            os.close(terminal_master)
+
+        signalled = subprocess.Popen(
+            [
+                rift,
+                "exec",
+                "-i",
+                identifier,
+                "/bin/sh",
+                "-c",
+                "trap 'printf RIFT_EXEC_SIGNAL_TERM\\n; exit 0' TERM; IFS= read -r line || printf 'RIFT_EXEC_EOF_READY\\n'; while :; do sleep 1; done",
+            ],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        try:
+            signalled.stdin.close()
+            signalled.stdin = None
+            if read_line(signalled.stdout, 30) != b"RIFT_EXEC_EOF_READY":
+                raise RuntimeError("signal-test exec did not observe stdin EOF")
+            os.kill(signalled.pid, signal.SIGTERM)
+            remaining_output, remaining_error = signalled.communicate(timeout=15)
+            if signalled.returncode != 128 + signal.SIGTERM or b"RIFT_EXEC_SIGNAL_TERM" not in remaining_output:
+                raise RuntimeError(f"exec did not forward SIGTERM after stdin EOF: {signalled.returncode}, {remaining_output!r}, {remaining_error!r}")
+        finally:
+            if signalled.poll() is None:
+                signalled.kill()
+                signalled.communicate(timeout=5)
+
+        escalated = subprocess.Popen(
+            [
+                rift,
+                "exec",
+                "-i",
+                identifier,
+                "/bin/sh",
+                "-c",
+                "trap 'printf \"RIFT_EXEC_TERM_SEEN\\n\"; trap \"\" TERM' TERM; IFS= read -r line || printf 'RIFT_EXEC_EOF_READY\\n'; while :; do :; done",
+            ],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        try:
+            escalated.stdin.close()
+            escalated.stdin = None
+            if read_line(escalated.stdout, 30) != b"RIFT_EXEC_EOF_READY":
+                raise RuntimeError("signal-escalation exec did not observe stdin EOF")
+            os.kill(escalated.pid, signal.SIGTERM)
+            term_seen = read_line(escalated.stdout, 10)
+            if term_seen != b"RIFT_EXEC_TERM_SEEN":
+                raise RuntimeError(f"exec did not forward the first cancellation signal: {term_seen!r}, status={escalated.poll()}")
+            os.kill(escalated.pid, signal.SIGTERM)
+            escalated.communicate(timeout=15)
+            if escalated.returncode != 137:
+                raise RuntimeError(f"exec did not force-stop after a second cancellation signal: {escalated.returncode}")
+        finally:
+            if escalated.poll() is None:
+                escalated.kill()
+                escalated.communicate(timeout=5)
+
         persisted = call(rift, "exec", identifier, "/bin/cat", "/tmp/rift-exec-file")
         if persisted.returncode != 0 or persisted.stdout != "persistent":
             raise RuntimeError(f"exec did not share the container filesystem: {persisted!r}")
@@ -170,7 +301,7 @@ def main() -> int:
         removed = call(rift, "rm", identifier)
         if removed.returncode != 0:
             raise RuntimeError(f"container removal failed after exec: {removed!r}")
-        print("Rift exec check passed: streaming input/output, arguments, environment, working directory, PID namespace, filesystem, exit status, lifecycle")
+        print("Rift exec check passed: streaming input/output, TTY, resize, terminal restore, signal forwarding, arguments, environment, working directory, PID namespace, filesystem, exit status, lifecycle")
         return 0
     except Exception as error:
         print(f"Rift exec check failed: {error}", file=sys.stderr)

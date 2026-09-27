@@ -14,15 +14,19 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mount.h>
+#include <sys/ioctl.h>
 #include <sys/prctl.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/sysmacros.h>
 #include <sys/types.h>
 #include <sys/wait.h>
+#include <termios.h>
 #include <unistd.h>
 
 static int fail(const char *operation);
+static int mountpoint(const char *path);
+static int write_all(int descriptor, const void *contents, size_t length);
 
 static volatile sig_atomic_t child_pid = -1;
 static volatile sig_atomic_t exec_pid = -1;
@@ -32,7 +36,8 @@ static void forward_stop_signal(int signal_number) {
     int saved_errno = errno;
     pending_signal = signal_number;
     if (child_pid > 0) kill((pid_t)child_pid, signal_number);
-    if (exec_pid > 0) kill((pid_t)exec_pid, signal_number);
+    if (exec_pid > 0 && kill(-(pid_t)exec_pid, signal_number) != 0 && errno == ESRCH)
+        kill((pid_t)exec_pid, signal_number);
     errno = saved_errno;
 }
 
@@ -47,8 +52,115 @@ static int install_stop_signal_handler(void) {
 static void restore_default_stop_signal(void) {
     struct sigaction action = {.sa_handler = SIG_DFL};
     sigemptyset(&action.sa_mask);
-    sigaction(SIGTERM, &action, NULL);
-    sigaction(SIGPIPE, &action, NULL);
+    const int signals[] = {SIGHUP, SIGINT, SIGQUIT, SIGTERM, SIGPIPE, SIGTSTP, SIGTTIN, SIGTTOU};
+    for (size_t index = 0; index < sizeof(signals) / sizeof(signals[0]); ++index)
+        sigaction(signals[index], &action, NULL);
+}
+
+static int read_exec_control_text(int directory, const char *name, char *contents, size_t capacity) {
+    int descriptor = openat(directory, name, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (descriptor < 0) return errno == ENOENT ? 0 : -1;
+    struct stat info;
+    if (fstat(descriptor, &info) != 0 || !S_ISREG(info.st_mode) || info.st_size <= 0 || (uintmax_t)info.st_size >= capacity) {
+        close(descriptor);
+        errno = EINVAL;
+        return -1;
+    }
+    size_t length = 0;
+    while (length < (size_t)info.st_size) {
+        ssize_t count = read(descriptor, contents + length, (size_t)info.st_size - length);
+        if (count < 0 && errno == EINTR) continue;
+        if (count <= 0) {
+            close(descriptor);
+            errno = EIO;
+            return -1;
+        }
+        length += (size_t)count;
+    }
+    close(descriptor);
+    contents[length] = '\0';
+    if (unlinkat(directory, name, 0) != 0 && errno != ENOENT) return -1;
+    return 1;
+}
+
+static int parse_exec_signal(const char *contents, int *signal_number) {
+    errno = 0;
+    char *end;
+    long value = strtol(contents, &end, 10);
+    if (errno || end == contents || value <= 0 || value >= NSIG) return 0;
+    while (*end == ' ' || *end == '\t' || *end == '\r' || *end == '\n') end++;
+    if (*end || (value != SIGINT && value != SIGTERM && value != SIGHUP && value != SIGQUIT && value != SIGKILL)) return 0;
+    *signal_number = (int)value;
+    return 1;
+}
+
+static int read_exec_resize(int directory, const char *name, int master, unsigned long long *generation) {
+    char contents[128];
+    int present = read_exec_control_text(directory, name, contents, sizeof(contents));
+    if (present <= 0) return present;
+    unsigned long long next_generation;
+    unsigned int rows;
+    unsigned int columns;
+    char trailing;
+    if (sscanf(contents, "%llu %u %u %c", &next_generation, &rows, &columns, &trailing) != 3 ||
+        next_generation <= *generation || rows == 0 || columns == 0 || rows > 4096 || columns > 4096) {
+        errno = EINVAL;
+        return -1;
+    }
+    struct winsize size = {.ws_row = (unsigned short)rows, .ws_col = (unsigned short)columns};
+    if (ioctl(master, TIOCSWINSZ, &size) != 0) return -1;
+    *generation = next_generation;
+    return 1;
+}
+
+static int prepare_exec_devpts(void) {
+    static int mounted;
+    if (mounted) return 0;
+    if (mountpoint("/dev/pts") != 0 ||
+        mount("devpts", "/dev/pts", "devpts", MS_NOSUID | MS_NOEXEC, "newinstance,ptmxmode=0666,mode=620,gid=5") != 0)
+        return fail("mount exec devpts");
+    mounted = 1;
+    return 0;
+}
+
+static int open_exec_pty(const struct winsize *size, int *master, int *slave) {
+    if (prepare_exec_devpts() != 0) return -1;
+    *master = open("/dev/pts/ptmx", O_RDWR | O_NOCTTY | O_CLOEXEC | O_NONBLOCK);
+    if (*master < 0) return fail("open exec terminal");
+    if (grantpt(*master) != 0 || unlockpt(*master) != 0) {
+        close(*master);
+        *master = -1;
+        return fail("prepare exec terminal");
+    }
+    char *path = ptsname(*master);
+    if (!path || (*slave = open(path, O_RDWR | O_NOCTTY | O_CLOEXEC)) < 0) {
+        close(*master);
+        *master = -1;
+        return fail("open exec terminal slave");
+    }
+    if (ioctl(*master, TIOCSWINSZ, size) != 0) {
+        close(*slave);
+        close(*master);
+        *slave = -1;
+        *master = -1;
+        return fail("set exec terminal size");
+    }
+    return 0;
+}
+
+static int drain_exec_pty(int master, int output) {
+    char buffer[8192];
+    for (;;) {
+        ssize_t count = read(master, buffer, sizeof(buffer));
+        if (count > 0) {
+            if (write_all(output, buffer, (size_t)count) != 0) return -1;
+            continue;
+        }
+        if (count == 0 || (count < 0 && errno == EIO)) return 1;
+        if (errno == EINTR) continue;
+        if (errno == EAGAIN || errno == EWOULDBLOCK) return 0;
+        return -1;
+    }
 }
 
 static int decode_status(int status) {
@@ -313,6 +425,10 @@ static int mount_standard_filesystems(void) {
     if (device("/dev/null", 1, 3) != 0 || device("/dev/zero", 1, 5) != 0 ||
         device("/dev/random", 1, 8) != 0 || device("/dev/urandom", 1, 9) != 0 ||
         device("/dev/tty", 5, 0) != 0) return 125;
+    if (mountpoint("/dev/pts") != 0 ||
+        mount("devpts", "/dev/pts", "devpts", MS_NOSUID | MS_NOEXEC, "newinstance,ptmxmode=0666,mode=620,gid=5") != 0)
+        return fail("mount /dev/pts");
+    if (symlink("pts/ptmx", "/dev/ptmx") != 0) return fail("create /dev/ptmx");
     if (mountpoint("/proc") != 0) return 125;
     if (mount("proc", "/proc", "proc", MS_RDONLY | MS_NOSUID | MS_NODEV | MS_NOEXEC, NULL) != 0) return fail("mount /proc");
     return 0;
@@ -425,7 +541,7 @@ static int publish_exec_error(int directory, const char *id, const char *message
     return write_exec_result(directory, id, 125);
 }
 
-static int parse_exec_arguments(char *contents, size_t length, char **command, size_t *count, int *interactive) {
+static int parse_exec_arguments(char *contents, size_t length, char **command, size_t *count, int *interactive, int *tty, struct winsize *terminal_size) {
     const size_t header_v1_length = sizeof(EXEC_REQUEST_HEADER) - 1;
     const size_t header_v2_length = sizeof(EXEC_INTERACTIVE_REQUEST_HEADER) - 1;
     if (length <= header_v1_length || contents[length - 1] != 0) return 0;
@@ -433,10 +549,20 @@ static int parse_exec_arguments(char *contents, size_t length, char **command, s
     if (memcmp(contents, EXEC_REQUEST_HEADER, header_v1_length) == 0) {
         offset = header_v1_length;
         *interactive = 0;
+        *tty = 0;
     } else if (length > header_v2_length + 1 && memcmp(contents, EXEC_INTERACTIVE_REQUEST_HEADER, header_v2_length) == 0 &&
-               contents[header_v2_length] == '1' && contents[header_v2_length + 1] == 0) {
+               contents[header_v2_length + 1] == 0 && (contents[header_v2_length] == '1' || contents[header_v2_length] == '3')) {
         offset = header_v2_length + 2;
         *interactive = 1;
+        *tty = contents[header_v2_length] == '3';
+        if (*tty) {
+            if (length < offset + 5) return 0;
+            terminal_size->ws_row = (unsigned char)contents[offset] | (unsigned short)(unsigned char)contents[offset + 1] << 8;
+            terminal_size->ws_col = (unsigned char)contents[offset + 2] | (unsigned short)(unsigned char)contents[offset + 3] << 8;
+            if (terminal_size->ws_row == 0 || terminal_size->ws_col == 0 ||
+                terminal_size->ws_row > 4096 || terminal_size->ws_col > 4096) return 0;
+            offset += 4;
+        }
     } else {
         return 0;
     }
@@ -454,10 +580,18 @@ static int parse_exec_arguments(char *contents, size_t length, char **command, s
     return 1;
 }
 
-static int run_exec(char *root, char *working_directory, char *user, char **command, int output, int input) {
-    if (dup2(output, STDOUT_FILENO) < 0 || dup2(output, STDERR_FILENO) < 0) return fail("attach exec output");
-    if (input < 0) input = open("/dev/null", O_RDONLY | O_CLOEXEC);
-    if (input < 0 || dup2(input, STDIN_FILENO) < 0) return fail("attach exec input");
+static int run_exec(char *root, char *working_directory, char *user, char **command, int output, int input, int tty_slave) {
+    if (tty_slave >= 0) {
+        if (setsid() < 0 || ioctl(tty_slave, TIOCSCTTY, 0) != 0 || tcsetpgrp(tty_slave, getpid()) != 0)
+            return fail("attach exec terminal");
+        if (dup2(tty_slave, STDIN_FILENO) < 0 || dup2(tty_slave, STDOUT_FILENO) < 0 || dup2(tty_slave, STDERR_FILENO) < 0)
+            return fail("attach exec terminal streams");
+    } else {
+        if (setpgid(0, 0) != 0) return fail("create exec process group");
+        if (dup2(output, STDOUT_FILENO) < 0 || dup2(output, STDERR_FILENO) < 0) return fail("attach exec output");
+        if (input < 0) input = open("/dev/null", O_RDONLY | O_CLOEXEC);
+        if (input < 0 || dup2(input, STDIN_FILENO) < 0) return fail("attach exec input");
+    }
     if (chroot(root) != 0) return fail("chroot exec process");
     if (chdir("/") != 0) return fail("chdir exec root");
 
@@ -531,30 +665,46 @@ static int service_exec_request(int directory, char *root, char *working_directo
     char *command[EXEC_ARGUMENTS_MAX + 1];
     size_t argument_count = 0;
     int interactive = 0;
-    if (!valid || !parse_exec_arguments(contents, length, command, &argument_count, &interactive)) {
+    int tty = 0;
+    struct winsize terminal_size = {0};
+    if (!valid || !parse_exec_arguments(contents, length, command, &argument_count, &interactive, &tty, &terminal_size)) {
         publish_exec_error(directory, id, "rift-exec: invalid exec request\n");
         return 1;
     }
 
     int input_file = -1;
     int input_pipe[2] = {-1, -1};
+    int pty_master = -1;
+    int pty_slave = -1;
     if (interactive) {
         char input_name[64];
         struct stat input_info;
         if (exec_filename(input_name, sizeof(input_name), id, "input") != 0 ||
             (input_file = openat(directory, input_name, O_RDONLY | O_CLOEXEC | O_NOFOLLOW)) < 0 ||
-            fstat(input_file, &input_info) != 0 || !S_ISREG(input_info.st_mode) || pipe2(input_pipe, O_CLOEXEC) != 0) {
+            fstat(input_file, &input_info) != 0 || !S_ISREG(input_info.st_mode)) {
             if (input_file >= 0) close(input_file);
             publish_exec_error(directory, id, "rift-exec: invalid exec input stream\n");
             return 1;
         }
-        const int write_flags = fcntl(input_pipe[1], F_GETFL);
-        if (write_flags < 0 || fcntl(input_pipe[1], F_SETFL, write_flags | O_NONBLOCK) != 0) {
-            close(input_pipe[0]);
-            close(input_pipe[1]);
+        if (tty) {
+            if (open_exec_pty(&terminal_size, &pty_master, &pty_slave) != 0) {
+                close(input_file);
+                publish_exec_error(directory, id, "rift-exec: create exec terminal\n");
+                return 1;
+            }
+        } else if (pipe2(input_pipe, O_CLOEXEC) != 0) {
             close(input_file);
-            publish_exec_error(directory, id, "rift-exec: configure exec input stream\n");
+            publish_exec_error(directory, id, "rift-exec: create exec input stream\n");
             return 1;
+        } else {
+            const int write_flags = fcntl(input_pipe[1], F_GETFL);
+            if (write_flags < 0 || fcntl(input_pipe[1], F_SETFL, write_flags | O_NONBLOCK) != 0) {
+                close(input_pipe[0]);
+                close(input_pipe[1]);
+                close(input_file);
+                publish_exec_error(directory, id, "rift-exec: configure exec input stream\n");
+                return 1;
+            }
         }
     }
 
@@ -563,6 +713,8 @@ static int service_exec_request(int directory, char *root, char *working_directo
         if (input_file >= 0) close(input_file);
         if (input_pipe[0] >= 0) close(input_pipe[0]);
         if (input_pipe[1] >= 0) close(input_pipe[1]);
+        if (pty_master >= 0) close(pty_master);
+        if (pty_slave >= 0) close(pty_slave);
         publish_exec_error(directory, id, "rift-exec: invalid exec output path\n");
         return 1;
     }
@@ -571,9 +723,12 @@ static int service_exec_request(int directory, char *root, char *working_directo
         if (input_file >= 0) close(input_file);
         if (input_pipe[0] >= 0) close(input_pipe[0]);
         if (input_pipe[1] >= 0) close(input_pipe[1]);
+        if (pty_master >= 0) close(pty_master);
+        if (pty_slave >= 0) close(pty_slave);
         write_exec_result(directory, id, 125);
         return 1;
     }
+
     pid_t process = fork();
     if (process < 0) {
         char message[256];
@@ -583,6 +738,8 @@ static int service_exec_request(int directory, char *root, char *working_directo
         if (input_file >= 0) close(input_file);
         if (input_pipe[0] >= 0) close(input_pipe[0]);
         if (input_pipe[1] >= 0) close(input_pipe[1]);
+        if (pty_master >= 0) close(pty_master);
+        if (pty_slave >= 0) close(pty_slave);
         write_exec_result(directory, id, 125);
         return 1;
     }
@@ -591,17 +748,21 @@ static int service_exec_request(int directory, char *root, char *working_directo
         exec_pid = -1;
         pending_signal = 0;
         restore_default_stop_signal();
-        if (interactive) {
-            close(input_file);
+        if (interactive) close(input_file);
+        if (tty) {
+            close(pty_master);
+            close(output);
+        } else if (interactive) {
             close(input_pipe[1]);
         }
-        _exit(run_exec(root, working_directory, user, command, output, interactive ? input_pipe[0] : -1));
+        _exit(run_exec(root, working_directory, user, command, output, interactive && !tty ? input_pipe[0] : -1, tty ? pty_slave : -1));
     }
-
-    close(output);
-    if (interactive) close(input_pipe[0]);
+    if (!interactive) close(output);
+    if (interactive && !tty) close(input_pipe[0]);
+    if (tty) close(pty_slave);
     exec_pid = process;
-    if (pending_signal) kill(process, pending_signal);
+    if (pending_signal && kill(-process, pending_signal) != 0 && errno == ESRCH) kill(process, pending_signal);
+
     int status;
     if (!interactive) {
         while (waitpid(process, &status, 0) < 0) {
@@ -612,83 +773,130 @@ static int service_exec_request(int directory, char *root, char *working_directo
         }
     } else {
         char input_closed_name[64];
-        if (exec_filename(input_closed_name, sizeof(input_closed_name), id, "input-closed") != 0) {
+        char signal_name[64];
+        char resize_name[64];
+        if (exec_filename(input_closed_name, sizeof(input_closed_name), id, "input-closed") != 0 ||
+            exec_filename(signal_name, sizeof(signal_name), id, "signal") != 0 ||
+            exec_filename(resize_name, sizeof(resize_name), id, "resize") != 0) {
             close(input_file);
-            close(input_pipe[1]);
+            if (input_pipe[1] >= 0) close(input_pipe[1]);
+            if (pty_master >= 0) close(pty_master);
+            close(output);
             exec_pid = -1;
             write_exec_result(directory, id, 125);
-            return fail("name exec input state");
+            return fail("name exec control state");
         }
+
         off_t input_offset = 0;
         char input_buffer[8192];
         size_t buffered = 0;
         size_t buffered_offset = 0;
         int input_closed = 0;
+        int tty_eof_sent = 0;
+        unsigned long long resize_generation = 0;
+        int relay_failed = 0;
         for (;;) {
-            if (buffered_offset == buffered && input_pipe[1] >= 0 && !input_closed) {
-                struct stat info;
-                if (fstat(input_file, &info) != 0) {
-                    close(input_file);
-                    close(input_pipe[1]);
-                    exec_pid = -1;
-                    write_exec_result(directory, id, 125);
-                    return fail("read exec input state");
-                }
-                if (info.st_size > input_offset) {
-                    size_t requested = (size_t)((info.st_size - input_offset) < (off_t)sizeof(input_buffer) ? info.st_size - input_offset : (off_t)sizeof(input_buffer));
+            if (buffered_offset == buffered && !input_closed) {
+                struct stat input_info;
+                if (fstat(input_file, &input_info) != 0) {
+                    relay_failed = 1;
+                } else if (input_info.st_size > input_offset) {
+                    size_t requested = (size_t)((input_info.st_size - input_offset) < (off_t)sizeof(input_buffer)
+                        ? input_info.st_size - input_offset : (off_t)sizeof(input_buffer));
                     ssize_t count = pread(input_file, input_buffer, requested, input_offset);
                     if (count > 0) {
                         input_offset += count;
                         buffered = (size_t)count;
                         buffered_offset = 0;
                     } else if (count < 0 && errno != EINTR) {
-                        close(input_file);
-                        close(input_pipe[1]);
-                        exec_pid = -1;
-                        write_exec_result(directory, id, 125);
-                        return fail("read exec input stream");
+                        relay_failed = 1;
                     }
                 } else {
                     struct stat closed_info;
                     if (fstatat(directory, input_closed_name, &closed_info, AT_SYMLINK_NOFOLLOW) == 0) {
                         if (!S_ISREG(closed_info.st_mode)) {
-                            close(input_file);
-                            close(input_pipe[1]);
-                            exec_pid = -1;
-                            write_exec_result(directory, id, 125);
-                            return fail("validate exec input state");
+                            relay_failed = 1;
+                        } else {
+                            input_closed = 1;
+                            if (!tty && input_pipe[1] >= 0) {
+                                close(input_pipe[1]);
+                                input_pipe[1] = -1;
+                            }
                         }
-                        input_closed = 1;
-                        close(input_pipe[1]);
-                        input_pipe[1] = -1;
                     } else if (errno != ENOENT) {
-                        close(input_file);
-                        close(input_pipe[1]);
-                        exec_pid = -1;
-                        write_exec_result(directory, id, 125);
-                        return fail("read exec input state");
+                        relay_failed = 1;
                     }
                 }
             }
-            if (buffered_offset < buffered && input_pipe[1] >= 0) {
-                ssize_t count = write(input_pipe[1], input_buffer + buffered_offset, buffered - buffered_offset);
-                if (count > 0) buffered_offset += (size_t)count;
-                else if (count < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR && errno != EPIPE) {
-                    close(input_file);
-                    close(input_pipe[1]);
-                    exec_pid = -1;
-                    write_exec_result(directory, id, 125);
-                    return fail("forward exec input");
-                } else if (count < 0 && errno == EPIPE) {
-                    close(input_pipe[1]);
-                    input_pipe[1] = -1;
+
+            int input_destination = tty ? pty_master : input_pipe[1];
+            if (buffered_offset < buffered && input_destination >= 0) {
+                ssize_t count = write(input_destination, input_buffer + buffered_offset, buffered - buffered_offset);
+                if (count > 0) {
+                    buffered_offset += (size_t)count;
+                } else if (count < 0 && (errno == EPIPE || (tty && errno == EIO))) {
+                    if (tty) {
+                        close(pty_master);
+                        pty_master = -1;
+                    } else {
+                        close(input_pipe[1]);
+                        input_pipe[1] = -1;
+                    }
+                    input_closed = 1;
+                    buffered_offset = buffered;
+                } else if (count < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
+                    relay_failed = 1;
                 }
             }
+
+            if (tty && input_closed && buffered_offset == buffered && !tty_eof_sent && pty_master >= 0) {
+                const char eof = 4;
+                ssize_t count = write(pty_master, &eof, 1);
+                if (count == 1 || (count < 0 && errno == EIO)) {
+                    tty_eof_sent = 1;
+                } else if (count < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
+                    relay_failed = 1;
+                }
+            }
+            if (tty && pty_master >= 0 && drain_exec_pty(pty_master, output) < 0) relay_failed = 1;
+
+            char control_text[128];
+            int signal_present = read_exec_control_text(directory, signal_name, control_text, sizeof(control_text));
+            if (signal_present < 0) {
+                relay_failed = 1;
+            } else if (signal_present > 0) {
+                int signal_number;
+                if (!parse_exec_signal(control_text, &signal_number)) {
+                    relay_failed = 1;
+                } else if (kill(-process, signal_number) != 0 && errno == ESRCH &&
+                           kill(process, signal_number) != 0 && errno != ESRCH) {
+                    relay_failed = 1;
+                }
+            }
+            if (tty) {
+                int resized = read_exec_resize(directory, resize_name, pty_master, &resize_generation);
+                if (resized < 0) relay_failed = 1;
+            }
+
+            if (relay_failed) {
+                static const char message[] = "rift-exec: interactive relay failed\n";
+                write_all(output, message, sizeof(message) - 1);
+                if (kill(-process, SIGKILL) != 0 && errno == ESRCH) kill(process, SIGKILL);
+                while (waitpid(process, &status, 0) < 0 && errno == EINTR) {}
+                status = 125 << 8;
+                break;
+            }
+
             pid_t finished = waitpid(process, &status, WNOHANG);
-            if (finished == process) break;
+            if (finished == process) {
+                if (tty && pty_master >= 0) drain_exec_pty(pty_master, output);
+                break;
+            }
             if (finished < 0 && errno != EINTR) {
-                close(input_file);
+                if (input_file >= 0) close(input_file);
                 if (input_pipe[1] >= 0) close(input_pipe[1]);
+                if (pty_master >= 0) close(pty_master);
+                close(output);
                 exec_pid = -1;
                 write_exec_result(directory, id, 125);
                 return fail("wait for exec process");
@@ -697,7 +905,10 @@ static int service_exec_request(int directory, char *root, char *working_directo
         }
         close(input_file);
         if (input_pipe[1] >= 0) close(input_pipe[1]);
+        if (pty_master >= 0) close(pty_master);
+        close(output);
     }
+
     exec_pid = -1;
     if (write_exec_result(directory, id, decode_status(status)) != 0) return fail("write exec status");
     return 1;

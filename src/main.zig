@@ -32,7 +32,7 @@ fn printHelp(writer: *Io.Writer) Io.Writer.Error!void {
             "  ps                 List detached containers\n" ++
             "  inspect <id>       Show detached container details\n" ++
             "  logs <id>          Show a detached container's output\n" ++
-            "  exec [-i] <id> <cmd> Run a command in a running container (-i forwards stdin)\n" ++
+            "  exec [-it] <id> <cmd> Run a command in a running container (-i stdin, -t TTY)\n" ++
             "  stop <id>          Stop a detached container\n" ++
             "  kill <id>          Force-kill a detached container\n" ++
             "  rm <id>            Remove a stopped container\n",
@@ -120,11 +120,15 @@ fn dispatch(args: []const []const u8, writer: *Io.Writer, init: ?std.process.Ini
         return 0;
     }
     if (args.len > 0 and std.mem.eql(u8, args[0], "exec")) {
-        var offset: usize = 1;
-        const interactive = offset < args.len and std.mem.eql(u8, args[offset], "-i");
-        if (interactive) offset += 1;
-        if (args.len < offset + 2) return error.InvalidArguments;
-        return containers.exec(init orelse return error.CommandUnavailable, args[offset], args[offset + 1 ..], writer, interactive);
+        const options = try parseExecOptions(args[1..]);
+        return containers.exec(
+            init orelse return error.CommandUnavailable,
+            args[1 + options.id_index],
+            args[2 + options.id_index ..],
+            writer,
+            options.interactive,
+            options.tty,
+        );
     }
     if (args.len > 0 and std.mem.eql(u8, args[0], "stop")) {
         if (args.len != 2) return error.InvalidArguments;
@@ -147,6 +151,30 @@ fn dispatch(args: []const []const u8, writer: *Io.Writer, init: ?std.process.Ini
     }
 
     return error.UnknownCommand;
+}
+
+const ExecOptions = struct { id_index: usize, interactive: bool, tty: bool };
+
+fn parseExecOptions(arguments: []const []const u8) !ExecOptions {
+    var id_index: usize = 0;
+    var interactive = false;
+    var tty = false;
+    while (id_index < arguments.len and arguments[id_index].len > 1 and arguments[id_index][0] == '-') : (id_index += 1) {
+        for (arguments[id_index][1..]) |flag| switch (flag) {
+            'i' => {
+                if (interactive) return error.InvalidArguments;
+                interactive = true;
+            },
+            't' => {
+                if (tty) return error.InvalidArguments;
+                tty = true;
+            },
+            else => return error.InvalidArguments,
+        };
+    }
+    if (tty and !interactive) return error.InvalidArguments;
+    if (arguments.len < id_index + 2) return error.InvalidArguments;
+    return .{ .id_index = id_index, .interactive = interactive, .tty = tty };
 }
 
 fn pullImage(init: std.process.Init, image_name: []const u8, writer: *Io.Writer) !void {
@@ -391,8 +419,23 @@ test "help is available without a command" {
     try std.testing.expect(std.mem.startsWith(u8, output.written(), "Rift — Ridiculously lightweight containers for macOS\n"));
     try std.testing.expect(std.mem.indexOf(u8, output.written(), "kill <id>") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.written(), "inspect <id>") != null);
-    try std.testing.expect(std.mem.indexOf(u8, output.written(), "exec [-i] <id> <cmd>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output.written(), "exec [-it] <id> <cmd>") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.written(), "--rm (foreground only)") != null);
+}
+
+test "exec parses stdin and TTY flags before the container ID" {
+    const combined = try parseExecOptions(&.{ "-it", "0123456789abcdef0123456789abcdef", "/bin/sh" });
+    try std.testing.expectEqual(@as(usize, 1), combined.id_index);
+    try std.testing.expect(combined.interactive);
+    try std.testing.expect(combined.tty);
+
+    const separate = try parseExecOptions(&.{ "-i", "-t", "0123456789abcdef0123456789abcdef", "/bin/sh" });
+    try std.testing.expect(separate.interactive and separate.tty);
+
+    const plain = try parseExecOptions(&.{ "0123456789abcdef0123456789abcdef", "/bin/echo" });
+    try std.testing.expect(!plain.interactive and !plain.tty);
+    try std.testing.expectError(error.InvalidArguments, parseExecOptions(&.{ "-t", "0123456789abcdef0123456789abcdef", "/bin/sh" }));
+    try std.testing.expectError(error.InvalidArguments, parseExecOptions(&.{ "-ii", "0123456789abcdef0123456789abcdef", "/bin/sh" }));
 }
 
 test "version prints the package version" {

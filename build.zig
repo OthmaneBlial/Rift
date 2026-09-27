@@ -50,6 +50,7 @@ pub fn build(b: *std.Build) void {
             .flags = &.{ "-fobjc-arc", "-fblocks" },
         });
         exe.root_module.addCSourceFile(.{ .file = b.path("src/vm/forward.c") });
+        exe.root_module.addCSourceFile(.{ .file = b.path("src/exec_terminal.c") });
         exe.root_module.linkFramework("Foundation", .{});
         exe.root_module.linkFramework("Virtualization", .{});
         exe.root_module.linkSystemLibrary("objc", .{});

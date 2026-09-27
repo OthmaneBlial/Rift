@@ -44,14 +44,14 @@ rift stop "$id"
 rift rm "$id"
 ```
 
-Rift forwards one TCP port per run. Detached containers keep their logs and status until removed. `exec` runs a non-interactive command with the container's environment and working directory, streaming combined stdout and stderr while it runs.
+Rift forwards one TCP port per run. Detached containers keep their logs and status until removed. `exec` runs a non-interactive command by default, streaming combined stdout and stderr; add `-i` to stream stdin or `-it` to attach a terminal.
 
 ## What works
 
 - Pull `linux/arm64` images from Docker Hub, Amazon ECR Public, `registry.k8s.io`, GitHub Container Registry, Quay, and Google GCR. [Registry checks](docs/REGISTRIES.md) list the tested image samples; private Bearer-token support is verified against a local fixture.
 - Run foreground and detached containers with image entrypoint, command, environment, working directory, user, and supplementary groups.
 - Use outbound networking, DNS, one localhost port mapping, and explicit file or directory volumes.
-- Inspect and manage detached containers with `ps`, `inspect`, `logs`, `exec`, `stop`, `kill`, and `rm`.
+- Inspect and manage detached containers with `ps`, `inspect`, `logs`, `exec`, `stop`, `kill`, and `rm`. `exec -i` streams stdin; `exec -it` adds a resizable TTY and forwards SIGINT, SIGTERM, SIGHUP, and SIGQUIT.
 - Check storage with `system df` and preview or remove unused data with `clean`.
 
 For private registries, set `RIFT_REGISTRY_USERNAME` and `RIFT_REGISTRY_PASSWORD` for the pull. Rift does not store them.
@@ -92,7 +92,7 @@ The image and guest files were cached. VM-start timing ends when the guest mount
 - One TCP port mapping per run; up to 16 explicit file or directory volumes.
 - Each pull is capped at 16 GiB of distinct image blobs not already verified in the local cache.
 - Each layer is capped at 8 GiB decompressed; all image layers together are capped at 32 GiB per extraction pass.
-- `rift exec -i` streams stdin to the guest; `exec` does not allocate a TTY or forward host signals yet.
+- `rift exec -i` streams stdin. Use `rift exec -it` from a terminal for a resizable guest TTY; Rift restores host terminal settings when the command ends.
 - Remaining global PAX fields, extended attributes, FIFOs, and special files outside `/dev` are unsupported. Rift preserves tar and PAX `uid`/`gid` ownership in the guest overlay. Image device nodes under `/dev` are ignored because every container gets a fresh restricted `/dev`.
 - No Developer ID signature or notarized download yet. Build from source for now; do not use this preview as a Docker replacement.
 
