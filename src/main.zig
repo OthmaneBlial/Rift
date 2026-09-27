@@ -10,6 +10,7 @@ const storage = @import("storage.zig");
 const registry = @import("oci/registry.zig");
 const runtime = @import("run.zig");
 const containers = @import("containers.zig");
+const disk = @import("disk.zig");
 
 fn printHelp(writer: *Io.Writer) Io.Writer.Error!void {
     try writer.writeAll(
@@ -19,6 +20,7 @@ fn printHelp(writer: *Io.Writer) Io.Writer.Error!void {
             "  help, --help       Show this help\n" ++
             "  version, --version Show version\n" ++
             "  system info        Show host information\n" ++
+            "  system df          Show Rift storage usage\n" ++
             "  images             List locally pulled images\n" ++
             "  pull <image>       Pull an OCI image for this host\n" ++
             "  run [-d] [--rm] [-p HOST:GUEST] <image> [command] [args...] Run a pulled image\n" ++
@@ -47,6 +49,11 @@ fn dispatch(args: []const []const u8, writer: *Io.Writer, init: ?std.process.Ini
             "Rift {s}\nHost OS: {s}\nHost architecture: {s}\n",
             .{ version, @tagName(builtin.os.tag), @tagName(builtin.cpu.arch) },
         );
+        return 0;
+    }
+
+    if (args.len == 2 and std.mem.eql(u8, args[0], "system") and std.mem.eql(u8, args[1], "df")) {
+        try reportDisk(init orelse return error.CommandUnavailable, writer);
         return 0;
     }
 
@@ -152,6 +159,18 @@ fn openImageStore(init: std.process.Init) !storage.BlobStore {
     return storage.BlobStore.init(init.io, data_dir);
 }
 
+fn reportDisk(init: std.process.Init, writer: *Io.Writer) !void {
+    const home = init.environ_map.get("HOME") orelse return error.HomeDirectoryUnavailable;
+    var home_dir = try Io.Dir.openDirAbsolute(init.io, home, .{});
+    defer home_dir.close(init.io);
+    var data_dir = home_dir.openDir(init.io, "Library/Application Support/Rift", .{ .follow_symlinks = false, .iterate = true }) catch |err| switch (err) {
+        error.FileNotFound => return (disk.Report{}).print(writer),
+        else => return err,
+    };
+    defer data_dir.close(init.io);
+    try (try disk.scan(init.io, data_dir)).print(writer);
+}
+
 pub fn main(init: std.process.Init) void {
     const allocator = init.arena.allocator();
     const argv = init.minimal.args.toSlice(allocator) catch {
@@ -250,6 +269,7 @@ test {
     _ = @import("oci/config.zig");
     _ = @import("guest.zig");
     _ = @import("boot_assets.zig");
+    _ = @import("disk.zig");
     _ = @import("containers.zig");
     _ = @import("storage.zig");
 }

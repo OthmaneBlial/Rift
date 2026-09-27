@@ -12,6 +12,7 @@ Rift is an early-stage Zig container runtime for Apple Silicon Macs. It pulls pu
 rift --help
 rift version
 rift system info
+rift system df
 rift pull alpine
 rift images
 rift run --rm alpine echo hello
@@ -23,7 +24,7 @@ rift stop <container-id>
 rift rm <container-id>
 ```
 
-Image pulls use anonymous registry access and save SHA-256-verified OCI blobs and reference metadata under `~/Library/Application Support/Rift`. `run` requires an image pulled earlier, including `nginx` in the example above. It uses the image's `Entrypoint`, `Cmd`, and `Env` defaults, or your command arguments. Each run gets a disposable writable overlay inside its own Linux VM. `-p` accepts one `HOST:GUEST` TCP mapping bound to `127.0.0.1`. `run -d` starts one background Rift process per VM and prints its container ID. `stop` currently forces the VM off; `--rm` is unavailable with `-d`. Images requesting a non-root user or working directory other than `/` are rejected for now. Private registry credentials are not implemented.
+Image pulls use anonymous registry access and save SHA-256-verified OCI blobs and reference metadata under `~/Library/Application Support/Rift`. `system df` reports logical file bytes by category without modifying storage. `run` requires an image pulled earlier, including `nginx` in the example above. It uses the image's `Entrypoint`, `Cmd`, and `Env` defaults, or your command arguments. Each run gets a disposable writable overlay inside its own Linux VM. `-p` accepts one `HOST:GUEST` TCP mapping bound to `127.0.0.1`. `run -d` starts one background Rift process per VM and prints its container ID. `stop` currently forces the VM off; `--rm` is unavailable with `-d`. Images requesting a non-root user or working directory other than `/` are rejected for now. Private registry credentials are not implemented.
 
 ## Build
 
@@ -75,6 +76,7 @@ No Docker Engine, Docker CLI, Docker Desktop, or container daemon is part of the
 - [x] Streaming content-addressed blob storage with SHA-256 and size verification
 - [x] Public OCI pulls with Bearer token auth, platform selection, and verified blob downloads
 - [x] Local image metadata and listing
+- [x] Read-only disk usage report by storage category
 - [x] Local Virtualization.framework bridge and Alpine guest boot check
 - [x] First-run download and verification of pinned guest boot files from the binary
 - [ ] Image removal
