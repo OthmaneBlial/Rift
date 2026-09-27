@@ -95,6 +95,8 @@ This cumulative checklist follows the goals in the original project brief. `[x]`
 - [x] Verify private-registry authentication against a local registry fixture.
 - [x] Provide a reproducible local benchmark script and methodology for cached Alpine startup, CLI startup, host-worker RSS, binary size, and logical store size.
 - [x] Package and check a local release archive.
+- [x] Verify the source-built Alpine and Nginx workflow in a fresh Rift home on this Apple Silicon Mac without Docker, including first guest setup, localhost HTTP, lifecycle, and cache cleanup.
+- [x] Record one fresh-home workflow and one cached benchmark sample with scope and limitations in `docs/BENCHMARKS.md`.
 - [ ] Record end-to-end cold and warm startup, guest boot time, installation footprint, image pull/cache behavior, disk usage, and total host-plus-VM memory.
 - [ ] Repeat the performance measurements across more Macs.
 - [ ] Verify the complete first-use workflow on a clean Apple Silicon Mac without Docker: install, pull Alpine, run a command, serve nginx, and clean up.
