@@ -24,6 +24,8 @@ The intended boundaries are:
 
 The host-facing implementation stays in Zig. The guest agent is also intended to be Zig. Apple framework calls should remain a narrow macOS-only boundary.
 
+Each VM is currently configured for 2 virtual CPUs and 256 MiB of guest RAM. Local Alpine command and detached nginx HTTP checks pass with this setting. It is a fixed limit for now, not a measurement of total host memory used.
+
 ## Planned execution path
 
 `rift pull alpine` resolves the reference, authenticates anonymously to public registries, selects the host's Linux architecture, fetches each required blob, verifies its digest, and publishes verified data into the content-addressed store. `rift images` lists locally recorded references and their platform manifest digests.

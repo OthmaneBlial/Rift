@@ -51,7 +51,8 @@ int rift_vm_run(const char *kernel_path, const char *initramfs_path, const char 
 
         VZVirtualMachineConfiguration *config = [[VZVirtualMachineConfiguration alloc] init];
         config.CPUCount = 2;
-        config.memorySize = 512 * 1024 * 1024;
+        // ponytail: 256 MiB runs the checked Alpine and nginx workflows; add a per-run limit when broader images need it.
+        config.memorySize = 256 * 1024 * 1024;
         config.bootLoader = boot;
         config.platform = [[VZGenericPlatformConfiguration alloc] init];
         config.serialPorts = @[serial];
