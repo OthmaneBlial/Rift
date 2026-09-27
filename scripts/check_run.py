@@ -27,8 +27,9 @@ def main() -> int:
          "RIFT_TMP_MODE_OK"),
         (["run", "alpine", "echo", "two words", "$(touch /tmp/rift-should-not-exist)"], 0,
          "two words $(touch /tmp/rift-should-not-exist)"),
+        # Rift's signal-forwarding supervisor is PID 1; the command is its child.
         (["run", "alpine", "sh", "-c",
-          "test \"$$\" -eq 1 && test -c /dev/null && printf x >/dev/null && "
+          "test \"$$\" -eq 2 && test -c /dev/null && printf x >/dev/null && "
           "test -c /dev/urandom && dd if=/dev/urandom of=/dev/null bs=1 count=1 >/dev/null 2>&1 && "
           "test -d /proc/self && grep -q 'proc /proc proc ro,' /proc/mounts && "
           "grep -q '^NoNewPrivs:[[:space:]]*1$' /proc/self/status && "

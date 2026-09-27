@@ -61,13 +61,6 @@ Apple silicon is the first target. OCI platform selection must be explicit; an `
 
 Boot time, memory, binary size, image storage, and cleanup behavior will be measured before performance claims are published. Local parsing and storage tests cannot prove a real VM boot or container execution. Those need macOS integration runs.
 
-## Milestones
+## Roadmap
 
-1. **Done:** OCI references, indexes, manifests, and platform selection with tests.
-2. **Done:** Streaming content-addressed SHA-256 storage with atomic publication and verification.
-3. Public pulls, anonymous Bearer authentication, optional one-shot private-registry credentials, and local image metadata work. A loopback OCI fixture verifies the private Basic-to-Bearer exchange. Persistent credential storage and provider-specific integration remain open.
-4. Initial secure image layer extraction, regular-file hardlinks, standard tar modification times, image listing, and reference removal work; file ownership, PAX metadata, extended attributes, and special files remain.
-5. A bootable Linux guest and a minimal command result path, proven locally.
-6. Alpine and nginx run through the public CLI; detached lifecycle, inspection, graceful stop, force kill, and plain logs work. Full OCI process settings and broader cleanup remain.
-7. Outbound networking, one localhost TCP port mapping, and explicit read-only and writable file and directory volumes are proven locally. File sources must be on the runtime storage filesystem.
-8. Reproducible runtime benchmarks and signed release distribution.
+Milestones and remaining adoption work live in the [project roadmap](../ROADMAP.md).
