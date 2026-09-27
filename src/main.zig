@@ -91,4 +91,5 @@ test "unfinished commands are not advertised as available" {
 
 test {
     _ = @import("oci/reference.zig");
+    _ = @import("oci/manifest.zig");
 }

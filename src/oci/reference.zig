@@ -24,6 +24,10 @@ pub const Reference = struct {
     }
 };
 
+pub fn isValidDigest(digest: []const u8) bool {
+    return validDigest(digest);
+}
+
 pub fn parse(allocator: std.mem.Allocator, input: []const u8) ParseError!Reference {
     if (input.len == 0) return error.InvalidReference;
 

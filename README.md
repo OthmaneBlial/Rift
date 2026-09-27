@@ -37,7 +37,7 @@ No Docker Engine, Docker CLI, Docker Desktop, or container daemon is part of the
 
 - [x] Zig CLI build, help, version, and host information
 - [x] Apache License 2.0, architecture notes, formatting/build/test CI
-- [x] OCI image reference parser with unit tests
+- [x] OCI references, indexes, manifests, and `linux/arm64` selection with tests
 - [ ] OCI registry access, image verification, and local image storage
 - [ ] Safe layer extraction
 - [ ] Linux VM boot and guest command execution
