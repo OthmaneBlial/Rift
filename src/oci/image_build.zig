@@ -8,8 +8,11 @@ const storage = @import("../storage.zig");
 const dockerfile_limit = 1024 * 1024;
 const build_layer_limit = 8 * 1024 * 1024 * 1024;
 const copy_count_limit = 128;
+const copy_entry_limit = 100_000;
+const copy_path_list_limit = 64 * 1024 * 1024;
+const copy_depth_limit = 128;
 
-pub const Copy = struct { source: []const u8, target: []const u8 };
+pub const Copy = struct { source: []const u8, target: []const u8, target_is_directory: bool };
 
 pub const Plan = struct {
     context_path: []const u8,
@@ -19,9 +22,54 @@ pub const Plan = struct {
 
 pub const Result = struct { digest: []const u8, layer_count: usize };
 
+const DirectoryMetadata = struct { path: []const u8, mode: u16, mtime: Io.Timestamp };
+
+const BuildAccounting = struct {
+    input_bytes: u64 = 0,
+    entry_count: usize = 0,
+    visited_entries: usize = 0,
+    path_list_bytes: usize = 0,
+
+    fn noteVisitedEntry(self: *BuildAccounting) !void {
+        if (self.visited_entries == copy_entry_limit) return error.BuildTooManyEntries;
+        self.visited_entries += 1;
+    }
+
+    fn addPath(self: *BuildAccounting, writer: *Io.Writer, path: []const u8) !void {
+        const bytes = std.math.add(usize, path.len, 1) catch return error.BuildTooManyEntries;
+        if (self.entry_count == copy_entry_limit or bytes > copy_path_list_limit - self.path_list_bytes) return error.BuildTooManyEntries;
+        try writer.writeAll(path);
+        try writer.writeAll("\x00");
+        self.entry_count += 1;
+        self.path_list_bytes += bytes;
+    }
+
+    fn addFileSize(self: *BuildAccounting, size: u64) !void {
+        if (self.input_bytes > build_layer_limit or size > build_layer_limit - self.input_bytes) return error.BuildLayerTooLarge;
+        self.input_bytes += size;
+    }
+};
+
+const SourceParent = struct {
+    dir: Io.Dir,
+    basename: []const u8,
+    owned_dir: ?Io.Dir,
+
+    fn deinit(self: *SourceParent, io: Io) void {
+        if (self.owned_dir) |dir| dir.close(io);
+    }
+};
+
 pub fn readPlan(allocator: std.mem.Allocator, io: Io, context_argument: []const u8) !Plan {
     var context = Io.Dir.cwd().openDir(io, context_argument, .{ .iterate = true }) catch return error.InvalidBuildContext;
     defer context.close(io);
+
+    if (context.statFile(io, ".dockerignore", .{ .follow_symlinks = false })) |_| {
+        return error.UnsupportedDockerIgnore;
+    } else |err| switch (err) {
+        error.FileNotFound => {},
+        else => return error.InvalidBuildContext,
+    }
 
     var path_buffer: [Io.Dir.max_path_bytes]u8 = undefined;
     const path_len = context.realPath(io, &path_buffer) catch return error.InvalidBuildContext;
@@ -71,14 +119,16 @@ pub fn parseDockerfile(allocator: std.mem.Allocator, context_path: []const u8, b
             const target_arg = try nextWord(line, &offset) orelse return error.InvalidDockerfile;
             if (try nextWord(line, &offset) != null) return error.UnsupportedCopyForm;
             const normalized_source = normalizeSource(source_arg);
+            const target_is_directory = target_arg.len > 1 and target_arg[target_arg.len - 1] == '/';
+            const normalized_target = if (target_is_directory) target_arg[0 .. target_arg.len - 1] else target_arg;
             if (!validContextPath(normalized_source)) return error.InvalidBuildSource;
-            if (!validTarget(target_arg)) return error.InvalidBuildTarget;
+            if (!validTarget(normalized_target)) return error.InvalidBuildTarget;
             const source = try allocator.dupe(u8, normalized_source);
-            const target = allocator.dupe(u8, target_arg) catch |err| {
+            const target = allocator.dupe(u8, normalized_target) catch |err| {
                 allocator.free(source);
                 return err;
             };
-            copies.append(allocator, .{ .source = source, .target = target }) catch |err| {
+            copies.append(allocator, .{ .source = source, .target = target, .target_is_directory = target_is_directory }) catch |err| {
                 allocator.free(source);
                 allocator.free(target);
                 return err;
@@ -123,11 +173,21 @@ pub fn build(
     try stage.createDir(io, "layer", .fromMode(0o700));
     var layer_root = try stage.openDir(io, "layer", .{ .iterate = true, .follow_symlinks = false });
     defer layer_root.close(io);
-    var layer_paths: std.ArrayList([]const u8) = .empty;
-    var layer_input_bytes: u64 = 0;
-    for (plan.copies) |copy| {
-        try copyRegularFile(allocator, io, context, layer_root, copy, &layer_paths, &layer_input_bytes);
+    var archive_paths = try stage.createFile(io, "archive-paths.nul", .{ .exclusive = true, .permissions = .fromMode(0o600) });
+    defer archive_paths.close(io);
+    var archive_paths_buffer: [32 * 1024]u8 = undefined;
+    var archive_paths_writer = archive_paths.writerStreaming(io, &archive_paths_buffer);
+    var accounting: BuildAccounting = .{};
+    var directory_metadata: std.ArrayList(DirectoryMetadata) = .empty;
+    defer {
+        for (directory_metadata.items) |entry| allocator.free(entry.path);
+        directory_metadata.deinit(allocator);
     }
+    for (plan.copies) |copy| {
+        try copySource(allocator, io, context, layer_root, copy, &archive_paths_writer.interface, &accounting, &directory_metadata);
+    }
+    try archive_paths_writer.interface.flush();
+    try applyDirectoryMetadata(io, layer_root, directory_metadata.items);
 
     var stage_path_buffer: [Io.Dir.max_path_bytes]u8 = undefined;
     const stage_path = try stage.realPath(io, &stage_path_buffer);
@@ -135,7 +195,9 @@ pub fn build(
     defer allocator.free(layer_path);
     const archive_path = try std.fmt.allocPrint(allocator, "{s}/layer.tar", .{stage_path_buffer[0..stage_path]});
     defer allocator.free(archive_path);
-    try createLayerArchive(allocator, io, archive_path, layer_path, layer_paths.items);
+    const path_list_path = try std.fmt.allocPrint(allocator, "{s}/archive-paths.nul", .{stage_path_buffer[0..stage_path]});
+    defer allocator.free(path_list_path);
+    try createLayerArchive(allocator, io, archive_path, layer_path, path_list_path);
     const archive_info = try stage.statFile(io, "layer.tar", .{ .follow_symlinks = false });
     if (archive_info.kind != .file or archive_info.size > build_layer_limit) return error.BuildLayerTooLarge;
     const layer_digest = try hashFile(allocator, io, stage, "layer.tar", archive_info.size);
@@ -185,27 +247,183 @@ fn stageName(allocator: std.mem.Allocator, io: Io) ![]u8 {
     return std.fmt.allocPrint(allocator, "run-{s}", .{std.fmt.bytesToHex(random, .lower)});
 }
 
-fn copyRegularFile(allocator: std.mem.Allocator, io: Io, context: Io.Dir, layer_root: Io.Dir, copy: Copy, layer_paths: *std.ArrayList([]const u8), layer_input_bytes: *u64) !void {
-    var components = std.mem.splitScalar(u8, copy.source, '/');
+fn openSourceParent(io: Io, context: Io.Dir, path: []const u8) !SourceParent {
+    var components = std.mem.splitScalar(u8, path, '/');
     var current = context;
     var owned_current: ?Io.Dir = null;
-    defer if (owned_current) |dir| dir.close(io);
-    var component = components.next() orelse return error.InvalidBuildSource;
+    const first = components.next() orelse return error.InvalidBuildSource;
+    var basename = first;
     while (components.next()) |next_component| {
-        const next = current.openDir(io, component, .{ .follow_symlinks = false }) catch return error.InvalidBuildSource;
+        const next = current.openDir(io, basename, .{ .follow_symlinks = false }) catch return error.InvalidBuildSource;
         if (owned_current) |previous| previous.close(io);
         owned_current = next;
         current = next;
-        component = next_component;
+        basename = next_component;
     }
-    const source_info = current.statFile(io, component, .{ .follow_symlinks = false }) catch return error.InvalidBuildSource;
+    return .{ .dir = current, .basename = basename, .owned_dir = owned_current };
+}
+
+fn copySource(
+    allocator: std.mem.Allocator,
+    io: Io,
+    context: Io.Dir,
+    layer_root: Io.Dir,
+    copy: Copy,
+    archive_writer: *Io.Writer,
+    accounting: *BuildAccounting,
+    directory_metadata: *std.ArrayList(DirectoryMetadata),
+) !void {
+    var source_parent = try openSourceParent(io, context, copy.source);
+    defer source_parent.deinit(io);
+    const source_info = source_parent.dir.statFile(io, source_parent.basename, .{ .follow_symlinks = false }) catch return error.InvalidBuildSource;
+    const target_relative = copy.target[1..];
+    switch (source_info.kind) {
+        .file => {
+            const file_target = if (copy.target_is_directory)
+                try joinBuildPath(allocator, target_relative, source_parent.basename)
+            else
+                try allocator.dupe(u8, target_relative);
+            defer allocator.free(file_target);
+            try copyRegularFile(io, source_parent.dir, source_parent.basename, source_info, layer_root, file_target, archive_writer, accounting);
+        },
+        .directory => {
+            if (source_info.permissions.toMode() & 0o500 != 0o500) return error.UnsupportedBuildDirectoryPermissions;
+            var source_dir = source_parent.dir.openDir(io, source_parent.basename, .{ .iterate = true, .follow_symlinks = false }) catch return error.InvalidBuildSource;
+            defer source_dir.close(io);
+            const entries_before = accounting.entry_count;
+            try copyDirectoryContents(allocator, io, source_dir, target_relative, layer_root, archive_writer, accounting, directory_metadata, 0);
+            if (accounting.entry_count == entries_before) {
+                try layer_root.createDirPath(io, target_relative);
+                try layer_root.setTimestamps(io, target_relative, .{ .modify_timestamp = .{ .new = source_info.mtime } });
+                try accounting.addPath(archive_writer, target_relative);
+                try recordDirectoryMetadata(allocator, directory_metadata, target_relative, 0o755, source_info.mtime);
+            }
+        },
+        else => return error.InvalidBuildSource,
+    }
+}
+
+fn copyDirectoryContents(
+    allocator: std.mem.Allocator,
+    io: Io,
+    source_dir: Io.Dir,
+    target_prefix: []const u8,
+    layer_root: Io.Dir,
+    archive_writer: *Io.Writer,
+    accounting: *BuildAccounting,
+    directory_metadata: *std.ArrayList(DirectoryMetadata),
+    depth: usize,
+) anyerror!void {
+    if (depth >= copy_depth_limit) return error.BuildTooManyEntries;
+    var names: std.ArrayList([]const u8) = .empty;
+    defer {
+        for (names.items) |name| allocator.free(name);
+        names.deinit(allocator);
+    }
+    var entries = source_dir.iterate();
+    while (try entries.next(io)) |entry| {
+        try accounting.noteVisitedEntry();
+        const name = try allocator.dupe(u8, entry.name);
+        names.append(allocator, name) catch |err| {
+            allocator.free(name);
+            return err;
+        };
+    }
+    std.mem.sort([]const u8, names.items, {}, struct {
+        fn lessThan(_: void, lhs: []const u8, rhs: []const u8) bool {
+            return std.mem.lessThan(u8, lhs, rhs);
+        }
+    }.lessThan);
+    for (names.items) |name| {
+        const source_info = source_dir.statFile(io, name, .{ .follow_symlinks = false }) catch return error.InvalidBuildSource;
+        const target_path = try joinBuildPath(allocator, target_prefix, name);
+        defer allocator.free(target_path);
+        switch (source_info.kind) {
+            .file => try copyRegularFile(io, source_dir, name, source_info, layer_root, target_path, archive_writer, accounting),
+            .directory => {
+                const mode = source_info.permissions.toMode() & 0o777;
+                if (mode & 0o500 != 0o500) return error.UnsupportedBuildDirectoryPermissions;
+                try layer_root.createDirPath(io, target_path);
+                try accounting.addPath(archive_writer, target_path);
+                try recordDirectoryMetadata(allocator, directory_metadata, target_path, mode, source_info.mtime);
+                var child_dir = source_dir.openDir(io, name, .{ .iterate = true, .follow_symlinks = false }) catch return error.InvalidBuildSource;
+                defer child_dir.close(io);
+                try copyDirectoryContents(allocator, io, child_dir, target_path, layer_root, archive_writer, accounting, directory_metadata, depth + 1);
+            },
+            else => return error.InvalidBuildSource,
+        }
+    }
+}
+
+fn joinBuildPath(allocator: std.mem.Allocator, parent: []const u8, child: []const u8) ![]u8 {
+    const path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ parent, child });
+    if (path.len > 4096) {
+        allocator.free(path);
+        return error.InvalidBuildSource;
+    }
+    return path;
+}
+
+fn recordDirectoryMetadata(
+    allocator: std.mem.Allocator,
+    entries: *std.ArrayList(DirectoryMetadata),
+    path: []const u8,
+    mode: u16,
+    mtime: Io.Timestamp,
+) !void {
+    for (entries.items) |*entry| {
+        if (std.mem.eql(u8, entry.path, path)) {
+            entry.mode = mode;
+            entry.mtime = mtime;
+            return;
+        }
+    }
+    const owned_path = try allocator.dupe(u8, path);
+    errdefer allocator.free(owned_path);
+    try entries.append(allocator, .{ .path = owned_path, .mode = mode, .mtime = mtime });
+}
+
+fn applyDirectoryMetadata(io: Io, root: Io.Dir, entries: []DirectoryMetadata) !void {
+    std.mem.sort(DirectoryMetadata, entries, {}, struct {
+        fn lessThan(_: void, lhs: DirectoryMetadata, rhs: DirectoryMetadata) bool {
+            return lhs.path.len > rhs.path.len;
+        }
+    }.lessThan);
+    for (entries) |entry| {
+        const separator = std.mem.lastIndexOfScalar(u8, entry.path, '/');
+        const parent_path = if (separator) |index| entry.path[0..index] else null;
+        const basename_start = if (separator) |index| index + 1 else 0;
+        const basename = entry.path[basename_start..];
+        var parent = if (parent_path) |path|
+            try root.openDir(io, path, .{ .iterate = true, .follow_symlinks = false })
+        else
+            root;
+        defer if (parent_path != null) parent.close(io);
+        var directory = try parent.openDir(io, basename, .{ .iterate = true, .follow_symlinks = false });
+        defer directory.close(io);
+        try directory.setPermissions(io, .fromMode(entry.mode));
+        try parent.setTimestamps(io, basename, .{
+            .follow_symlinks = false,
+            .modify_timestamp = .{ .new = entry.mtime },
+        });
+    }
+}
+
+fn copyRegularFile(
+    io: Io,
+    source_parent: Io.Dir,
+    source_name: []const u8,
+    source_info: Io.File.Stat,
+    layer_root: Io.Dir,
+    target_relative: []const u8,
+    archive_writer: *Io.Writer,
+    accounting: *BuildAccounting,
+) !void {
     if (source_info.kind != .file) return error.InvalidBuildSource;
-    if (layer_input_bytes.* > build_layer_limit or source_info.size > build_layer_limit - layer_input_bytes.*) return error.BuildLayerTooLarge;
-    layer_input_bytes.* += source_info.size;
-    const source = current.openFile(io, component, .{ .mode = .read_only, .allow_directory = false, .follow_symlinks = false }) catch return error.InvalidBuildSource;
+    try accounting.addFileSize(source_info.size);
+    const source = source_parent.openFile(io, source_name, .{ .mode = .read_only, .allow_directory = false, .follow_symlinks = false }) catch return error.InvalidBuildSource;
     defer source.close(io);
 
-    const target_relative = copy.target[1..];
     const separator = std.mem.lastIndexOfScalar(u8, target_relative, '/');
     const parent_path = if (separator) |index| target_relative[0..index] else ".";
     const basename_start = if (separator) |index| index + 1 else 0;
@@ -235,26 +453,27 @@ fn copyRegularFile(allocator: std.mem.Allocator, io: Io, context: Io.Dir, layer_
     try target_writer.interface.flush();
     try atomic.file.setTimestamps(io, .{ .modify_timestamp = .{ .new = source_info.mtime } });
     try atomic.replace(io);
-    try layer_paths.append(allocator, target_relative);
+    try accounting.addPath(archive_writer, target_relative);
 }
 
-fn createLayerArchive(allocator: std.mem.Allocator, io: Io, archive_path: []const u8, layer_path: []const u8, files: []const []const u8) !void {
-    var arguments: std.ArrayList([]const u8) = .empty;
-    try arguments.appendSlice(allocator, &.{
+fn createLayerArchive(allocator: std.mem.Allocator, io: Io, archive_path: []const u8, layer_path: []const u8, path_list_path: []const u8) !void {
+    // macOS bsdtar defaults to restricted PAX, avoiding volatile atime/ctime headers.
+    const arguments = &.{
         "/usr/bin/tar",
         "-c",
-        "--format=pax",
         "--uid=0",
         "--gid=0",
         "-f",
         archive_path,
         "-C",
         layer_path,
-        "--",
-    });
-    try arguments.appendSlice(allocator, files);
+        "--null",
+        "--no-recursion",
+        "-T",
+        path_list_path,
+    };
     const result = std.process.run(allocator, io, .{
-        .argv = arguments.items,
+        .argv = arguments,
         .stdout_limit = .limited(4096),
         .stderr_limit = .limited(16 * 1024),
     }) catch return error.BuildArchiveFailed;
@@ -327,8 +546,10 @@ fn nextWord(line: []const u8, offset: *usize) !?[]const u8 {
 }
 
 fn normalizeSource(source: []const u8) []const u8 {
-    const normalized = if (std.mem.startsWith(u8, source, "./")) source[2..] else source;
-    return normalized;
+    const start: usize = if (std.mem.startsWith(u8, source, "./")) 2 else 0;
+    var end = source.len;
+    while (end > start and source[end - 1] == '/') : (end -= 1) {}
+    return source[start..end];
 }
 
 fn validContextPath(path: []const u8) bool {
@@ -350,7 +571,7 @@ fn validTarget(path: []const u8) bool {
 }
 
 test "parses a single-base Dockerfile with quoted local file copies" {
-    const plan = try parseDockerfile(std.testing.allocator, "/tmp/context", "FROM alpine:3.21\nCOPY 'hello world' /app/hello\n");
+    const plan = try parseDockerfile(std.testing.allocator, "/tmp/context", "FROM alpine:3.21\nCOPY 'hello world' /app/hello\nCOPY folder/ /opt/app/\n");
     defer std.testing.allocator.free(plan.base_reference);
     defer std.testing.allocator.free(plan.context_path);
     defer {
@@ -361,8 +582,12 @@ test "parses a single-base Dockerfile with quoted local file copies" {
         std.testing.allocator.free(plan.copies);
     }
     try std.testing.expectEqualStrings("registry-1.docker.io/library/alpine:3.21", plan.base_reference);
+    try std.testing.expectEqual(@as(usize, 2), plan.copies.len);
     try std.testing.expectEqualStrings("hello world", plan.copies[0].source);
     try std.testing.expectEqualStrings("/app/hello", plan.copies[0].target);
+    try std.testing.expectEqualStrings("folder", plan.copies[1].source);
+    try std.testing.expectEqualStrings("/opt/app", plan.copies[1].target);
+    try std.testing.expect(plan.copies[1].target_is_directory);
 }
 
 test "rejects unsupported instructions, stages, and unsafe paths" {

@@ -46,13 +46,31 @@ rift rm "$id"
 
 Rift forwards one TCP port per run. Detached containers keep their logs and status until removed. `exec` runs a non-interactive command by default, streaming combined stdout and stderr; add `-i` to stream stdin or `-it` to attach a terminal.
 
+## Build an image
+
+In a context containing a `Dockerfile` and `message` file:
+
+```dockerfile
+FROM alpine
+COPY message /tmp/message
+```
+
+Build and run it:
+
+```sh
+rift build -t local/message:dev .
+rift run --rm local/message:dev cat /tmp/message
+```
+
+The base image is pulled automatically when needed. Directory copies are recursive and preserve file modes; a trailing slash on the target copies a file under its source name. The current builder does not execute `RUN` commands.
+
 ## What works
 
 - Pull `linux/arm64` images from Docker Hub, Amazon ECR Public, `registry.k8s.io`, GitHub Container Registry, Quay, and Google GCR. [Registry checks](docs/REGISTRIES.md) list the tested image samples; private Bearer-token support is verified against a local fixture.
 - Run foreground and detached containers with image entrypoint, command, environment, working directory, user, and supplementary groups.
 - Use outbound networking, DNS, one localhost port mapping, and explicit file or directory volumes.
 - Inspect and manage detached containers with `ps`, `inspect`, `logs`, `exec`, `stop`, `kill`, and `rm`. `exec -i` streams stdin; `exec -it` adds a resizable TTY and forwards SIGINT, SIGTERM, SIGHUP, and SIGQUIT.
-- Build OCI images from a Dockerfile with one `FROM` and regular-file `COPY` instructions. This initial builder does not run build commands or support stages, directory copies, or build arguments.
+- Build OCI images from a Dockerfile with one `FROM` and file or directory `COPY` instructions. This initial builder rejects links and special files, and does not run build commands or support stages.
 - Check storage with `system df` and preview or remove unused data with `clean`.
 
 For private registries, set `RIFT_REGISTRY_USERNAME` and `RIFT_REGISTRY_PASSWORD` for the pull. Rift does not store them.
@@ -92,7 +110,7 @@ The image and guest files were cached. Warm `exec` timing includes the host CLI,
 - Zig 0.16 or newer for manual source builds; Homebrew installs the build dependency automatically.
 - One lightweight Linux VM per run; the current guest limit is 2 CPUs and 256 MiB RAM.
 - One TCP port mapping per run; up to 16 explicit file or directory volumes.
-- `rift build` currently supports one base image and local regular-file copies only; `RUN`, multiple stages, directory copies, and other Dockerfile instructions are rejected.
+- `rift build` currently supports one base image and one local source per `COPY`, with absolute targets. It does not process `.dockerignore`, globs, or `COPY` flags; `RUN`, multiple stages, symlinks, special files, and other Dockerfile instructions are rejected.
 - Each pull is capped at 16 GiB of distinct image blobs not already verified in the local cache.
 - Each layer is capped at 8 GiB decompressed; all image layers together are capped at 32 GiB per extraction pass.
 - `rift exec -i` streams stdin. Use `rift exec -it` from a terminal for a resizable guest TTY; Rift restores host terminal settings when the command ends.

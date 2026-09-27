@@ -469,10 +469,13 @@ pub fn main(init: std.process.Init) void {
             error.TooManyVolumes => std.debug.print("rift: at most 16 volumes are supported\n", .{}),
             error.InvalidBuildArguments, error.InvalidBuildTag => std.debug.print("rift: build syntax is 'rift build -t IMAGE [context]'\n", .{}),
             error.InvalidBuildContext => std.debug.print("rift: build context must contain a readable Dockerfile\n", .{}),
+            error.UnsupportedDockerIgnore => std.debug.print("rift: .dockerignore files are not supported by this build preview\n", .{}),
             error.InvalidDockerfile => std.debug.print("rift: invalid Dockerfile; expected FROM and one or more COPY instructions\n", .{}),
-            error.UnsupportedDockerfileInstruction, error.UnsupportedBuildStages, error.UnsupportedCopyForm => std.debug.print("rift: this build preview supports one FROM and regular-file COPY instructions only\n", .{}),
-            error.InvalidBuildSource => std.debug.print("rift: COPY source must be a regular file inside the build context\n", .{}),
-            error.InvalidBuildTarget => std.debug.print("rift: COPY target must be an absolute file path without . or .. components\n", .{}),
+            error.UnsupportedDockerfileInstruction, error.UnsupportedBuildStages, error.UnsupportedCopyForm => std.debug.print("rift: this build preview supports one FROM and file or directory COPY instructions only\n", .{}),
+            error.InvalidBuildSource => std.debug.print("rift: COPY accepts regular files and directories inside the build context; links and special files are unsupported\n", .{}),
+            error.InvalidBuildTarget => std.debug.print("rift: COPY target must be an absolute path without . or .. components\n", .{}),
+            error.UnsupportedBuildDirectoryPermissions => std.debug.print("rift: copied directories must be readable and searchable by their owner\n", .{}),
+            error.BuildTooManyEntries => std.debug.print("rift: build context exceeds the 100,000-entry, 64 MiB path-list, or 128-directory-depth limit\n", .{}),
             error.BuildLayerTooLarge => std.debug.print("rift: built image layer exceeds the 8 GiB limit\n", .{}),
             error.BuildArchiveFailed => std.debug.print("rift: could not create the OCI layer archive\n", .{}),
             error.BuildSourceChanged => std.debug.print("rift: a COPY source changed while it was being read\n", .{}),
@@ -484,7 +487,9 @@ pub fn main(init: std.process.Init) void {
             err == error.InvalidVolumeSpecification or err == error.ReservedVolumeTarget or err == error.DuplicateVolumeTarget or
             err == error.InvalidVolumeSource or err == error.FileVolumeMustShareFilesystem or err == error.FileVolumeCannotContainTarget or err == error.TooManyVolumes or err == error.ExecRequestTooLarge or
             err == error.InvalidBuildArguments or err == error.InvalidBuildTag or err == error.InvalidBuildContext or err == error.InvalidDockerfile or
-            err == error.UnsupportedDockerfileInstruction or err == error.UnsupportedBuildStages or err == error.UnsupportedCopyForm or err == error.InvalidBuildSource or err == error.InvalidBuildTarget) 2 else 1);
+            err == error.UnsupportedDockerIgnore or
+            err == error.UnsupportedDockerfileInstruction or err == error.UnsupportedBuildStages or err == error.UnsupportedCopyForm or err == error.InvalidBuildSource or err == error.InvalidBuildTarget or
+            err == error.UnsupportedBuildDirectoryPermissions or err == error.BuildTooManyEntries) 2 else 1);
     };
     stdout.interface.flush() catch |err| {
         std.debug.print("rift: output failed: {s}\n", .{@errorName(err)});
