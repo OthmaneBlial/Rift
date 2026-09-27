@@ -103,10 +103,12 @@ def main() -> None:
         copy_cache(source, Path(home) / "Library/Application Support/Rift")
         env = dict(os.environ, HOME=home)
         before = total_bytes(binary, env)
+        load_before = os.getloadavg()
         first = timed(binary, env, "run", "alpine", "/bin/true")
         subsequent = [timed(binary, env, "run", "alpine", "/bin/true") for _ in range(args.samples)]
         cli = [timed(binary, env, "version") for _ in range(args.samples)]
         rss = measure_worker(binary, env)
+        load_after = os.getloadavg()
         after = total_bytes(binary, env)
         if after != before:
             raise RuntimeError(f"storage changed after benchmark: {before} -> {after} logical bytes")
@@ -116,6 +118,9 @@ def main() -> None:
             "macos": platform.mac_ver()[0],
             "architecture": platform.machine(),
             "cpu": subprocess.run(["sysctl", "-n", "machdep.cpu.brand_string"], capture_output=True, text=True, check=True).stdout.strip(),
+            "logical_cpus": os.cpu_count(),
+            "load_average_before": [round(value, 2) for value in load_before],
+            "load_average_after": [round(value, 2) for value in load_after],
         },
         "binary_bytes": binary.stat().st_size,
         "store_logical_bytes": before,
