@@ -36,7 +36,7 @@ No Docker Engine, Docker CLI, Docker Desktop, or container daemon is part of the
 ## Status
 
 - [x] Zig CLI build, help, version, and host information
-- [x] Apache License 2.0, architecture notes, formatting/build/test CI
+- [x] Apache License 2.0, architecture notes, local formatting/build/test checks
 - [x] OCI references, indexes, manifests, and `linux/arm64` selection with tests
 - [ ] OCI registry access, image verification, and local image storage
 - [ ] Safe layer extraction
