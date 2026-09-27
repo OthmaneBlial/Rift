@@ -47,11 +47,12 @@ pub const Registry = struct {
         target: manifest.Target,
     ) anyerror!PullResult {
         try validateCredentials(registry.username, registry.password);
+        const scheme = registryScheme(registry.registry);
         const selector = image.digest orelse image.tag.?;
         const root_url = try std.fmt.allocPrint(
             registry.allocator,
-            "https://{s}/v2/{s}/manifests/{s}",
-            .{ registry.registry, registry.repository, selector },
+            "{s}://{s}/v2/{s}/manifests/{s}",
+            .{ scheme, registry.registry, registry.repository, selector },
         );
         var root = try registry.getManifest(root_url);
         defer root.deinit(registry.allocator);
@@ -71,8 +72,8 @@ pub const Registry = struct {
             const descriptor = try manifest.selectPlatform(index, target);
             const child_url = try std.fmt.allocPrint(
                 registry.allocator,
-                "https://{s}/v2/{s}/manifests/{s}",
-                .{ registry.registry, registry.repository, descriptor.digest },
+                "{s}://{s}/v2/{s}/manifests/{s}",
+                .{ scheme, registry.registry, registry.repository, descriptor.digest },
             );
             var child = try registry.getManifest(child_url);
             defer child.deinit(registry.allocator);
@@ -114,7 +115,7 @@ pub const Registry = struct {
 
     fn downloadBlob(registry: *Registry, store: storage.BlobStore, digest: []const u8, size: u64) anyerror!void {
         if (try store.containsVerified(digest, size)) return;
-        const url = try std.fmt.allocPrint(registry.allocator, "https://{s}/v2/{s}/blobs/{s}", .{ registry.registry, registry.repository, digest });
+        const url = try std.fmt.allocPrint(registry.allocator, "{s}://{s}/v2/{s}/blobs/{s}", .{ registryScheme(registry.registry), registry.registry, registry.repository, digest });
         const pending = try registry.openAuthenticated(url, "application/octet-stream");
         defer registry.destroyPending(pending);
         if (pending.response.head.status != .ok) return statusError(pending.response.head.status);
@@ -215,7 +216,7 @@ pub const Registry = struct {
         if (!std.mem.eql(u8, scope, expected_scope)) return error.UnsupportedRegistryAuth;
 
         const realm = try std.Uri.parse(challenge.realm);
-        if (!std.mem.eql(u8, realm.scheme, "https") or realm.host == null or realm.user != null or realm.password != null or realm.fragment != null) {
+        if (!allowedTokenRealm(realm, isLoopbackRegistry(registry.registry))) {
             return error.InsecureTokenRealm;
         }
         const token_url = try buildTokenUrl(registry.allocator, challenge.realm, challenge.service, scope);
@@ -374,6 +375,29 @@ fn buildTokenUrl(allocator: Allocator, realm: []const u8, service: ?[]const u8, 
     return allocator.dupe(u8, output.written());
 }
 
+fn registryScheme(registry: []const u8) []const u8 {
+    return if (isLoopbackRegistry(registry)) "http" else "https";
+}
+
+fn isLoopbackRegistry(registry: []const u8) bool {
+    const host_end = std.mem.indexOfScalar(u8, registry, ':') orelse registry.len;
+    return isLoopbackHost(registry[0..host_end]);
+}
+
+fn isLoopbackHost(host: []const u8) bool {
+    return std.ascii.eqlIgnoreCase(host, "localhost") or std.mem.eql(u8, host, "127.0.0.1");
+}
+
+fn allowedTokenRealm(realm: std.Uri, loopback_registry: bool) bool {
+    if (realm.host == null or realm.user != null or realm.password != null or realm.fragment != null) return false;
+    if (std.mem.eql(u8, realm.scheme, "https")) return true;
+    if (!loopback_registry or !std.mem.eql(u8, realm.scheme, "http")) return false;
+    return switch (realm.host.?) {
+        .raw => |host| isLoopbackHost(host),
+        .percent_encoded => |host| std.mem.indexOfScalar(u8, host, '%') == null and isLoopbackHost(host),
+    };
+}
+
 fn percentEncodeQuery(writer: *Io.Writer, value: []const u8) Io.Writer.Error!void {
     for (value) |byte| {
         if (std.ascii.isAlphanumeric(byte) or byte == '-' or byte == '.' or byte == '_' or byte == '~') {
@@ -464,6 +488,16 @@ test "encodes registry token query values" {
     const url = try buildTokenUrl(std.testing.allocator, "https://auth.example/token", "registry.example", "repository:library/alpine:pull");
     defer std.testing.allocator.free(url);
     try std.testing.expectEqualStrings("https://auth.example/token?service=registry.example&scope=repository%3Alibrary%2Falpine%3Apull", url);
+}
+
+test "allows plain HTTP only for explicit loopback registries and token realms" {
+    try std.testing.expectEqualStrings("http", registryScheme("localhost:5000"));
+    try std.testing.expectEqualStrings("http", registryScheme("127.0.0.1:5000"));
+    try std.testing.expectEqualStrings("https", registryScheme("127.0.0.2:5000"));
+    try std.testing.expect(allowedTokenRealm(try std.Uri.parse("https://auth.example/token"), false));
+    try std.testing.expect(allowedTokenRealm(try std.Uri.parse("http://127.0.0.1:5000/token"), true));
+    try std.testing.expect(!allowedTokenRealm(try std.Uri.parse("http://127.0.0.1:5000/token"), false));
+    try std.testing.expect(!allowedTokenRealm(try std.Uri.parse("http://auth.example/token"), true));
 }
 
 test "validates paired registry credentials and builds Basic authorization" {

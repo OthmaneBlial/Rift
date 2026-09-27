@@ -106,7 +106,13 @@ pub fn build(b: *std.Build) void {
         check_volume.addFileArg(b.path("scripts/check_volume.py"));
         check_volume.addArg(exe_path);
         check_volume.step.dependOn(&sign_exe.step);
-        b.step("run-volume-check", "Check explicit read-only and writable directory volumes").dependOn(&check_volume.step);
+        b.step("run-volume-check", "Check explicit read-only and writable file and directory volumes").dependOn(&check_volume.step);
+
+        const check_registry_auth = b.addSystemCommand(&.{"/usr/bin/python3"});
+        check_registry_auth.addFileArg(b.path("scripts/check_registry_auth.py"));
+        check_registry_auth.addArg(exe_path);
+        check_registry_auth.step.dependOn(&sign_exe.step);
+        b.step("registry-auth-check", "Check a private Bearer-authenticated pull against a local registry fixture").dependOn(&check_registry_auth.step);
 
         const benchmark = b.addSystemCommand(&.{"/usr/bin/python3"});
         benchmark.addFileArg(b.path("scripts/benchmark.py"));
