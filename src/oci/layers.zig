@@ -26,6 +26,46 @@ pub const Ownership = struct {
     gid: u32,
 };
 
+/// Validate a guest-produced uncompressed layer without extracting it to the host filesystem.
+pub fn validateUncompressedTar(allocator: std.mem.Allocator, io: Io, blob: Io.File) !void {
+    var reader_buffer: [32 * 1024]u8 = undefined;
+    var reader = blob.reader(io, &reader_buffer);
+    var image_total: u64 = 0;
+    var name_buffer: [Io.Dir.max_path_bytes]u8 = undefined;
+    var link_buffer: [Io.Dir.max_path_bytes]u8 = undefined;
+    var clean_buffer: [Io.Dir.max_path_bytes]u8 = undefined;
+    var clean_link_buffer: [Io.Dir.max_path_bytes]u8 = undefined;
+    var it = LayerTarIterator.init(allocator, &reader.interface, &image_total, &name_buffer, &link_buffer);
+    var entry_count: usize = 0;
+    var layer_total: u64 = 0;
+    var discard_buffer: [4096]u8 = undefined;
+    var discarding: Io.Writer.Discarding = .init(&discard_buffer);
+    while (true) {
+        @memset(&name_buffer, 0);
+        @memset(&link_buffer, 0);
+        const entry = (try it.next()) orelse break;
+        entry_count += 1;
+        if (entry_count > 1_000_000 or layer_total > max_layer_bytes or entry.size > max_layer_bytes - layer_total) return error.LayerTooLarge;
+        layer_total += entry.size;
+        const path = try cleanPath(entry.name, &clean_buffer);
+        if (path.len == 0 and entry.kind != .directory) return error.UnsafeLayerPath;
+        const name = basename(path);
+        if (std.mem.startsWith(u8, name, ".wh.")) {
+            if (entry.kind != .file or entry.size != 0 or std.mem.eql(u8, name, ".wh.") or
+                std.mem.eql(u8, name[4..], ".") or std.mem.eql(u8, name[4..], "..")) return error.InvalidWhiteout;
+        } else switch (entry.kind) {
+            .sym_link => try checkLink(path, entry.link_name),
+            .hard_link => {
+                const target = try cleanPath(entry.link_name, &clean_link_buffer);
+                if (target.len == 0) return error.InvalidHardlink;
+            },
+            .device => if (entry.size != 0 or !std.mem.startsWith(u8, path, "dev/")) return error.UnsupportedLayerSpecialFile,
+            .directory, .file => {},
+        }
+        try it.streamRemaining(entry, &discarding.writer);
+    }
+}
+
 /// Apply a verified OCI layer to a private, unpublished root directory.
 /// Whiteouts run first so they cannot delete files added by the same layer.
 pub fn apply(
@@ -946,6 +986,7 @@ test "honors local PAX path and size overrides and rejects unsafe overrides" {
     try temp.dir.writeFile(io, .{ .sub_path = "valid-pax.tar", .data = valid_archive.written() });
     const valid_blob = try temp.dir.openFile(io, "valid-pax.tar", .{ .mode = .read_only });
     defer valid_blob.close(io);
+    try validateUncompressedTar(allocator, io, valid_blob);
     try applyOne(allocator, io, root, valid_blob, "application/vnd.oci.image.layer.v1.tar");
 
     const contents = try root.readFileAlloc(io, long_path, allocator, .limited(8));
@@ -973,6 +1014,7 @@ test "honors local PAX path and size overrides and rejects unsafe overrides" {
     const unsafe_link_blob = try temp.dir.openFile(io, "unsafe-link.tar", .{ .mode = .read_only });
     defer unsafe_link_blob.close(io);
     try std.testing.expectError(error.UnsafeLayerLink, applyOne(allocator, io, root, unsafe_link_blob, "application/vnd.oci.image.layer.v1.tar"));
+    try std.testing.expectError(error.UnsafeLayerLink, validateUncompressedTar(allocator, io, unsafe_link_blob));
 }
 
 test "honors local and global PAX modification times" {

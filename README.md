@@ -56,6 +56,7 @@ ENV MESSAGE="built image"
 WORKDIR /tmp/rift-app
 USER 65534
 COPY message /tmp/rift-app/message
+RUN test "$(cat message)" = "built image"
 ENTRYPOINT ["/bin/sh", "-c"]
 CMD ["printf '%s: ' \"$MESSAGE\"; cat message"]
 ```
@@ -67,7 +68,7 @@ rift build -t local/message:dev .
 rift run --rm local/message:dev
 ```
 
-The base image is pulled automatically when needed. Directory copies are recursive and preserve file modes. The builder applies `ENV`, `USER`, `WORKDIR`, `ENTRYPOINT`, and `CMD`; `ENV` uses literal `NAME=value` assignments, and `WORKDIR` must be absolute. Rift creates a missing working directory in the disposable container overlay when it starts. It does not execute `RUN` commands.
+The base image is pulled automatically when needed. Directory copies are recursive and preserve file modes. The builder executes each shell-form or JSON-array `RUN` in a temporary Linux VM against the image state built so far. It applies `ENV`, `USER`, `WORKDIR`, `ENTRYPOINT`, and `CMD`; `ENV` uses literal `NAME=value` assignments, and `WORKDIR` must be absolute. Rift creates a missing working directory in the disposable container overlay when it starts.
 
 ## What works
 
@@ -75,7 +76,7 @@ The base image is pulled automatically when needed. Directory copies are recursi
 - Run foreground and detached containers with image entrypoint, command, environment, working directory, user, and supplementary groups.
 - Use outbound networking, DNS, one localhost port mapping, and explicit file or directory volumes.
 - Inspect and manage detached containers with `ps`, `inspect`, `logs`, `exec`, `stop`, `kill`, and `rm`. `exec -i` streams stdin; `exec -it` adds a resizable TTY and forwards SIGINT, SIGTERM, SIGHUP, and SIGQUIT.
-- Build OCI images from one `FROM`, file or directory `COPY`, and the `ENV`, `USER`, `WORKDIR`, `ENTRYPOINT`, and `CMD` process settings. This initial builder rejects links and special files, and does not run build commands or support stages.
+- Build OCI images from one `FROM`, file or directory `COPY`, ordered single-line `RUN`, and the `ENV`, `USER`, `WORKDIR`, `ENTRYPOINT`, and `CMD` process settings. Each successful `RUN` squashes the prior filesystem into one layer. Multiple stages, `.dockerignore`, links, and special files remain unsupported.
 - Check storage with `system df` and preview or remove unused data with `clean`.
 
 For private registries, set `RIFT_REGISTRY_USERNAME` and `RIFT_REGISTRY_PASSWORD` for the pull. Rift does not store them.
@@ -115,7 +116,7 @@ The image and guest files were cached. Warm `exec` timing includes the host CLI,
 - Zig 0.16 or newer for manual source builds; Homebrew installs the build dependency automatically.
 - One lightweight Linux VM per run; the current guest limit is 2 CPUs and 256 MiB RAM.
 - One TCP port mapping per run; up to 16 explicit file or directory volumes.
-- `rift build` currently supports one base image, one local source per `COPY`, and `ENV`, `USER`, `WORKDIR`, `ENTRYPOINT`, and `CMD`. `ENV` values are literal and `WORKDIR` must be absolute. Targets must be absolute. It does not process `.dockerignore`, globs, or `COPY` flags; `RUN`, multiple stages, symlinks, special files, and other Dockerfile instructions are rejected.
+- `rift build` supports one base image, one local source per `COPY`, single-line shell or JSON-array `RUN`, and `ENV`, `USER`, `WORKDIR`, `ENTRYPOINT`, and `CMD`. Each `RUN` boots a temporary Linux VM, applies the preceding image state, and stores the successful result as a squashed OCI layer; failed commands stop the build without recording its tag. Each build VM has 256 MiB RAM and a 256 MiB writable overlay. `ENV` values are literal and `WORKDIR` must be absolute. Targets must be absolute. Multiple stages, `.dockerignore`, globs, `COPY` flags, symlinks, special files, line continuations, and other Dockerfile instructions are unsupported.
 - Each pull is capped at 16 GiB of distinct image blobs not already verified in the local cache.
 - Each layer is capped at 8 GiB decompressed; all image layers together are capped at 32 GiB per extraction pass.
 - `rift exec -i` streams stdin. Use `rift exec -it` from a terminal for a resizable guest TTY; Rift restores host terminal settings when the command ends.

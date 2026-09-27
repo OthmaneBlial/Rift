@@ -99,7 +99,7 @@ pub fn execute(init: std.process.Init, arguments: []const []const u8, stop_path:
     cache_locked = false;
     const interactive = try Io.File.stdin().isTty(init.io);
     const measure_guest_boot = if (init.environ_map.get("RIFT_BENCHMARK_GUEST_BOOT")) |value| std.mem.eql(u8, value, "1") else false;
-    try guest.writeInitramfs(allocator, init.io, base_initramfs, run_dir, command, environment, working_dir, process.User orelse "", staged_volumes, interactive, port != null, measure_guest_boot);
+    try guest.writeInitramfs(allocator, init.io, base_initramfs, run_dir, command, environment, working_dir, process.User orelse "", staged_volumes, interactive, port != null, measure_guest_boot, false);
 
     var root_path_buffer: [Io.Dir.max_path_bytes]u8 = undefined;
     var control_path_buffer: [Io.Dir.max_path_bytes]u8 = undefined;

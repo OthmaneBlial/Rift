@@ -59,7 +59,8 @@ This roadmap carries the original plan forward from the first project commit. `[
 - [x] Add interactive `exec` with stdin, TTY allocation, resize forwarding, and signal cancellation.
 - [x] Build and run an OCI image from one `FROM` and local file or directory `COPY` instructions.
 - [x] Apply `ENV`, `USER`, `WORKDIR`, `ENTRYPOINT`, and `CMD` to built image configuration; create a missing configured working directory in the disposable run overlay at launch.
-- [ ] Execute Dockerfile `RUN` commands against preceding image state and support multiple build stages.
+- [x] Execute single-stage Dockerfile `RUN` commands in order against preceding image state; fail builds when a command exits nonzero.
+- [ ] Support multiple Dockerfile build stages.
 - [ ] Implement broader OCI process and resource settings.
 - [x] Review help and error messages across supported commands for clear, predictable use.
 - [ ] Add structured log output.

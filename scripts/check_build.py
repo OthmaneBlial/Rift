@@ -60,6 +60,9 @@ def main() -> int:
 ENV RIFT_BUILD_MESSAGE="hello world"
 USER 65534
 WORKDIR /tmp
+RUN test "$RIFT_BUILD_MESSAGE" = "hello world"
+RUN test "$(id -u)" = "65534"
+RUN test "$PWD" = "/tmp"
 WORKDIR /tmp/rift-build-work/
 ENTRYPOINT ["/bin/sh", "-c"]
 CMD ["printf '%s|%s|%s|%s\\n' \"$RIFT_BUILD_MESSAGE\" \"$(pwd)\" \"$(id -u)\" \"$(/bin/stat -c %a /tmp)\""]
@@ -72,14 +75,42 @@ CMD ["printf '%s|%s|%s|%s\\n' \"$RIFT_BUILD_MESSAGE\" \"$(pwd)\" \"$(id -u)\" \"
         if config_run.returncode != 0 or config_run.stdout != "hello world|/tmp/rift-build-work|65534|1777\n":
             raise RuntimeError(f"built image process configuration was not applied: {config_run!r}")
 
+        run_context = Path(home) / "run-context"
+        run_context.mkdir()
+        (run_context / "Dockerfile").write_text(
+            "FROM alpine\nCOPY first /tmp/first\nRUN cat /tmp/first > /tmp/combined && rm /tmp/first\n"
+            "COPY second /tmp/second\nRUN test ! -e /tmp/first && cat /tmp/second >> /tmp/combined\n"
+        )
+        (run_context / "first").write_text("RIFT_RUN_FIRST|")
+        (run_context / "second").write_text("RIFT_RUN_SECOND\n")
+        run_build = call(binary, env, "build", "-t", "rift-build-run:local", str(run_context))
+        if run_build.returncode != 0 or "Built " not in run_build.stdout:
+            raise RuntimeError(f"Dockerfile COPY/RUN sequence failed: {run_build!r}")
+        run_output = call(binary, env, "run", "--rm", "rift-build-run:local", "/bin/cat", "/tmp/combined")
+        if run_output.returncode != 0 or run_output.stdout != "RIFT_RUN_FIRST|RIFT_RUN_SECOND\n":
+            raise RuntimeError(f"Dockerfile RUN output was not preserved in the image: {run_output!r}")
+        owners = call(binary, env, "run", "--rm", "rift-build-run:local", "/bin/stat", "-c", "%u", "/bin/busybox", "/tmp/combined")
+        if owners.returncode != 0 or owners.stdout != "0\n0\n":
+            raise RuntimeError(f"RUN snapshot did not preserve root ownership: {owners!r}")
+
+        failing_context = Path(home) / "failing-context"
+        failing_context.mkdir()
+        (failing_context / "Dockerfile").write_text("FROM alpine\nRUN false\n")
+        failed_run = call(binary, env, "build", "-t", "rift-build-failed-run:local", str(failing_context))
+        if failed_run.returncode == 0 or "Dockerfile RUN command failed" not in failed_run.stderr:
+            raise RuntimeError(f"failed RUN command did not fail the build: {failed_run!r}")
+
         listed = call(binary, env, "images")
         if (
             listed.returncode != 0
             or "rift-build-check:local" not in listed.stdout
             or "rift-build-repeat:local" not in listed.stdout
             or "rift-build-config:local" not in listed.stdout
+            or "rift-build-run:local" not in listed.stdout
         ):
             raise RuntimeError(f"built image was not recorded: {listed!r}")
+        if "rift-build-failed-run:local" in listed.stdout:
+            raise RuntimeError("failed RUN command published an image reference")
         run = call(
             binary,
             env,
@@ -102,13 +133,6 @@ CMD ["printf '%s|%s|%s|%s\\n' \"$RIFT_BUILD_MESSAGE\" \"$(pwd)\" \"$(id -u)\" \"
         directory_mtime = call(binary, env, "run", "--rm", "rift-build-check:local", "/bin/stat", "-c", "%Y", "/opt/rift-assets/deep dir")
         if directory_mtime.returncode != 0 or directory_mtime.stdout.strip() != str(nested_mtime):
             raise RuntimeError(f"directory COPY did not preserve nested directory mtime: {directory_mtime!r}")
-
-        invalid_context = Path(home) / "invalid-context"
-        invalid_context.mkdir()
-        (invalid_context / "Dockerfile").write_text("FROM alpine\nRUN false\n")
-        rejected = call(binary, env, "build", "-t", "rift-build-rejected:local", str(invalid_context))
-        if rejected.returncode == 0 or "supported build instructions are one FROM" not in rejected.stderr:
-            raise RuntimeError(f"unsupported Dockerfile instruction was not clearly rejected: {rejected!r}")
 
         ignore_context = Path(home) / "ignore-context"
         ignore_context.mkdir()
@@ -134,7 +158,7 @@ CMD ["printf '%s|%s|%s|%s\\n' \"$RIFT_BUILD_MESSAGE\" \"$(pwd)\" \"$(id -u)\" \"
         listed = call(binary, env, "images")
         if (
             listed.returncode != 0
-            or "rift-build-rejected:local" in listed.stdout
+            or "rift-build-failed-run:local" in listed.stdout
             or "rift-build-ignore-rejected:local" in listed.stdout
             or "rift-build-link-rejected:local" in listed.stdout
         ):
@@ -149,11 +173,14 @@ CMD ["printf '%s|%s|%s|%s\\n' \"$RIFT_BUILD_MESSAGE\" \"$(pwd)\" \"$(id -u)\" \"
         removed_config = call(binary, env, "rmi", "rift-build-config:local")
         if removed_config.returncode != 0:
             raise RuntimeError(f"configured image cleanup failed: {removed_config!r}")
+        removed_run = call(binary, env, "rmi", "rift-build-run:local")
+        if removed_run.returncode != 0:
+            raise RuntimeError(f"RUN image cleanup failed: {removed_run!r}")
         runtime = data / "runtime"
         if runtime.exists() and any(runtime.iterdir()):
             raise RuntimeError("image build or run left runtime staging behind")
 
-    print("Rift build check passed: reproducible OCI layers, COPY and process config, VM execution, safe rejection, and cleanup")
+    print("Rift build check passed: reproducible COPY layers, ordered Dockerfile RUN execution, process config, failure handling, VM execution, and cleanup")
     return 0
 
 
