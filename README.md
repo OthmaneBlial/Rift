@@ -56,7 +56,8 @@ No Docker Engine, Docker CLI, Docker Desktop, or container daemon is part of the
 - [x] Local image metadata and listing
 - [x] Local Virtualization.framework bridge and Alpine guest boot check
 - [ ] Image removal
-- [ ] Safe layer extraction
+- [x] Initial safe extraction of tar, gzip, and zstd layers, including OCI whiteouts
+- [ ] Hardlinks and complete OCI filesystem metadata
 - [ ] OCI command execution through Rift's public CLI
 - [ ] Container lifecycle, logs, networking, and cleanup
 

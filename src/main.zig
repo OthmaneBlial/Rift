@@ -184,5 +184,6 @@ test {
     _ = @import("oci/reference.zig");
     _ = @import("oci/manifest.zig");
     _ = @import("oci/registry.zig");
+    _ = @import("oci/layers.zig");
     _ = @import("storage.zig");
 }
