@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check the detached Rift process, logs, stop, and removal locally."""
+"""Check detached inspection, logs, lifecycle commands, and cleanup locally."""
 
 import re
 import subprocess
@@ -41,7 +41,14 @@ def main() -> int:
         while time.monotonic() < deadline:
             listed = call(rift, "ps")
             logged = call(rift, "logs", identifier)
-            if listed.returncode == 0 and f"{identifier}  alpine  running" in listed.stdout and "RIFT_DETACHED_OK" in logged.stdout:
+            inspected = call(rift, "inspect", identifier)
+            if (
+                listed.returncode == 0
+                and f"{identifier}  alpine  running" in listed.stdout
+                and "RIFT_DETACHED_OK" in logged.stdout
+                and inspected.returncode == 0
+                and f"Container ID: {identifier}\nImage: alpine\nState: running\n" in inspected.stdout
+            ):
                 break
             time.sleep(0.2)
         else:
@@ -59,6 +66,9 @@ def main() -> int:
         listed = call(rift, "ps")
         if f"{identifier}  alpine  stopped" not in listed.stdout:
             raise RuntimeError(f"stopped container missing from ps: {listed!r}")
+        inspected = call(rift, "inspect", identifier)
+        if inspected.returncode != 0 or "State: stopped" not in inspected.stdout:
+            raise RuntimeError(f"inspect missed the stopped state: {inspected!r}")
         removed = call(rift, "rm", identifier)
         if removed.returncode != 0 or f"Removed {identifier}" not in removed.stdout:
             raise RuntimeError(f"rm failed: {removed!r}")
@@ -82,6 +92,9 @@ def main() -> int:
         forced_listed = call(rift, "ps")
         if f"{forced_id}  alpine  stopped" not in forced_listed.stdout:
             raise RuntimeError(f"forced container missing from ps: {forced_listed!r}")
+        inspected = call(rift, "inspect", forced_id)
+        if inspected.returncode != 0 or "State: stopped" not in inspected.stdout:
+            raise RuntimeError(f"inspect missed the forced-stop state: {inspected!r}")
         forced_removed = call(rift, "rm", forced_id)
         if forced_removed.returncode != 0:
             raise RuntimeError(f"forced container state was not removed: {forced_removed!r}")
@@ -105,13 +118,16 @@ def main() -> int:
         killed_listed = call(rift, "ps")
         if f"{killed_id}  alpine  killed" not in killed_listed.stdout:
             raise RuntimeError(f"killed container missing from ps: {killed_listed!r}")
+        inspected = call(rift, "inspect", killed_id)
+        if inspected.returncode != 0 or "State: killed" not in inspected.stdout:
+            raise RuntimeError(f"inspect missed the killed state: {inspected!r}")
         killed_removed = call(rift, "rm", killed_id)
         if killed_removed.returncode != 0:
             raise RuntimeError(f"killed container state was not removed: {killed_removed!r}")
         after = set(runtime.iterdir()) if runtime.exists() else set()
         if after != before:
             raise RuntimeError(f"temporary state remains: {after - before}")
-        print("Rift detached check passed: process, logs, graceful stop, forced stop, kill, removal, cleanup")
+        print("Rift detached check passed: process, inspect, logs, graceful stop, forced stop, kill, removal, cleanup")
         return 0
     except Exception as error:
         print(f"Rift detached check failed: {error}", file=sys.stderr)

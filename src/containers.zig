@@ -108,6 +108,14 @@ pub fn list(init: std.process.Init, writer: *Io.Writer) !void {
     }
 }
 
+pub fn inspect(init: std.process.Init, id: []const u8, writer: *Io.Writer) !void {
+    var state = try openState(init, id);
+    defer state.close(init.io);
+    const image = try state.readFileAlloc(init.io, "image", init.arena.allocator(), .limited(768));
+    const status = try statusText(init, state);
+    try writeInspection(writer, id, image, status);
+}
+
 pub fn logs(init: std.process.Init, id: []const u8, writer: *Io.Writer) !void {
     var state = try openState(init, id);
     defer state.close(init.io);
@@ -214,8 +222,22 @@ fn validId(id: []const u8) bool {
     return true;
 }
 
+fn writeInspection(writer: *Io.Writer, id: []const u8, image: []const u8, status: []const u8) !void {
+    try writer.print("Container ID: {s}\nImage: {s}\nState: {s}\n", .{ id, image, status });
+}
+
 test "container IDs stay within their state directory" {
     try std.testing.expect(validId("0123456789abcdef0123456789abcdef"));
     try std.testing.expect(!validId("../other"));
     try std.testing.expect(!validId("0123456789abcdef0123456789abcdeg"));
+}
+
+test "inspection prints the container lifecycle fields" {
+    var output: Io.Writer.Allocating = .init(std.testing.allocator);
+    defer output.deinit();
+    try writeInspection(&output.writer, "0123456789abcdef0123456789abcdef", "alpine", "exited 37");
+    try std.testing.expectEqualStrings(
+        "Container ID: 0123456789abcdef0123456789abcdef\nImage: alpine\nState: exited 37\n",
+        output.written(),
+    );
 }

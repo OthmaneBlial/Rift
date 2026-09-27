@@ -27,6 +27,7 @@ fn printHelp(writer: *Io.Writer) Io.Writer.Error!void {
             "  rmi <image>        Remove a local image reference\n" ++
             "  run [-d] [--rm] [-p HOST:GUEST] [-w DIR] [-e KEY=VALUE] [-v HOST:TARGET[:ro|rw]] <image> [command] [args...] Run an image\n" ++
             "  ps                 List detached containers\n" ++
+            "  inspect <id>       Show detached container details\n" ++
             "  logs <id>          Show a detached container's output\n" ++
             "  stop <id>          Stop a detached container\n" ++
             "  kill <id>          Force-kill a detached container\n" ++
@@ -98,6 +99,11 @@ fn dispatch(args: []const []const u8, writer: *Io.Writer, init: ?std.process.Ini
 
     if (args.len == 1 and std.mem.eql(u8, args[0], "ps")) {
         try containers.list(init orelse return error.CommandUnavailable, writer);
+        return 0;
+    }
+    if (args.len > 0 and std.mem.eql(u8, args[0], "inspect")) {
+        if (args.len != 2) return error.InvalidArguments;
+        try containers.inspect(init orelse return error.CommandUnavailable, args[1], writer);
         return 0;
     }
     if (args.len == 2 and std.mem.eql(u8, args[0], "logs")) {
@@ -353,6 +359,7 @@ test "help is available without a command" {
     _ = try dispatch(&.{}, &output.writer, null);
     try std.testing.expect(std.mem.startsWith(u8, output.written(), "Rift — Ridiculously lightweight containers for macOS\n"));
     try std.testing.expect(std.mem.indexOf(u8, output.written(), "kill <id>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output.written(), "inspect <id>") != null);
 }
 
 test "version prints the package version" {
@@ -374,6 +381,12 @@ test "unfinished commands are not advertised as available" {
     var output: Io.Writer.Allocating = .init(std.testing.allocator);
     defer output.deinit();
     try std.testing.expectError(error.CommandUnavailable, dispatch(&.{"run"}, &output.writer, null));
+}
+
+test "inspect requires a container ID" {
+    var output: Io.Writer.Allocating = .init(std.testing.allocator);
+    defer output.deinit();
+    try std.testing.expectError(error.InvalidArguments, dispatch(&.{"inspect"}, &output.writer, null));
 }
 
 test {

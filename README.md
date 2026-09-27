@@ -28,6 +28,7 @@ rift run -v "$PWD:/workspace" alpine ls /workspace
 rift pull nginx
 rift run -d -p 8080:80 nginx
 rift ps
+rift inspect <container-id>
 rift logs <container-id>
 rift stop <container-id>
 rift rm <container-id>
@@ -133,7 +134,7 @@ No Docker Engine, Docker CLI, Docker Desktop, or container daemon is part of the
 - [ ] Broader OCI process settings and isolation
 - [x] Outbound NAT and DNS for foreground commands
 - [x] One localhost TCP port mapping for foreground commands
-- [x] Detached run, process listing, plain logs, graceful stop, force kill, and remove
+- [x] Detached run, process listing and inspection, plain logs, graceful stop, force kill, and remove
 - [x] Explicit read-only and writable directory volumes
 - [x] Explicit read-only and writable file volumes
 - [x] Preview and confirmed cleanup of abandoned runtime staging
