@@ -72,7 +72,7 @@ Host environment variables are not copied into containers. Volumes are read-only
 
 ## Requirements and limits
 
-- macOS on Apple Silicon.
+- macOS 12 or newer on Apple Silicon.
 - Zig 0.16 or newer to build from source.
 - One lightweight Linux VM per run; the current guest limit is 2 CPUs and 256 MiB RAM.
 - One TCP port mapping per run; up to 16 explicit file or directory volumes.

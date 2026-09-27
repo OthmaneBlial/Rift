@@ -8,6 +8,7 @@ This roadmap carries the original plan forward from the first project commit. `[
 - [x] Choose Zig, Apache-2.0, Apple Silicon macOS, and a Docker-free user experience.
 - [x] Add the complete license, `.gitignore`, source-build instructions, and local project checks.
 - [x] Build the host CLI in Zig with `--help`, `version`, and `system info`.
+- [x] Set the default Apple Silicon deployment target to macOS 12.0, the minimum required by the directory-sharing APIs.
 - [x] Document the architecture, security boundaries, supported behavior, and limitations.
 - [x] Keep local checks in `scripts/check-local.sh`; leave GitHub Actions disabled as requested.
 - [x] Write the README with working setup steps, examples, status, and limitations.
@@ -92,6 +93,7 @@ This roadmap carries the original plan forward from the first project commit. `[
 - [ ] Complete an adversarial review of host/guest isolation assumptions.
 - [ ] Measure cold and warm startup, guest boot time, install footprint, image pull/cache behavior, disk usage, and total host-plus-VM memory.
 - [ ] Repeat performance measurements across more Macs.
+- [ ] Run the full runtime workflow on macOS 12 to verify the oldest declared host version.
 - [ ] Verify the full install-to-clean workflow on a clean Apple Silicon Mac without Docker.
 - [ ] Measure host/guest communication where it affects startup or runtime cost.
 

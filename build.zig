@@ -1,7 +1,13 @@
 const std = @import("std");
 
 pub fn build(b: *std.Build) void {
-    const target = b.standardTargetOptions(.{});
+    const target = b.standardTargetOptions(.{
+        .default_target = .{
+            .cpu_arch = .aarch64,
+            .os_tag = .macos,
+            .os_version_min = .{ .semver = .{ .major = 12, .minor = 0, .patch = 0 } },
+        },
+    });
     const optimize = b.standardOptimizeOption(.{});
     const guest_target = b.resolveTargetQuery(.{ .cpu_arch = .aarch64, .os_tag = .linux, .abi = .musl });
     const guest_exec = b.addExecutable(.{
@@ -33,6 +39,10 @@ pub fn build(b: *std.Build) void {
     b.step("test", "Run tests").dependOn(&b.addRunArtifact(tests).step);
 
     if (target.result.os.tag == .macos and target.result.cpu.arch == .aarch64) {
+        const sdk_path = std.mem.trimEnd(u8, b.run(&.{ "xcrun", "--sdk", "macosx", "--show-sdk-path" }), "\r\n");
+        exe.root_module.addSystemIncludePath(.{ .cwd_relative = b.pathJoin(&.{ sdk_path, "usr", "include" }) });
+        exe.root_module.addLibraryPath(.{ .cwd_relative = b.pathJoin(&.{ sdk_path, "usr", "lib" }) });
+        exe.root_module.addSystemFrameworkPath(.{ .cwd_relative = b.pathJoin(&.{ sdk_path, "System", "Library", "Frameworks" }) });
         exe.root_module.link_libc = true;
         exe.root_module.addCSourceFile(.{
             .file = b.path("src/vm/bridge.m"),
@@ -135,6 +145,9 @@ pub fn build(b: *std.Build) void {
                 .link_libc = true,
             }),
         });
+        probe.root_module.addSystemIncludePath(.{ .cwd_relative = b.pathJoin(&.{ sdk_path, "usr", "include" }) });
+        probe.root_module.addLibraryPath(.{ .cwd_relative = b.pathJoin(&.{ sdk_path, "usr", "lib" }) });
+        probe.root_module.addSystemFrameworkPath(.{ .cwd_relative = b.pathJoin(&.{ sdk_path, "System", "Library", "Frameworks" }) });
         probe.root_module.addCSourceFile(.{
             .file = b.path("src/vm/bridge.m"),
             .language = .objective_c,
