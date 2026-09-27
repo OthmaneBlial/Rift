@@ -46,6 +46,16 @@ zig build run -- system info
 
 GitHub Actions is disabled; run these checks locally. `zig-out/bin/rift` needs no Zig or Python at runtime. A fresh installation needs network access on the first `run` to fetch the verified Alpine guest boot files.
 
+To install a locally built binary in `~/.local/bin`:
+
+```sh
+zig build -Doptimize=ReleaseSafe
+mkdir -p "$HOME/.local/bin"
+install -m 755 zig-out/bin/rift "$HOME/.local/bin/rift"
+```
+
+Add `~/.local/bin` to your shell's `PATH` if needed. The binary is signed locally with the Virtualization entitlement. This repository does not yet have a Developer ID signature or notarized public download; macOS Gatekeeper rejects the current ad-hoc signed archive. The source build is the supported installation path for now.
+
 For reproducible local size, startup, and host worker RSS measurements, run `zig build -Doptimize=ReleaseSafe benchmark` after pulling and running Alpine once. On one Apple M2 run, the signed binary was 1,500,192 bytes and five subsequent cached Alpine launches had a 1,028.8 ms median. See [the benchmark method and limits](docs/BENCHMARKS.md).
 
 To check the macOS VM bridge on Apple Silicon, prepare the pinned Alpine guest and run the local integration check:
@@ -97,7 +107,7 @@ No Docker Engine, Docker CLI, Docker Desktop, or container daemon is part of the
 - [x] Preview and confirmed cleanup of abandoned runtime staging
 - [ ] Structured logs, volumes, and image cache pruning
 
-Foreground runs remove their temporary state on normal completion, including runs without `--rm`. Detached runs keep their logs and status until `rift rm`; the VM and temporary root filesystem are removed on stop or exit. Local checks have served the nginx welcome page over a forwarded localhost port, including with `run -d`. An interrupted foreground run can leave staging, which `rift clean` can preview and remove after the process exits. There is no release artifact yet. Do not use Rift as a Docker replacement today.
+Foreground runs remove their temporary state on normal completion, including runs without `--rm`. Detached runs keep their logs and status until `rift rm`; the VM and temporary root filesystem are removed on stop or exit. Local checks have served the nginx welcome page over a forwarded localhost port, including with `run -d`. An interrupted foreground run can leave staging, which `rift clean` can preview and remove after the process exits. A local release archive is packaged and checked, but no public notarized release exists yet. Do not use Rift as a Docker replacement today.
 
 ## License
 
