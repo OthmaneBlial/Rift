@@ -104,6 +104,7 @@ def process_footprints(pids: list[int]) -> Optional[tuple[int, dict[int, int]]]:
 
 def measure_worker(binary: Path, env: dict[str, str]) -> dict[str, object]:
     vm_processes_before = set(virtualization_processes())
+    run_started_ns = time.perf_counter_ns()
     started = run(binary, env, "run", "-d", "alpine", "/bin/sh", "-c", "echo RIFT_BENCH_READY; sleep 60")
     identifier = started.stdout.strip()
     if re.fullmatch(r"[0-9a-f]{32}", identifier) is None:
@@ -141,6 +142,7 @@ def measure_worker(binary: Path, env: dict[str, str]) -> dict[str, object]:
                                 vm_footprints.append(per_process[vm_pid])
                     time.sleep(0.1)
                 return {
+                    "detached_run_to_guest_ready_ms": round((time.perf_counter_ns() - run_started_ns) / 1_000_000, 1),
                     "detached_worker_rss_kib": int(statistics.median(worker_rss)),
                     "virtualization_vm_service_rss_kib": int(statistics.median(vm_rss)) if len(vm_rss) == 3 else None,
                     "virtualization_vm_service_footprint_bytes": int(statistics.median(vm_footprints)) if len(vm_footprints) == 3 else None,

@@ -90,11 +90,11 @@ This roadmap carries the original plan forward from the first project commit. `[
 - [x] Provide a reproducible local benchmark script and methodology.
 - [x] Package and check a local release archive.
 - [x] Verify a fresh Rift home on this Apple Silicon Mac without Docker: first guest setup, Alpine, Nginx HTTP, lifecycle, and cache cleanup.
-- [x] Record fresh-home and cached benchmark samples with scope and limitations.
+- [x] Record first-cached and subsequent startup, fresh-home pulls, logical store size, and worker-plus-VM process memory with scope and limitations.
 - [x] Verify a UID 0 workload inherits `no_new_privs` and cannot mount a new filesystem.
 - [x] Verify file and directory volume targets reject paths beneath image symlinks.
 - [ ] Complete an adversarial review of host/guest isolation assumptions; ownership-index work is now bounded, while volume races, mount layouts, workload behavior, network exposure, and VM-boundary review remain.
-- [ ] Measure cold and warm startup, guest boot time, install footprint, image pull/cache behavior, disk usage, and total host-plus-VM memory.
+- [ ] Measure isolated guest boot time, installation footprint, and total system-wide host-plus-VM memory.
 - [ ] Repeat performance measurements across more Macs.
 - [ ] Run the full runtime workflow on macOS 12 to verify the oldest declared host version.
 - [ ] Verify the full install-to-clean workflow on a clean Apple Silicon Mac without Docker.

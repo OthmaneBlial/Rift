@@ -13,7 +13,7 @@ zig-out/bin/rift run --rm alpine /bin/true
 zig build -Doptimize=ReleaseSafe benchmark
 ```
 
-The benchmark copies the local image blobs, image records, and guest boot files into a temporary HOME. Setup and copying are outside the timed region. It measures one Alpine `/bin/true` launch, five subsequent launches, five `rift version` calls, and memory after a detached Alpine command reports ready. Each launch starts a new VM. Memory output includes Rift worker RSS, Virtualization.framework VM-service RSS, and macOS process footprints for the worker and VM service, when the VM process can be identified unambiguously. The script stops and removes its container, checks that logical storage usage returns to its starting value, and deletes the temporary HOME. Output is JSON so individual samples remain visible. It also records logical CPU count and 1/5/15-minute host load averages before and after timing; load average is not CPU utilization.
+The benchmark copies the local image blobs, image records, and guest boot files into a temporary HOME. Setup and copying are outside the timed region. It measures one Alpine `/bin/true` launch, five subsequent launches, five `rift version` calls, and the time from starting a detached Alpine run to observing its guest-ready marker through `rift logs`. That latency includes rootfs setup, VM startup, and log polling; it is not an isolated VM boot time. Each launch starts a new VM. Memory output includes Rift worker RSS, Virtualization.framework VM-service RSS, and macOS process footprints for the worker and VM service, when the VM process can be identified unambiguously. The script stops and removes its container, checks that logical storage usage returns to its starting value, and deletes the temporary HOME. Output is JSON so individual samples remain visible. It also records logical CPU count and 1/5/15-minute host load averages before and after timing; load average is not CPU utilization.
 
 The first launch already has the image and guest files cached. It is **not** a fresh installation or an uncached macOS filesystem measurement. `worker_and_vm_process_footprint_bytes` is the macOS footprint total for those two processes, with shared mappings de-duplicated by `footprint`; it excludes kernel and other system memory, so it is not total host memory. VM-service RSS can include shared mappings and should not be added to worker RSS as a unique-memory total. If the VM process or footprint report is ambiguous or unavailable, the footprint fields are null and `memory_measurement_note` explains why. Each VM is configured with 256 MiB of guest RAM. The store size is the logical size of all copied cache files, including any other images present, and excludes the binary.
 
@@ -21,7 +21,27 @@ The first launch already has the image and guest files cached. It is **not** a f
 
 ## Latest cached benchmark
 
-Apple M2, macOS 26.6, Zig 0.16.0, `ReleaseSafe`, runtime commit `9f95df9`, 2026-09-27 19:57:42 UTC. One run with the cached store:
+Apple M2, macOS 26.6, Zig 0.16.0, `ReleaseSafe`, runtime commit `3ea8402`, 2026-09-27 20:25:08 UTC. One run with the cached store:
+
+| Metric | Result |
+| --- | ---: |
+| Local executable size | 1,729,520 bytes |
+| First Alpine launch with cached assets | 1,380.3 ms |
+| Subsequent Alpine launches, median of 5 | 1,115.5 ms |
+| Subsequent Alpine launch samples | 1,115.5, 1,112.3, 1,131.8, 1,131.0, 1,107.9 ms |
+| `rift version`, median of 5 | 7.2 ms |
+| Detached run to guest-ready marker | 1,717.1 ms |
+| Detached Rift worker RSS | 10,688 KiB |
+| Virtualization.framework VM-service RSS | 204,192 KiB |
+| VM-service process footprint | 158,876,440 bytes (151.5 MiB) |
+| Worker and VM-service combined process footprint | 161,580,280 bytes (154.1 MiB) |
+| Copied store, logical file bytes | 151,145,470 bytes |
+| Host load average, 1/5/15 minute, before | 2.98 / 4.58 / 4.86 |
+| Host load average, 1/5/15 minute, after | 3.00 / 4.53 / 4.84 |
+
+## Previous cached benchmark
+
+Apple M2, macOS 26.6, Zig 0.16.0, `ReleaseSafe`, runtime commit `9f95df9`, 2026-09-27 19:57:42 UTC. One earlier run with the cached store:
 
 | Metric | Result |
 | --- | ---: |
@@ -38,9 +58,9 @@ Apple M2, macOS 26.6, Zig 0.16.0, `ReleaseSafe`, runtime commit `9f95df9`, 2026-
 | Host load average, 1/5/15 minute, before | 5.44 / 4.47 / 4.64 |
 | Host load average, 1/5/15 minute, after | 4.91 / 4.39 / 4.61 |
 
-The memory sample is a process-attributed idle snapshot after the guest reports ready, not peak usage or total host memory. It does not finish the broader memory work, which still needs guest boot timing, install-footprint coverage, and system-wide memory scope.
+The memory sample is a process-attributed idle snapshot after the guest reports ready, not peak usage or total host memory. The detached-ready latency is not isolated boot time. Broader memory work still needs install-footprint coverage and system-wide memory scope.
 
-Apple M2, macOS 26.6, Zig 0.16.0, `ReleaseSafe`, runtime commit `60000c7`, 2026-09-27 17:59:58 UTC. One earlier run with the cached store:
+Apple M2, macOS 26.6, Zig 0.16.0, `ReleaseSafe`, runtime commit `60000c7`, 2026-09-27 17:59:58 UTC. Earlier run with the cached store:
 
 | Metric | Result |
 | --- | ---: |

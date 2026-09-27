@@ -68,7 +68,7 @@ Warm VM reuse is a measured optimization, not a prerequisite for correctness. An
 
 Apple silicon is the first target. OCI platform selection must be explicit; an `arm64` host must not silently run an `amd64` image through emulation.
 
-Boot time, memory, binary size, image storage, and cleanup behavior will be measured before performance claims are published. Local parsing and storage tests cannot prove a real VM boot or container execution. Those need macOS integration runs.
+Local samples for cached startup, executable size, logical store size, cleanup, and process-attributed worker plus VM memory are recorded in the [benchmark notes](BENCHMARKS.md). They do not establish isolated guest boot time, installation footprint, total system memory, or performance across Macs. Local parsing and storage tests cannot prove a real VM boot or container execution; those need macOS integration runs.
 
 ## Roadmap
 

@@ -67,6 +67,20 @@ rift run -v "$PWD/data:/data:rw" alpine sh -c 'echo saved > /data/example'
 
 Host environment variables are not copied into containers. Volumes are read-only by default; `:rw` gives the container write access to the selected host path. File-volume sources must share a filesystem with Rift's runtime storage.
 
+## Benchmarks
+
+One cached run on an Apple M2 with macOS 26.6 and Zig 0.16.0 (`ReleaseSafe`):
+
+| Metric | Result |
+| --- | ---: |
+| First cached Alpine launch | 1,380 ms |
+| Subsequent launches, median of 5 | 1,116 ms |
+| Detached start to guest-ready marker | 1,717 ms |
+| Executable size | 1,729,520 bytes |
+| Worker and VM-service process footprint after ready | 154.1 MiB |
+
+The image and guest files were cached. The readiness time includes setup and log polling; the memory figure excludes kernel and other system memory. This is a single-machine sample, not a Docker comparison. See [benchmark method and history](docs/BENCHMARKS.md).
+
 ## Requirements and limits
 
 - macOS 12 or newer on Apple Silicon.
