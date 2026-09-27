@@ -11,6 +11,7 @@ const registry = @import("oci/registry.zig");
 const runtime = @import("run.zig");
 const containers = @import("containers.zig");
 const disk = @import("disk.zig");
+const image_build = @import("oci/image_build.zig");
 
 fn printHelp(writer: *Io.Writer) Io.Writer.Error!void {
     try writer.writeAll(
@@ -24,6 +25,7 @@ fn printHelp(writer: *Io.Writer) Io.Writer.Error!void {
             "  clean [--yes]      Preview or remove stale staging and unused image blobs\n" ++
             "  images             List locally pulled images\n" ++
             "  pull <image>       Pull an OCI image for this host\n" ++
+            "  build -t IMAGE [context] Build a Dockerfile (one FROM; regular-file COPY)\n" ++
             "  rmi <image>        Remove a local image reference\n" ++
             "  run [options] <image> [command] [args...] Run in the foreground\n" ++
             "  run -d [options] <image> [command] [args...] Run detached\n" ++
@@ -77,6 +79,12 @@ fn dispatch(args: []const []const u8, writer: *Io.Writer, init: ?std.process.Ini
     if (args.len > 0 and std.mem.eql(u8, args[0], "pull")) {
         if (args.len != 2) return error.InvalidArguments;
         try pullImage(init orelse return error.CommandUnavailable, args[1], writer);
+        return 0;
+    }
+
+    if (args.len > 0 and std.mem.eql(u8, args[0], "build")) {
+        const options = try parseBuildArguments(args[1..]);
+        try buildImage(init orelse return error.CommandUnavailable, options, writer);
         return 0;
     }
 
@@ -223,8 +231,12 @@ fn ensurePulled(init: std.process.Init, arguments: []const []const u8, detached:
     const options = try runtime.parseOptions(init.arena.allocator(), arguments);
     if (detached and options.remove_after_exit) return error.DetachedAutoRemoveUnsupported;
     _ = try runtime.resolveVolumes(init, options.volumes);
-    const allocator = init.arena.allocator();
     const image_name = arguments[options.image_index];
+    try ensureImagePulled(init, image_name);
+}
+
+fn ensureImagePulled(init: std.process.Init, image_name: []const u8) !void {
+    const allocator = init.arena.allocator();
     var image = try reference.parse(allocator, image_name);
     defer image.deinit(allocator);
     const canonical = try image.formatAlloc(allocator);
@@ -247,6 +259,62 @@ fn ensurePulled(init: std.process.Init, arguments: []const []const u8, detached:
     var stderr: Io.File.Writer = .init(.stderr(), init.io, &buffer);
     try pullImage(init, image_name, &stderr.interface);
     try stderr.interface.flush();
+}
+
+const BuildArguments = struct { tag: []const u8, context: []const u8 };
+
+fn parseBuildArguments(arguments: []const []const u8) !BuildArguments {
+    var tag: ?[]const u8 = null;
+    var context: ?[]const u8 = null;
+    var offset: usize = 0;
+    while (offset < arguments.len) {
+        if (std.mem.eql(u8, arguments[offset], "-t") or std.mem.eql(u8, arguments[offset], "--tag")) {
+            if (tag != null or offset + 1 >= arguments.len or arguments[offset + 1].len == 0) return error.InvalidBuildArguments;
+            tag = arguments[offset + 1];
+            offset += 2;
+        } else if (arguments[offset].len > 0 and arguments[offset][0] == '-') {
+            return error.InvalidBuildArguments;
+        } else {
+            if (context != null) return error.InvalidBuildArguments;
+            context = arguments[offset];
+            offset += 1;
+        }
+    }
+    return .{ .tag = tag orelse return error.InvalidBuildArguments, .context = context orelse "." };
+}
+
+fn buildImage(init: std.process.Init, options: BuildArguments, writer: *Io.Writer) !void {
+    if (builtin.os.tag != .macos or builtin.cpu.arch != .aarch64) return error.UnsupportedHost;
+    const allocator = init.arena.allocator();
+    const plan = try image_build.readPlan(allocator, init.io, options.context);
+    var output_image = reference.parse(allocator, options.tag) catch return error.InvalidBuildTag;
+    defer output_image.deinit(allocator);
+    if (output_image.digest != null) return error.InvalidBuildTag;
+    const canonical_output = try output_image.formatAlloc(allocator);
+
+    try ensureImagePulled(init, plan.base_reference);
+    var data_dir = (try openDataDir(init)) orelse return error.BaseImageNotFound;
+    defer data_dir.close(init.io);
+    var store = try storage.BlobStore.init(init.io, data_dir);
+    defer store.deinit();
+    try store.lockExclusive();
+    defer store.unlock();
+    const records = try store.listImages(allocator);
+    defer storage.deinitImageRecords(allocator, records);
+    const base_digest = for (records) |record| {
+        if (!std.mem.eql(u8, record.reference, plan.base_reference)) continue;
+        if (!std.mem.eql(u8, record.platform, "linux/arm64")) return error.UnsupportedHostArchitecture;
+        break record.digest;
+    } else return error.BaseImageNotFound;
+
+    const result = try image_build.build(allocator, init.io, data_dir, plan, base_digest, store);
+    try store.recordImage(allocator, .{
+        .reference = canonical_output,
+        .digest = result.digest,
+        .platform = "linux/arm64",
+        .layer_count = result.layer_count,
+    });
+    try writer.print("Built {s}: {s} ({d} layers)\n", .{ canonical_output, result.digest, result.layer_count });
 }
 
 fn listImages(init: std.process.Init, writer: *Io.Writer) !void {
@@ -399,11 +467,24 @@ pub fn main(init: std.process.Init) void {
             error.FileVolumeMustShareFilesystem => std.debug.print("rift: file volume must be on the same filesystem as Rift runtime storage\n", .{}),
             error.FileVolumeCannotContainTarget => std.debug.print("rift: a file volume target cannot contain another volume target\n", .{}),
             error.TooManyVolumes => std.debug.print("rift: at most 16 volumes are supported\n", .{}),
+            error.InvalidBuildArguments, error.InvalidBuildTag => std.debug.print("rift: build syntax is 'rift build -t IMAGE [context]'\n", .{}),
+            error.InvalidBuildContext => std.debug.print("rift: build context must contain a readable Dockerfile\n", .{}),
+            error.InvalidDockerfile => std.debug.print("rift: invalid Dockerfile; expected FROM and one or more COPY instructions\n", .{}),
+            error.UnsupportedDockerfileInstruction, error.UnsupportedBuildStages, error.UnsupportedCopyForm => std.debug.print("rift: this build preview supports one FROM and regular-file COPY instructions only\n", .{}),
+            error.InvalidBuildSource => std.debug.print("rift: COPY source must be a regular file inside the build context\n", .{}),
+            error.InvalidBuildTarget => std.debug.print("rift: COPY target must be an absolute file path without . or .. components\n", .{}),
+            error.BuildLayerTooLarge => std.debug.print("rift: built image layer exceeds the 8 GiB limit\n", .{}),
+            error.BuildArchiveFailed => std.debug.print("rift: could not create the OCI layer archive\n", .{}),
+            error.BuildSourceChanged => std.debug.print("rift: a COPY source changed while it was being read\n", .{}),
+            error.BuildStagingFailed => std.debug.print("rift: could not create private build staging\n", .{}),
+            error.BaseImageNotFound => std.debug.print("rift: Dockerfile base image disappeared; pull it and retry the build\n", .{}),
             else => std.debug.print("rift: output failed: {s}\n", .{@errorName(err)}),
         }
         std.process.exit(if (err == error.InvalidArguments or err == error.CommandUnavailable or err == error.UnknownCommand or
             err == error.InvalidVolumeSpecification or err == error.ReservedVolumeTarget or err == error.DuplicateVolumeTarget or
-            err == error.InvalidVolumeSource or err == error.FileVolumeMustShareFilesystem or err == error.FileVolumeCannotContainTarget or err == error.TooManyVolumes or err == error.ExecRequestTooLarge) 2 else 1);
+            err == error.InvalidVolumeSource or err == error.FileVolumeMustShareFilesystem or err == error.FileVolumeCannotContainTarget or err == error.TooManyVolumes or err == error.ExecRequestTooLarge or
+            err == error.InvalidBuildArguments or err == error.InvalidBuildTag or err == error.InvalidBuildContext or err == error.InvalidDockerfile or
+            err == error.UnsupportedDockerfileInstruction or err == error.UnsupportedBuildStages or err == error.UnsupportedCopyForm or err == error.InvalidBuildSource or err == error.InvalidBuildTarget) 2 else 1);
     };
     stdout.interface.flush() catch |err| {
         std.debug.print("rift: output failed: {s}\n", .{@errorName(err)});
@@ -436,6 +517,23 @@ test "exec parses stdin and TTY flags before the container ID" {
     try std.testing.expect(!plain.interactive and !plain.tty);
     try std.testing.expectError(error.InvalidArguments, parseExecOptions(&.{ "-t", "0123456789abcdef0123456789abcdef", "/bin/sh" }));
     try std.testing.expectError(error.InvalidArguments, parseExecOptions(&.{ "-ii", "0123456789abcdef0123456789abcdef", "/bin/sh" }));
+}
+
+test "build accepts a tag and optional context in either order" {
+    const default_context = try parseBuildArguments(&.{ "-t", "example:local" });
+    try std.testing.expectEqualStrings("example:local", default_context.tag);
+    try std.testing.expectEqualStrings(".", default_context.context);
+
+    const explicit_context = try parseBuildArguments(&.{ "./app", "--tag", "example:local" });
+    try std.testing.expectEqualStrings("example:local", explicit_context.tag);
+    try std.testing.expectEqualStrings("./app", explicit_context.context);
+}
+
+test "build rejects missing, duplicate, or unknown arguments" {
+    try std.testing.expectError(error.InvalidBuildArguments, parseBuildArguments(&.{}));
+    try std.testing.expectError(error.InvalidBuildArguments, parseBuildArguments(&.{ "-t", "one", "-t", "two" }));
+    try std.testing.expectError(error.InvalidBuildArguments, parseBuildArguments(&.{ "-f", "Dockerfile", "-t", "one" }));
+    try std.testing.expectError(error.InvalidBuildArguments, parseBuildArguments(&.{ "-t", "one", "context-a", "context-b" }));
 }
 
 test "version prints the package version" {
@@ -497,6 +595,7 @@ test {
     _ = @import("oci/layers.zig");
     _ = @import("oci/rootfs.zig");
     _ = @import("oci/config.zig");
+    _ = @import("oci/image_build.zig");
     _ = @import("guest.zig");
     _ = @import("boot_assets.zig");
     _ = @import("disk.zig");

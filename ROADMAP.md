@@ -57,7 +57,8 @@ This roadmap carries the original plan forward from the first project commit. `[
 - [x] Send graceful stop signals, force-stop after the timeout, and support immediate `kill`.
 - [x] Retain detached logs and status until `rm`; clean foreground state after normal completion.
 - [x] Add interactive `exec` with stdin, TTY allocation, resize forwarding, and signal cancellation.
-- [ ] Add image building with `rift build`.
+- [x] Build and run an OCI image from one `FROM` and regular-file `COPY` instructions.
+- [ ] Expand `rift build` to common Dockerfile workflows, including build commands and directory copies.
 - [ ] Implement broader OCI process and resource settings.
 - [x] Review help and error messages across supported commands for clear, predictable use.
 - [ ] Add structured log output.

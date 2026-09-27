@@ -101,6 +101,12 @@ pub fn build(b: *std.Build) void {
         check_auto_pull.step.dependOn(&sign_exe.step);
         b.step("run-auto-pull-check", "Run Alpine from an empty HOME without a separate pull").dependOn(&check_auto_pull.step);
 
+        const check_build = b.addSystemCommand(&.{"/usr/bin/python3"});
+        check_build.addFileArg(b.path("scripts/check_build.py"));
+        check_build.addArg(exe_path);
+        check_build.step.dependOn(&sign_exe.step);
+        b.step("build-check", "Build and run an OCI image from a local Dockerfile").dependOn(&check_build.step);
+
         const check_cache_lock = b.addSystemCommand(&.{"/usr/bin/python3"});
         check_cache_lock.addFileArg(b.path("scripts/check_cache_lock.py"));
         check_cache_lock.addArg(exe_path);

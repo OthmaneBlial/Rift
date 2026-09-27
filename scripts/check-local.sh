@@ -35,6 +35,7 @@ for check in \
     run-detached-check \
     run-exec-check \
     run-auto-pull-check \
+    build-check \
     cache-lock-check \
     cache-prune-check \
     run-process-check \
