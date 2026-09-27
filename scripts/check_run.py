@@ -21,6 +21,8 @@ def main() -> int:
         (["run", "alpine", "/bin/sh", "-c", "exit 37"], 37, ""),
         (["run", "alpine", "/bin/sh", "-c", "printf '%s\\n' \"$PATH\""], 0,
          "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"),
+        (["run", "-e", "PATH=/bin", "-e", "RIFT_CHECK=ready", "alpine", "sh", "-c", "printf '%s %s\\n' \"$PATH\" \"$RIFT_CHECK\""], 0,
+         "/bin ready"),
         (["run", "alpine", "echo", "two words", "$(touch /tmp/rift-should-not-exist)"], 0,
          "two words $(touch /tmp/rift-should-not-exist)"),
     ]

@@ -19,7 +19,7 @@ def main() -> int:
     rift = sys.argv[1]
     runtime = Path.home() / "Library/Application Support/Rift/runtime"
     before = set(runtime.iterdir()) if runtime.exists() else set()
-    started = call(rift, "run", "-d", "alpine", "/bin/sh", "-c", "echo RIFT_DETACHED_OK; sleep 30")
+    started = call(rift, "run", "-d", "-e", "RIFT_CHECK=RIFT_DETACHED_OK", "alpine", "/bin/sh", "-c", 'echo "$RIFT_CHECK"; sleep 30')
     identifier = started.stdout.strip()
     if started.returncode != 0 or re.fullmatch(r"[0-9a-f]{32}", identifier) is None:
         print(f"Rift detached check failed to start: {started!r}", file=sys.stderr)

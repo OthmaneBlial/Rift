@@ -8,7 +8,7 @@ const run = @import("run.zig");
 pub fn spawn(init: std.process.Init, arguments: []const []const u8, writer: *Io.Writer) !void {
     if (builtin.os.tag != .macos or builtin.cpu.arch != .aarch64) return error.UnsupportedHost;
     const allocator = init.arena.allocator();
-    const options = try run.parseOptions(arguments);
+    const options = try run.parseOptions(allocator, arguments);
     if (options.remove_after_exit) return error.DetachedAutoRemoveUnsupported;
     var image = try reference.parse(allocator, arguments[options.image_index]);
     defer image.deinit(allocator);

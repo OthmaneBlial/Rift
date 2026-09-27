@@ -24,7 +24,7 @@ fn printHelp(writer: *Io.Writer) Io.Writer.Error!void {
             "  clean [--yes]      Preview or remove stale runtime staging\n" ++
             "  images             List locally pulled images\n" ++
             "  pull <image>       Pull an OCI image for this host\n" ++
-            "  run [-d] [--rm] [-p HOST:GUEST] [-w DIR] <image> [command] [args...] Run an image\n" ++
+            "  run [-d] [--rm] [-p HOST:GUEST] [-w DIR] [-e KEY=VALUE] <image> [command] [args...] Run an image\n" ++
             "  ps                 List detached containers\n" ++
             "  logs <id>          Show a detached container's output\n" ++
             "  stop <id>          Stop a detached container\n" ++
@@ -145,7 +145,7 @@ fn pullImage(init: std.process.Init, image_name: []const u8, writer: *Io.Writer)
 
 fn ensurePulled(init: std.process.Init, arguments: []const []const u8, detached: bool) !void {
     if (builtin.os.tag != .macos or builtin.cpu.arch != .aarch64) return error.UnsupportedHost;
-    const options = try runtime.parseOptions(arguments);
+    const options = try runtime.parseOptions(init.arena.allocator(), arguments);
     if (detached and options.remove_after_exit) return error.DetachedAutoRemoveUnsupported;
     const allocator = init.arena.allocator();
     const image_name = arguments[options.image_index];

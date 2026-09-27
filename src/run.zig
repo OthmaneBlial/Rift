@@ -12,10 +12,10 @@ const vm = @import("vm.zig");
 
 pub fn execute(init: std.process.Init, arguments: []const []const u8, stop_path: ?[]const u8) !u8 {
     if (builtin.os.tag != .macos or builtin.cpu.arch != .aarch64) return error.UnsupportedHost;
-    const options = try parseOptions(arguments);
+    const allocator = init.arena.allocator();
+    const options = try parseOptions(allocator, arguments);
     const offset = options.image_index;
     const port = options.port;
-    const allocator = init.arena.allocator();
     var image = try reference.parse(allocator, arguments[offset]);
     defer image.deinit(allocator);
     const canonical = try image.formatAlloc(allocator);
@@ -39,6 +39,10 @@ pub fn execute(init: std.process.Init, arguments: []const []const u8, stop_path:
     const working_dir = if (requested_working_dir.len == 0) "/" else requested_working_dir;
     if (!validWorkingDirectory(working_dir)) return error.UnsupportedWorkingDirectory;
     const command = try config.command(allocator, process, arguments[offset + 1 ..]);
+    const image_environment = process.Env orelse &.{};
+    const environment = try allocator.alloc([]const u8, image_environment.len + options.environments.len);
+    @memcpy(environment[0..image_environment.len], image_environment);
+    @memcpy(environment[image_environment.len..], options.environments);
 
     try boot_assets.ensure(allocator, init.io, data_dir);
     var guest_dir = data_dir.openDir(init.io, "guest", .{ .follow_symlinks = false }) catch |err| switch (err) {
@@ -81,7 +85,7 @@ pub fn execute(init: std.process.Init, arguments: []const []const u8, stop_path:
     defer control.close(init.io);
     try rootfs.assemble(allocator, init.io, image_root, store, manifest_digest);
     const interactive = try Io.File.stdin().isTty(init.io);
-    try guest.writeInitramfs(allocator, init.io, base_initramfs, run_dir, command, process.Env orelse &.{}, working_dir, process.User orelse "", interactive, port != null);
+    try guest.writeInitramfs(allocator, init.io, base_initramfs, run_dir, command, environment, working_dir, process.User orelse "", interactive, port != null);
 
     var root_path_buffer: [Io.Dir.max_path_bytes]u8 = undefined;
     var control_path_buffer: [Io.Dir.max_path_bytes]u8 = undefined;
@@ -111,12 +115,14 @@ pub fn execute(init: std.process.Init, arguments: []const []const u8, stop_path:
     return @intCast(code);
 }
 
-pub const Options = struct { image_index: usize, port: ?vm.PortMapping, working_dir: ?[]const u8, remove_after_exit: bool };
+pub const Options = struct { image_index: usize, port: ?vm.PortMapping, working_dir: ?[]const u8, environments: []const []const u8, remove_after_exit: bool };
 
-pub fn parseOptions(arguments: []const []const u8) !Options {
+pub fn parseOptions(allocator: std.mem.Allocator, arguments: []const []const u8) !Options {
     var offset: usize = 0;
     var port: ?vm.PortMapping = null;
     var working_dir: ?[]const u8 = null;
+    var environments: std.ArrayList([]const u8) = .empty;
+    errdefer environments.deinit(allocator);
     var remove_after_exit = false;
     while (offset < arguments.len) {
         if (std.mem.eql(u8, arguments[offset], "--rm")) {
@@ -131,10 +137,19 @@ pub fn parseOptions(arguments: []const []const u8) !Options {
             if (working_dir != null or offset + 1 >= arguments.len or arguments[offset + 1].len == 0 or !validWorkingDirectory(arguments[offset + 1])) return error.InvalidArguments;
             working_dir = arguments[offset + 1];
             offset += 2;
+        } else if (std.mem.eql(u8, arguments[offset], "-e")) {
+            if (offset + 1 >= arguments.len or !validEnvironment(arguments[offset + 1])) return error.InvalidArguments;
+            try environments.append(allocator, arguments[offset + 1]);
+            offset += 2;
         } else break;
     }
     if (arguments.len < offset + 1) return error.InvalidArguments;
-    return .{ .image_index = offset, .port = port, .working_dir = working_dir, .remove_after_exit = remove_after_exit };
+    return .{ .image_index = offset, .port = port, .working_dir = working_dir, .environments = try environments.toOwnedSlice(allocator), .remove_after_exit = remove_after_exit };
+}
+
+fn validEnvironment(variable: []const u8) bool {
+    const separator = std.mem.indexOfScalar(u8, variable, '=') orelse return false;
+    return separator != 0 and std.mem.indexOfScalar(u8, variable, 0) == null;
 }
 
 fn validWorkingDirectory(path: []const u8) bool {
@@ -161,10 +176,25 @@ test "port mappings require two valid TCP ports" {
 }
 
 test "working directory override requires one absolute path" {
-    const selected = try parseOptions(&.{ "-w", "/tmp", "alpine", "/bin/pwd" });
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const selected = try parseOptions(allocator, &.{ "-w", "/tmp", "alpine", "/bin/pwd" });
     try std.testing.expectEqualStrings("/tmp", selected.working_dir.?);
     try std.testing.expectEqual(@as(usize, 2), selected.image_index);
-    try std.testing.expectError(error.InvalidArguments, parseOptions(&.{ "-w", "relative", "alpine" }));
-    try std.testing.expectError(error.InvalidArguments, parseOptions(&.{ "-w", "", "alpine" }));
-    try std.testing.expectError(error.InvalidArguments, parseOptions(&.{ "-w", "/tmp", "-w", "/", "alpine" }));
+    try std.testing.expectError(error.InvalidArguments, parseOptions(allocator, &.{ "-w", "relative", "alpine" }));
+    try std.testing.expectError(error.InvalidArguments, parseOptions(allocator, &.{ "-w", "", "alpine" }));
+    try std.testing.expectError(error.InvalidArguments, parseOptions(allocator, &.{ "-w", "/tmp", "-w", "/", "alpine" }));
+}
+
+test "environment overrides require explicit values" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const selected = try parseOptions(allocator, &.{ "-e", "ONE=first", "-p", "8080:80", "-e", "ONE=last", "alpine" });
+    try std.testing.expectEqual(@as(usize, 6), selected.image_index);
+    try std.testing.expectEqualStrings("ONE=first", selected.environments[0]);
+    try std.testing.expectEqualStrings("ONE=last", selected.environments[1]);
+    try std.testing.expectError(error.InvalidArguments, parseOptions(allocator, &.{ "-e", "ONE", "alpine" }));
+    try std.testing.expectError(error.InvalidArguments, parseOptions(allocator, &.{ "-e", "=bad", "alpine" }));
 }

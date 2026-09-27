@@ -19,6 +19,7 @@ rift pull alpine
 rift images
 rift run --rm alpine echo hello
 rift run -w /tmp alpine pwd
+rift run -e MESSAGE=hello alpine sh -c 'echo "$MESSAGE"'
 rift pull nginx
 rift run -d -p 8080:80 nginx
 rift ps
@@ -27,7 +28,7 @@ rift stop <container-id>
 rift rm <container-id>
 ```
 
-Image pulls use anonymous registry access and save SHA-256-verified OCI blobs and reference metadata under `~/Library/Application Support/Rift`. `run` pulls an image automatically when it is not cached; `pull` remains available to fetch or refresh it explicitly. `system df` reports logical file bytes by category without modifying storage. `clean` previews abandoned runtime staging; `clean --yes` removes only staging whose Rift process lock has been released. Image cache, active VMs, and container logs are preserved. `run` uses the image's `Entrypoint`, `Cmd`, `Env`, `User`, and absolute `WorkingDir` defaults, or your command and `-w` override. A static guest executor applies the working directory and numeric or named UID/GID from the image, including images without `/bin/sh`. Each run gets a disposable writable overlay inside its own Linux VM, currently configured with 256 MiB of guest RAM. `-p` accepts one `HOST:GUEST` TCP mapping bound to `127.0.0.1`. `run -d` starts one background Rift process per VM and prints its container ID. `stop` currently forces the VM off; `--rm` is unavailable with `-d`. Private registry credentials are not implemented.
+Image pulls use anonymous registry access and save SHA-256-verified OCI blobs and reference metadata under `~/Library/Application Support/Rift`. `run` pulls an image automatically when it is not cached; `pull` remains available to fetch or refresh it explicitly. `system df` reports logical file bytes by category without modifying storage. `clean` previews abandoned runtime staging; `clean --yes` removes only staging whose Rift process lock has been released. Image cache, active VMs, and container logs are preserved. `run` uses the image's `Entrypoint`, `Cmd`, `Env`, `User`, and absolute `WorkingDir` defaults, or your command, `-e KEY=VALUE`, and `-w` overrides. Environment overrides must include a value; Rift does not copy host variables implicitly. A static guest executor applies the working directory and numeric or named UID/GID from the image, including images without `/bin/sh`. Each run gets a disposable writable overlay inside its own Linux VM, currently configured with 256 MiB of guest RAM. `-p` accepts one `HOST:GUEST` TCP mapping bound to `127.0.0.1`. `run -d` starts one background Rift process per VM and prints its container ID. `stop` currently forces the VM off; `--rm` is unavailable with `-d`. Private registry credentials are not implemented.
 
 ## Build
 
@@ -103,7 +104,7 @@ No Docker Engine, Docker CLI, Docker Desktop, or container daemon is part of the
 - [x] Local VM smoke that executes pulled Alpine BusyBox through a read-only share
 - [ ] Complete OCI filesystem metadata and special files
 - [x] Basic foreground OCI command execution through Rift's public CLI
-- [x] Image entrypoint, command, and environment defaults
+- [x] Image entrypoint, command, environment defaults, and `-e` overrides
 - [x] Absolute image `WorkingDir`, `-w` override, and numeric or named image `User` through a static guest executor
 - [ ] Broader OCI process settings and isolation
 - [x] Outbound NAT and DNS for foreground commands
