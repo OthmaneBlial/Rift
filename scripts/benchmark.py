@@ -109,10 +109,19 @@ def measure_worker(binary: Path, env: dict[str, str]) -> dict[str, object]:
     identifier = started.stdout.strip()
     if re.fullmatch(r"[0-9a-f]{32}", identifier) is None:
         raise RuntimeError(f"invalid detached container ID: {identifier!r}")
+    boot_measurement = Path(env["HOME"]) / "Library/Application Support/Rift/runtime" / f"run-{identifier}" / "control/guest-boot-ms"
+    guest_boot_ms = None
     try:
         deadline = time.monotonic() + 30
         while time.monotonic() < deadline:
+            if guest_boot_ms is None and boot_measurement.is_file():
+                try:
+                    guest_boot_ms = float(boot_measurement.read_text().strip())
+                except (OSError, ValueError):
+                    pass
             if "RIFT_BENCH_READY" in run(binary, env, "logs", identifier).stdout:
+                if guest_boot_ms is None:
+                    raise RuntimeError("detached VM exited or became ready without a guest boot measurement")
                 worker_rss = []
                 vm_rss = []
                 vm_footprints = []
@@ -142,6 +151,7 @@ def measure_worker(binary: Path, env: dict[str, str]) -> dict[str, object]:
                                 vm_footprints.append(per_process[vm_pid])
                     time.sleep(0.1)
                 return {
+                    "vm_start_to_guest_control_ready_ms": guest_boot_ms,
                     "detached_run_to_guest_ready_ms": round((time.perf_counter_ns() - run_started_ns) / 1_000_000, 1),
                     "detached_worker_rss_kib": int(statistics.median(worker_rss)),
                     "virtualization_vm_service_rss_kib": int(statistics.median(vm_rss)) if len(vm_rss) == 3 else None,
@@ -171,7 +181,7 @@ def main() -> None:
     source = Path.home() / "Library/Application Support/Rift"
     with tempfile.TemporaryDirectory(prefix="rift-benchmark-") as home:
         copy_cache(source, Path(home) / "Library/Application Support/Rift")
-        env = dict(os.environ, HOME=home)
+        env = dict(os.environ, HOME=home, RIFT_BENCHMARK_GUEST_BOOT="1")
         before = total_bytes(binary, env)
         load_before = os.getloadavg()
         first = timed(binary, env, "run", "alpine", "/bin/true")

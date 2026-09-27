@@ -13,6 +13,7 @@ extern fn rift_vm_run(
     volumes: ?[*]const Share,
     volume_count: usize,
     network_enabled: c_int,
+    measure_guest_boot: c_int,
     host_port: c_int,
     guest_port: c_int,
     input_fd: c_int,
@@ -34,6 +35,7 @@ pub fn run(
     volumes: []const Volume,
     network_enabled: bool,
     port: ?PortMapping,
+    measure_guest_boot: bool,
     input_fd: c_int,
     output_fd: c_int,
 ) !void {
@@ -64,7 +66,7 @@ pub fn run(
         shares[index] = .{ .path = volume_paths[index].ptr, .read_only = @intFromBool(volume.read_only) };
     }
 
-    return switch (rift_vm_run(kernel_z.ptr, initramfs_z.ptr, command_line_z.ptr, if (share_path_z) |path| path.ptr else null, if (control_path_z) |path| path.ptr else null, if (stop_path_z) |path| path.ptr else null, if (kill_path_z) |path| path.ptr else null, if (shares.len == 0) null else shares.ptr, shares.len, @intFromBool(network_enabled), if (port) |mapping| mapping.host else 0, if (port) |mapping| mapping.guest else 0, input_fd, output_fd)) {
+    return switch (rift_vm_run(kernel_z.ptr, initramfs_z.ptr, command_line_z.ptr, if (share_path_z) |path| path.ptr else null, if (control_path_z) |path| path.ptr else null, if (stop_path_z) |path| path.ptr else null, if (kill_path_z) |path| path.ptr else null, if (shares.len == 0) null else shares.ptr, shares.len, @intFromBool(network_enabled), @intFromBool(measure_guest_boot), if (port) |mapping| mapping.host else 0, if (port) |mapping| mapping.guest else 0, input_fd, output_fd)) {
         0 => {},
         2 => error.VirtualizationUnavailable,
         3 => error.HostPortUnavailable,

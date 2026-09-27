@@ -3,8 +3,8 @@ const Io = std.Io;
 const vm = @import("vm.zig");
 const executor = @import("guest_binary").bytes;
 
-pub fn writeInitramfs(allocator: std.mem.Allocator, io: Io, base: Io.File, output_dir: Io.Dir, command: []const []const u8, environment: []const []const u8, working_dir: []const u8, user: []const u8, volumes: []const vm.Volume, interactive: bool, require_network: bool) !void {
-    const script = try makeScript(allocator, command, environment, working_dir, user, volumes, interactive, require_network);
+pub fn writeInitramfs(allocator: std.mem.Allocator, io: Io, base: Io.File, output_dir: Io.Dir, command: []const []const u8, environment: []const []const u8, working_dir: []const u8, user: []const u8, volumes: []const vm.Volume, interactive: bool, require_network: bool, measure_guest_boot: bool) !void {
+    const script = try makeScript(allocator, command, environment, working_dir, user, volumes, interactive, require_network, measure_guest_boot);
     defer allocator.free(script);
     var output = try output_dir.createFile(io, "initramfs", .{ .exclusive = true });
     defer output.close(io);
@@ -20,7 +20,7 @@ pub fn writeInitramfs(allocator: std.mem.Allocator, io: Io, base: Io.File, outpu
     try writer.interface.flush();
 }
 
-fn makeScript(allocator: std.mem.Allocator, command: []const []const u8, environment: []const []const u8, working_dir: []const u8, user: []const u8, volumes: []const vm.Volume, interactive: bool, require_network: bool) ![]u8 {
+fn makeScript(allocator: std.mem.Allocator, command: []const []const u8, environment: []const []const u8, working_dir: []const u8, user: []const u8, volumes: []const vm.Volume, interactive: bool, require_network: bool, measure_guest_boot: bool) ![]u8 {
     if (command.len == 0 or command.len > 256) return error.InvalidArguments;
     var output: Io.Writer.Allocating = .init(allocator);
     defer output.deinit();
@@ -35,8 +35,11 @@ fn makeScript(allocator: std.mem.Allocator, command: []const []const u8, environ
             "/usr/bin/busybox mkdir -p /mnt/rift /mnt/control /mnt/state /mnt/root\n" ++
             "status=125\n" ++
             "if /usr/bin/busybox mount -t virtiofs -o ro rift-rootfs /mnt/rift &&\n" ++
-            "   /usr/bin/busybox mount -t virtiofs rift-control /mnt/control; then\n" ++
-            "  if /usr/bin/busybox mount -t tmpfs -o size=256m tmpfs /mnt/state &&\n" ++
+            "   /usr/bin/busybox mount -t virtiofs rift-control /mnt/control; then\n",
+    );
+    if (measure_guest_boot) try writer.writeAll("  : > /mnt/control/guest-boot-ready\n");
+    try writer.writeAll(
+        "  if /usr/bin/busybox mount -t tmpfs -o size=256m tmpfs /mnt/state &&\n" ++
             "     /usr/bin/busybox mkdir -p /mnt/state/upper /mnt/state/work &&\n" ++
             "     /usr/bin/busybox mount -t overlay overlay -o metacopy=on,lowerdir=/mnt/rift,upperdir=/mnt/state/upper,workdir=/mnt/state/work /mnt/root; then\n" ++
             "    /usr/bin/busybox --install -s /usr/bin >/dev/null 2>&1\n" ++
@@ -134,19 +137,22 @@ fn writeNewc(writer: *Io.Writer, name: []const u8, mode: u32, data: []const u8) 
 
 test "shell arguments remain quoted" {
     const volumes = [_]vm.Volume{.{ .source = "/host", .target = "/tmp/a'b", .read_only = true }};
-    const script = try makeScript(std.testing.allocator, &.{ "/bin/echo", "a'b", "$(touch /tmp/host)" }, &.{"PATH=/bin"}, "/", "1000:1000", &volumes, false, true);
+    const script = try makeScript(std.testing.allocator, &.{ "/bin/echo", "a'b", "$(touch /tmp/host)" }, &.{"PATH=/bin"}, "/", "1000:1000", &volumes, false, true, true);
     defer std.testing.allocator.free(script);
     try std.testing.expect(std.mem.indexOf(u8, script, "env -i 'PATH=/bin' /rift-exec /mnt/root '/' '1000:1000' 1 'rift-volume-0' '/tmp/a'\"'\"'b' ro directory") != null);
     try std.testing.expect(std.mem.indexOf(u8, script, "'/bin/echo' 'a'\"'\"'b' '$(touch /tmp/host)'") != null);
     try std.testing.expect(std.mem.indexOf(u8, script, "< /dev/null") != null);
+    try std.testing.expect(std.mem.indexOf(u8, script, ": > /mnt/control/guest-boot-ready") != null);
+    try std.testing.expect(std.mem.indexOf(u8, script, ": > /mnt/control/guest-boot-ready").? < std.mem.indexOf(u8, script, "mount -t tmpfs -o size=256m").?);
     try std.testing.expect(std.mem.indexOf(u8, script, "if [ -s /mnt/control/guest-ip ]; then") != null);
-    const bare = try makeScript(std.testing.allocator, &.{ "echo", "hello" }, &.{}, "/", "", &.{}, true, false);
+    const bare = try makeScript(std.testing.allocator, &.{ "echo", "hello" }, &.{}, "/", "", &.{}, true, false, false);
     defer std.testing.allocator.free(bare);
     try std.testing.expect(std.mem.indexOf(u8, bare, "/rift-exec /mnt/root '/' '' 0 'echo' 'hello'") != null);
     try std.testing.expect(std.mem.indexOf(u8, bare, "mount -t overlay overlay -o metacopy=on,lowerdir=/mnt/rift") != null);
     try std.testing.expect(std.mem.indexOf(u8, bare, "if [ -e /mnt/control/stop ]; then") != null);
+    try std.testing.expect(std.mem.indexOf(u8, bare, "guest-boot-ready") == null);
     try std.testing.expect(std.mem.indexOf(u8, bare, "/usr/bin/busybox kill -TERM \"$workload_pid\"") != null);
-    const workdir = try makeScript(std.testing.allocator, &.{"/bin/pwd"}, &.{}, "/tmp/a'b", "nobody", &.{}, false, false);
+    const workdir = try makeScript(std.testing.allocator, &.{"/bin/pwd"}, &.{}, "/tmp/a'b", "nobody", &.{}, false, false, false);
     defer std.testing.allocator.free(workdir);
     try std.testing.expect(std.mem.indexOf(u8, workdir, "/rift-exec /mnt/root '/tmp/a'\"'\"'b' 'nobody' 0 '/bin/pwd'") != null);
 }

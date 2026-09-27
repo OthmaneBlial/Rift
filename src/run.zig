@@ -98,7 +98,8 @@ pub fn execute(init: std.process.Init, arguments: []const []const u8, stop_path:
     store.unlock();
     cache_locked = false;
     const interactive = try Io.File.stdin().isTty(init.io);
-    try guest.writeInitramfs(allocator, init.io, base_initramfs, run_dir, command, environment, working_dir, process.User orelse "", staged_volumes, interactive, port != null);
+    const measure_guest_boot = if (init.environ_map.get("RIFT_BENCHMARK_GUEST_BOOT")) |value| std.mem.eql(u8, value, "1") else false;
+    try guest.writeInitramfs(allocator, init.io, base_initramfs, run_dir, command, environment, working_dir, process.User orelse "", staged_volumes, interactive, port != null, measure_guest_boot);
 
     var root_path_buffer: [Io.Dir.max_path_bytes]u8 = undefined;
     var control_path_buffer: [Io.Dir.max_path_bytes]u8 = undefined;
@@ -111,7 +112,7 @@ pub fn execute(init: std.process.Init, arguments: []const []const u8, stop_path:
     const kernel_path = try std.fmt.allocPrint(allocator, "{s}/Image", .{guest_path});
     const initramfs_path = try std.fmt.allocPrint(allocator, "{s}/initramfs", .{run_path});
 
-    vm.run(allocator, kernel_path, initramfs_path, "console=hvc0 quiet loglevel=0 rdinit=/rift-init", root_path, control_path, stop_path, kill_path, staged_volumes, true, port, 0, 1) catch |err| {
+    vm.run(allocator, kernel_path, initramfs_path, "console=hvc0 quiet loglevel=0 rdinit=/rift-init", root_path, control_path, stop_path, kill_path, staged_volumes, true, port, measure_guest_boot, 0, 1) catch |err| {
         if (container_id) |id| {
             control.writeFile(init.io, .{ .sub_path = "host-exit", .data = "" }) catch {};
             try waitForExecClients(init, id);

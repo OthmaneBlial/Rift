@@ -4,6 +4,7 @@
 #include <limits.h>
 #include <stdio.h>
 #include <stdint.h>
+#include <time.h>
 #include <unistd.h>
 
 typedef struct RiftForwarder RiftForwarder;
@@ -18,6 +19,26 @@ static int request_guest_stop(const char *control_path) {
     const int descriptor = open(path, O_WRONLY | O_CREAT | O_CLOEXEC, 0600);
     if (descriptor < 0) return -1;
     return close(descriptor);
+}
+
+static int write_guest_boot_ms(const char *control_path, double milliseconds) {
+    char temporary_path[PATH_MAX];
+    char result_path[PATH_MAX];
+    int temporary_length = snprintf(temporary_path, sizeof(temporary_path), "%s/guest-boot-ms.tmp", control_path);
+    int result_length = snprintf(result_path, sizeof(result_path), "%s/guest-boot-ms", control_path);
+    if (temporary_length < 0 || temporary_length >= (int)sizeof(temporary_path) ||
+        result_length < 0 || result_length >= (int)sizeof(result_path)) return -1;
+    int descriptor = open(temporary_path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+    if (descriptor < 0) return -1;
+    char value[32];
+    int length = snprintf(value, sizeof(value), "%.3f\n", milliseconds);
+    ssize_t written = length > 0 && length < (int)sizeof(value) ? write(descriptor, value, (size_t)length) : -1;
+    int close_result = close(descriptor);
+    if (written != length || close_result != 0 || rename(temporary_path, result_path) != 0) {
+        unlink(temporary_path);
+        return -1;
+    }
+    return 0;
 }
 
 @interface RiftVMDelegate : NSObject <VZVirtualMachineDelegate>
@@ -40,7 +61,7 @@ static int request_guest_stop(const char *control_path) {
 
 int rift_vm_run(const char *kernel_path, const char *initramfs_path, const char *command_line,
                 const char *share_path, const char *control_path, const char *stop_path, const char *kill_path,
-                const RiftShare *volumes, size_t volume_count, int network_enabled,
+                const RiftShare *volumes, size_t volume_count, int network_enabled, int measure_guest_boot,
                 int host_port, int guest_port, int input_fd, int output_fd) {
     @autoreleasepool {
         if (![NSThread isMainThread] || ![VZVirtualMachine isSupported]) return 2;
@@ -48,6 +69,7 @@ int rift_vm_run(const char *kernel_path, const char *initramfs_path, const char 
         if (volume_count > 16 || (volume_count != 0 && !volumes)) return 1;
         if ((host_port != 0 || guest_port != 0) && (!network_enabled || !control_path || host_port < 1 || host_port > 65535 || guest_port < 1 || guest_port > 65535)) return 1;
         if (stop_path && !control_path) return 1;
+        if (measure_guest_boot && !control_path) return 1;
 
         NSString *kernel = [NSString stringWithUTF8String:kernel_path];
         NSString *initramfs = [NSString stringWithUTF8String:initramfs_path];
@@ -126,6 +148,8 @@ int rift_vm_run(const char *kernel_path, const char *initramfs_path, const char 
         VZVirtualMachine *machine = [[VZVirtualMachine alloc] initWithConfiguration:config];
         RiftVMDelegate *delegate = [[RiftVMDelegate alloc] init];
         machine.delegate = delegate;
+        struct timespec guestBootStarted = {0};
+        if (measure_guest_boot && clock_gettime(CLOCK_MONOTONIC, &guestBootStarted) != 0) return 1;
         [machine startWithCompletionHandler:^(NSError *start_error) {
             if (start_error) {
                 fprintf(stderr, "rift-vm: start failed: %s\n", start_error.description.UTF8String);
@@ -138,7 +162,30 @@ int rift_vm_run(const char *kernel_path, const char *initramfs_path, const char 
         BOOL forceStopRequested = NO;
         __block BOOL stopFailed = NO;
         NSTimeInterval stopRequestedAt = 0;
+        BOOL guestBootMeasured = NO;
+        BOOL guestBootMeasurementFailed = NO;
         while (!delegate.finished) {
+            if (measure_guest_boot && !guestBootMeasured) {
+                char ready_path[PATH_MAX];
+                int ready_length = snprintf(ready_path, sizeof(ready_path), "%s/guest-boot-ready", control_path);
+                if (ready_length < 0 || ready_length >= (int)sizeof(ready_path)) {
+                    guestBootMeasurementFailed = YES;
+                    guestBootMeasured = YES;
+                } else if (access(ready_path, F_OK) == 0) {
+                    struct timespec guestBootFinished;
+                    if (clock_gettime(CLOCK_MONOTONIC, &guestBootFinished) != 0) {
+                        guestBootMeasurementFailed = YES;
+                    } else {
+                        double milliseconds = (guestBootFinished.tv_sec - guestBootStarted.tv_sec) * 1000.0 +
+                            (guestBootFinished.tv_nsec - guestBootStarted.tv_nsec) / 1000000.0;
+                        if (write_guest_boot_ms(control_path, milliseconds) != 0) {
+                            fprintf(stderr, "rift-vm: could not record guest boot measurement\n");
+                            guestBootMeasurementFailed = YES;
+                        }
+                    }
+                    guestBootMeasured = YES;
+                }
+            }
             if (stop_path && !stopRequested && access(stop_path, F_OK) == 0 && machine.state == VZVirtualMachineStateRunning) {
                 stopRequested = YES;
                 stopRequestedAt = NSProcessInfo.processInfo.systemUptime;
@@ -163,10 +210,14 @@ int rift_vm_run(const char *kernel_path, const char *initramfs_path, const char 
                 }];
             }
             [[NSRunLoop mainRunLoop] runMode:NSDefaultRunLoopMode
-                                 beforeDate:[NSDate dateWithTimeIntervalSinceNow:0.1]];
+                                 beforeDate:[NSDate dateWithTimeIntervalSinceNow:measure_guest_boot && !guestBootMeasured ? 0.01 : 0.1]];
         }
         machine.delegate = nil;
         rift_forward_stop(forwarder);
+        if (measure_guest_boot && (!guestBootMeasured || guestBootMeasurementFailed)) {
+            fprintf(stderr, "rift-vm: guest boot measurement did not complete\n");
+            return 1;
+        }
         if (killRequested && !stopFailed && delegate.result == 0) return 5;
         return stopRequested && !stopFailed && delegate.result == 0 ? 4 : delegate.result;
     }
