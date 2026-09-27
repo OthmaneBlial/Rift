@@ -55,9 +55,10 @@ Boot time, memory, binary size, image storage, and cleanup behavior will be meas
 ## Milestones
 
 1. **Done:** OCI references, indexes, manifests, and platform selection with tests.
-2. Authenticated registry pulls and verified content-addressed storage.
-3. Secure image layer extraction and image listing/removal.
-4. A bootable Linux guest and a minimal guest command protocol.
-5. One real Alpine command, followed by lifecycle, logs, and cleanup.
-6. Outbound networking, port forwarding, and explicit volumes.
-7. Reproducible runtime benchmarks and signed release distribution.
+2. **Done:** Streaming content-addressed SHA-256 storage with atomic publication and verification.
+3. Public registry pulls, authentication, and image metadata.
+4. Secure image layer extraction and image listing/removal.
+5. A bootable Linux guest and a minimal guest command protocol.
+6. One real Alpine command, followed by lifecycle, logs, and cleanup.
+7. Outbound networking, port forwarding, and explicit volumes.
+8. Reproducible runtime benchmarks and signed release distribution.
