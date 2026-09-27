@@ -33,6 +33,7 @@ for check in \
     run-network-check \
     run-port-check \
     run-detached-check \
+    run-exec-check \
     run-auto-pull-check \
     cache-lock-check \
     cache-prune-check \

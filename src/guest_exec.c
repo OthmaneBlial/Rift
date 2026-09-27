@@ -1,6 +1,7 @@
 #define _GNU_SOURCE
 
 #include <errno.h>
+#include <dirent.h>
 #include <fcntl.h>
 #include <grp.h>
 #include <linux/capability.h>
@@ -23,12 +24,14 @@
 static int fail(const char *operation);
 
 static volatile sig_atomic_t child_pid = -1;
+static volatile sig_atomic_t exec_pid = -1;
 static volatile sig_atomic_t pending_signal = 0;
 
 static void forward_stop_signal(int signal_number) {
     int saved_errno = errno;
     pending_signal = signal_number;
     if (child_pid > 0) kill((pid_t)child_pid, signal_number);
+    if (exec_pid > 0) kill((pid_t)exec_pid, signal_number);
     errno = saved_errno;
 }
 
@@ -44,15 +47,19 @@ static void restore_default_stop_signal(void) {
     sigaction(SIGTERM, &action, NULL);
 }
 
+static int decode_status(int status) {
+    if (WIFEXITED(status)) return WEXITSTATUS(status);
+    if (WIFSIGNALED(status)) return 128 + WTERMSIG(status);
+    return 125;
+}
+
 static int child_status(pid_t child) {
     int status;
     while (waitpid(child, &status, 0) < 0) {
         if (errno != EINTR) return fail("wait for container process");
     }
     child_pid = -1;
-    if (WIFEXITED(status)) return WEXITSTATUS(status);
-    if (WIFSIGNALED(status)) return 128 + WTERMSIG(status);
-    return 125;
+    return decode_status(status);
 }
 
 static int fail(const char *operation) {
@@ -344,7 +351,224 @@ static int restrict_capabilities(void) {
     return 0;
 }
 
-static int run_container(char **argv, unsigned long volume_count) {
+#define EXEC_REQUEST_MAX (64U * 1024U)
+#define EXEC_ARGUMENTS_MAX 256
+#define EXEC_REQUEST_HEADER "RIFTEXEC1\n"
+
+static int write_all(int descriptor, const void *contents, size_t length) {
+    const char *cursor = contents;
+    while (length) {
+        ssize_t written = write(descriptor, cursor, length);
+        if (written < 0 && errno == EINTR) continue;
+        if (written <= 0) return -1;
+        cursor += written;
+        length -= (size_t)written;
+    }
+    return 0;
+}
+
+static int exec_filename(char *result, size_t capacity, const char *id, const char *suffix) {
+    int length = snprintf(result, capacity, "exec-%s.%s", id, suffix);
+    if (length < 0 || (size_t)length >= capacity) {
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+    return 0;
+}
+
+static int valid_exec_request_name(const char *name, char id[33]) {
+    if (strlen(name) != 45 || strncmp(name, "exec-", 5) != 0 || strcmp(name + 37, ".request") != 0) return 0;
+    for (size_t index = 5; index < 37; ++index) {
+        if (!((name[index] >= '0' && name[index] <= '9') || (name[index] >= 'a' && name[index] <= 'f'))) return 0;
+    }
+    memcpy(id, name + 5, 32);
+    id[32] = 0;
+    return 1;
+}
+
+static int write_exec_result(int directory, const char *id, int status) {
+    char result_name[64];
+    char temporary_name[72];
+    if (exec_filename(result_name, sizeof(result_name), id, "exit") != 0) return -1;
+    int length = snprintf(temporary_name, sizeof(temporary_name), "%s.tmp", result_name);
+    if (length < 0 || (size_t)length >= sizeof(temporary_name)) {
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+    unlinkat(directory, temporary_name, 0);
+    int descriptor = openat(directory, temporary_name, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
+    if (descriptor < 0) return -1;
+    char contents[16];
+    length = snprintf(contents, sizeof(contents), "%d\n", status);
+    int failed = length < 0 || (size_t)length >= sizeof(contents) || write_all(descriptor, contents, (size_t)length) != 0;
+    if (close(descriptor) != 0) failed = 1;
+    if (failed || renameat(directory, temporary_name, directory, result_name) != 0) {
+        unlinkat(directory, temporary_name, 0);
+        return -1;
+    }
+    return 0;
+}
+
+static int publish_exec_error(int directory, const char *id, const char *message) {
+    char output_name[64];
+    if (exec_filename(output_name, sizeof(output_name), id, "output") != 0) return -1;
+    int descriptor = openat(directory, output_name, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC | O_NOFOLLOW, 0600);
+    if (descriptor >= 0) {
+        write_all(descriptor, message, strlen(message));
+        close(descriptor);
+    }
+    return write_exec_result(directory, id, 125);
+}
+
+static int parse_exec_arguments(char *contents, size_t length, char **command, size_t *count) {
+    const size_t header_length = sizeof(EXEC_REQUEST_HEADER) - 1;
+    if (length <= header_length || memcmp(contents, EXEC_REQUEST_HEADER, header_length) != 0 || contents[length - 1] != 0) return 0;
+    size_t offset = header_length;
+    *count = 0;
+    while (offset < length) {
+        if (*count == EXEC_ARGUMENTS_MAX) return 0;
+        char *argument = contents + offset;
+        char *end = memchr(argument, 0, length - offset);
+        if (!end || (*count == 0 && end == argument)) return 0;
+        command[(*count)++] = argument;
+        offset = (size_t)(end - contents) + 1;
+    }
+    if (*count == 0) return 0;
+    command[*count] = NULL;
+    return 1;
+}
+
+static int run_exec(char *root, char *working_directory, char *user, char **command, int output) {
+    if (dup2(output, STDOUT_FILENO) < 0 || dup2(output, STDERR_FILENO) < 0) return fail("attach exec output");
+    int input = open("/dev/null", O_RDONLY | O_CLOEXEC);
+    if (input < 0 || dup2(input, STDIN_FILENO) < 0) return fail("attach exec input");
+    if (chroot(root) != 0) return fail("chroot exec process");
+    if (chdir("/") != 0) return fail("chdir exec root");
+
+    uid_t uid;
+    gid_t gid;
+    char username[256];
+    if (resolve_user(user, &uid, &gid, username) != 0) {
+        fputs("rift-exec: image user or group was not found\n", stderr);
+        return 125;
+    }
+    if (restrict_capabilities() != 0) return 125;
+    if (username[0]) {
+        if (initgroups(username, gid) != 0) return fail("set supplementary groups");
+    } else if (setgroups(0, NULL) != 0) {
+        return fail("clear supplementary groups");
+    }
+    if (setgid(gid) != 0) return fail("setgid");
+    if (setuid(uid) != 0) return fail("setuid");
+    if (chdir(working_directory) != 0) return fail("chdir working directory");
+    if (syscall(SYS_close_range, 3U, ~0U, 0U) != 0) return fail("close inherited descriptors");
+    execvp(command[0], command);
+    return fail("exec");
+}
+
+static int service_exec_request(int directory, char *root, char *working_directory, char *user) {
+    int scan_descriptor = openat(directory, ".", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (scan_descriptor < 0) return fail("scan exec requests");
+    DIR *entries = fdopendir(scan_descriptor);
+    if (!entries) {
+        close(scan_descriptor);
+        return fail("scan exec requests");
+    }
+    char request_name[64] = {0};
+    char id[33];
+    struct dirent *entry;
+    while ((entry = readdir(entries)) != NULL) {
+        if (!valid_exec_request_name(entry->d_name, id)) continue;
+        strcpy(request_name, entry->d_name);
+        break;
+    }
+    closedir(entries);
+    if (!request_name[0]) return 0;
+
+    int request = openat(directory, request_name, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (request < 0) return errno == ENOENT ? 0 : fail("open exec request");
+    struct stat info;
+    int valid = fstat(request, &info) == 0 && S_ISREG(info.st_mode) && info.st_size > 0 && info.st_size <= EXEC_REQUEST_MAX;
+    char contents[EXEC_REQUEST_MAX];
+    size_t length = 0;
+    if (valid) {
+        for (;;) {
+            ssize_t count = read(request, contents + length, sizeof(contents) - length);
+            if (count < 0 && errno == EINTR) continue;
+            if (count < 0) {
+                valid = 0;
+                break;
+            }
+            if (count == 0) break;
+            length += (size_t)count;
+            if (length == sizeof(contents)) {
+                char extra;
+                ssize_t more = read(request, &extra, 1);
+                if (more != 0) valid = 0;
+                break;
+            }
+        }
+    }
+    close(request);
+    unlinkat(directory, request_name, 0);
+
+    char *command[EXEC_ARGUMENTS_MAX + 1];
+    size_t argument_count = 0;
+    if (!valid || !parse_exec_arguments(contents, length, command, &argument_count)) {
+        publish_exec_error(directory, id, "rift-exec: invalid exec request\n");
+        return 1;
+    }
+
+    char output_name[64];
+    if (exec_filename(output_name, sizeof(output_name), id, "output") != 0) {
+        publish_exec_error(directory, id, "rift-exec: invalid exec output path\n");
+        return 1;
+    }
+    int output = openat(directory, output_name, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC | O_NOFOLLOW, 0600);
+    if (output < 0) {
+        write_exec_result(directory, id, 125);
+        return 1;
+    }
+    pid_t process = fork();
+    if (process < 0) {
+        char message[256];
+        int count = snprintf(message, sizeof(message), "rift-exec: fork exec process: %s\n", strerror(errno));
+        if (count > 0) write_all(output, message, (size_t)count);
+        close(output);
+        write_exec_result(directory, id, 125);
+        return 1;
+    }
+    if (process == 0) {
+        child_pid = -1;
+        exec_pid = -1;
+        pending_signal = 0;
+        restore_default_stop_signal();
+        _exit(run_exec(root, working_directory, user, command, output));
+    }
+
+    close(output);
+    exec_pid = process;
+    if (pending_signal) kill(process, pending_signal);
+    int status;
+    while (waitpid(process, &status, 0) < 0) {
+        if (errno != EINTR) {
+            exec_pid = -1;
+            write_exec_result(directory, id, 125);
+            return fail("wait for exec process");
+        }
+    }
+    exec_pid = -1;
+    if (write_exec_result(directory, id, decode_status(status)) != 0) return fail("write exec status");
+    return 1;
+}
+
+static int mark_exec_agent_ready(int directory) {
+    int descriptor = openat(directory, "agent-ready", O_WRONLY | O_CREAT | O_CLOEXEC | O_NOFOLLOW, 0600);
+    if (descriptor < 0) return -1;
+    return close(descriptor);
+}
+
+static int run_container(char **argv, unsigned long volume_count, int ready_descriptor) {
     if (chroot(argv[1]) != 0) return fail("chroot");
     if (chdir("/") != 0) return fail("chdir root");
 
@@ -369,18 +593,26 @@ static int run_container(char **argv, unsigned long volume_count) {
     if (setgid(gid) != 0) return fail("setgid");
     if (setuid(uid) != 0) return fail("setuid");
     if (chdir(argv[2]) != 0) return fail("chdir working directory");
-    if (syscall(SYS_close_range, 3U, ~0U, 0U) != 0) return fail("close inherited descriptors");
     if (pending_signal) return 128 + pending_signal;
     pid_t workload = fork();
     if (workload < 0) return fail("fork container workload");
     if (workload == 0) {
         child_pid = -1;
+        close(ready_descriptor);
         pending_signal = 0;
         restore_default_stop_signal();
+        if (syscall(SYS_close_range, 3U, ~0U, 0U) != 0) _exit(fail("close inherited descriptors"));
         execvp(argv[5 + volume_count * 4], argv + 5 + volume_count * 4);
         _exit(fail("exec"));
     }
     child_pid = workload;
+    if (write(ready_descriptor, "R", 1) != 1) {
+        close(ready_descriptor);
+        kill(workload, SIGTERM);
+        return fail("notify exec agent");
+    }
+    close(ready_descriptor);
+    if (syscall(SYS_close_range, 3U, ~0U, 0U) != 0) return fail("close inherited descriptors");
     if (pending_signal) kill(workload, pending_signal);
     return child_status(workload);
 }
@@ -398,15 +630,58 @@ int main(int argc, char **argv) {
         return 125;
     }
     if (install_stop_signal_handler() != 0) return fail("install stop signal handler");
+    int control = open("/mnt/control/exec", O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    if (control < 0) return fail("open exec control directory");
+    int ready[2];
+    if (pipe2(ready, O_CLOEXEC) != 0) {
+        close(control);
+        return fail("create exec agent channel");
+    }
     if (unshare(CLONE_NEWNS | CLONE_NEWPID) != 0) return fail("create container namespaces");
     if (mount(NULL, "/", NULL, MS_REC | MS_PRIVATE, NULL) != 0) return fail("make mounts private");
     pid_t child = fork();
     if (child < 0) return fail("fork container process");
     if (child == 0) {
+        close(ready[0]);
+        close(control);
         child_pid = -1;
-        return run_container(argv, volume_count);
+        return run_container(argv, volume_count, ready[1]);
     }
+    close(ready[1]);
     child_pid = child;
     if (pending_signal) kill(child, pending_signal);
-    return child_status(child);
+    char ready_signal;
+    ssize_t received;
+    do {
+        received = read(ready[0], &ready_signal, 1);
+    } while (received < 0 && errno == EINTR);
+    close(ready[0]);
+    if (received != 1 || ready_signal != 'R') {
+        close(control);
+        return child_status(child);
+    }
+    if (mark_exec_agent_ready(control) != 0) {
+        close(control);
+        kill(child, SIGTERM);
+        return fail("publish exec agent readiness");
+    }
+    for (;;) {
+        int status;
+        pid_t finished = waitpid(child, &status, WNOHANG);
+        if (finished == child) {
+            child_pid = -1;
+            close(control);
+            return decode_status(status);
+        }
+        if (finished < 0 && errno != EINTR) {
+            close(control);
+            return fail("wait for container process");
+        }
+        if (!pending_signal && service_exec_request(control, argv[1], argv[2], argv[3]) == 125) {
+            close(control);
+            kill(child, SIGTERM);
+            return 125;
+        }
+        usleep(50000);
+    }
 }

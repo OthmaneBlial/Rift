@@ -40,7 +40,8 @@ This is the running checklist from Rift’s first CLI and OCI work through a dep
 - [x] Apply absolute image `WorkingDir`, `-w`, numeric or named `User`, and supplementary groups.
 - [x] Use private PID and mount namespaces, basic `/dev` and `/proc`, reduced capabilities, and `no_new_privs`.
 - [ ] Implement broader OCI process settings and review isolation against a documented threat model.
-- [ ] Add `rift exec` for running a command in an existing container.
+- [x] Add non-interactive `rift exec` for detached containers; preserve arguments, environment, working directory, PID namespace, filesystem, and exit status.
+- [ ] Add interactive exec stdin/TTY support and signal cancellation.
 - [x] Provide outbound NAT and DNS for foreground commands.
 - [x] Forward one localhost TCP port for foreground commands.
 - [x] Run detached containers; provide `ps`, `inspect`, plain `logs`, graceful `stop`, force `kill`, and `rm`.

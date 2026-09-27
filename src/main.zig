@@ -29,6 +29,7 @@ fn printHelp(writer: *Io.Writer) Io.Writer.Error!void {
             "  ps                 List detached containers\n" ++
             "  inspect <id>       Show detached container details\n" ++
             "  logs <id>          Show a detached container's output\n" ++
+            "  exec <id> <cmd>    Run a non-interactive command in a running container\n" ++
             "  stop <id>          Stop a detached container\n" ++
             "  kill <id>          Force-kill a detached container\n" ++
             "  rm <id>            Remove a stopped container\n",
@@ -94,7 +95,7 @@ fn dispatch(args: []const []const u8, writer: *Io.Writer, init: ?std.process.Ini
             try containers.spawn(process, run_args, writer);
             return 0;
         }
-        return runtime.execute(process, run_args, null, null);
+        return runtime.execute(process, run_args, null, null, null);
     }
 
     if (args.len == 1 and std.mem.eql(u8, args[0], "ps")) {
@@ -109,6 +110,10 @@ fn dispatch(args: []const []const u8, writer: *Io.Writer, init: ?std.process.Ini
     if (args.len == 2 and std.mem.eql(u8, args[0], "logs")) {
         try containers.logs(init orelse return error.CommandUnavailable, args[1], writer);
         return 0;
+    }
+    if (args.len > 0 and std.mem.eql(u8, args[0], "exec")) {
+        if (args.len < 3) return error.InvalidArguments;
+        return containers.exec(init orelse return error.CommandUnavailable, args[1], args[2..], writer);
     }
     if (args.len == 2 and std.mem.eql(u8, args[0], "stop")) {
         try containers.stop(init orelse return error.CommandUnavailable, args[1], writer);
@@ -327,8 +332,12 @@ pub fn main(init: std.process.Init) void {
             error.InvalidContainerId => std.debug.print("rift: invalid container ID\n", .{}),
             error.ContainerNotFound => std.debug.print("rift: container not found\n", .{}),
             error.ContainerNotRunning => std.debug.print("rift: container is not running\n", .{}),
+            error.ContainerExecRunning => std.debug.print("rift: wait for the active exec command before removing this container\n", .{}),
             error.ContainerRunning => std.debug.print("rift: stop the container before removing it\n", .{}),
             error.ContainerStopTimedOut => std.debug.print("rift: timed out waiting for the container to terminate\n", .{}),
+            error.ExecAgentNotReady => std.debug.print("rift: container did not start its exec agent in time\n", .{}),
+            error.ExecRequestTooLarge => std.debug.print("rift: exec request exceeds 64 KiB\n", .{}),
+            error.InvalidExecStatus, error.ExecOutputMissing, error.ExecOutputTruncated, error.InvalidExecState => std.debug.print("rift: container returned an invalid exec response\n", .{}),
             error.DetachedAutoRemoveUnsupported => std.debug.print("rift: --rm is not available with detached runs yet\n", .{}),
             error.InvalidImageConfig => std.debug.print("rift: image configuration is invalid or mismatches its layers\n", .{}),
             error.ImageHasNoCommand => std.debug.print("rift: image has no default command; specify one after the image\n", .{}),
@@ -344,7 +353,7 @@ pub fn main(init: std.process.Init) void {
         }
         std.process.exit(if (err == error.InvalidArguments or err == error.CommandUnavailable or
             err == error.InvalidVolumeSpecification or err == error.ReservedVolumeTarget or err == error.DuplicateVolumeTarget or
-            err == error.InvalidVolumeSource or err == error.FileVolumeMustShareFilesystem or err == error.FileVolumeCannotContainTarget or err == error.TooManyVolumes) 2 else 1);
+            err == error.InvalidVolumeSource or err == error.FileVolumeMustShareFilesystem or err == error.FileVolumeCannotContainTarget or err == error.TooManyVolumes or err == error.ExecRequestTooLarge) 2 else 1);
     };
     stdout.interface.flush() catch |err| {
         std.debug.print("rift: output failed: {s}\n", .{@errorName(err)});
@@ -360,6 +369,7 @@ test "help is available without a command" {
     try std.testing.expect(std.mem.startsWith(u8, output.written(), "Rift — Ridiculously lightweight containers for macOS\n"));
     try std.testing.expect(std.mem.indexOf(u8, output.written(), "kill <id>") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.written(), "inspect <id>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output.written(), "exec <id> <cmd>") != null);
 }
 
 test "version prints the package version" {
@@ -387,6 +397,13 @@ test "inspect requires a container ID" {
     var output: Io.Writer.Allocating = .init(std.testing.allocator);
     defer output.deinit();
     try std.testing.expectError(error.InvalidArguments, dispatch(&.{"inspect"}, &output.writer, null));
+}
+
+test "exec requires a container ID and command" {
+    var output: Io.Writer.Allocating = .init(std.testing.allocator);
+    defer output.deinit();
+    try std.testing.expectError(error.InvalidArguments, dispatch(&.{"exec"}, &output.writer, null));
+    try std.testing.expectError(error.InvalidArguments, dispatch(&.{ "exec", "0123456789abcdef0123456789abcdef" }, &output.writer, null));
 }
 
 test {

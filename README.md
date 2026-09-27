@@ -42,18 +42,19 @@ id=$(rift run -d -p 8080:80 nginx)
 curl http://127.0.0.1:8080
 rift ps
 rift logs "$id"
+rift exec "$id" /bin/sh -c 'echo online'
 rift stop "$id"
 rift rm "$id"
 ```
 
-Rift forwards one TCP port per run. Detached containers keep their logs and status until removed.
+Rift forwards one TCP port per run. Detached containers keep their logs and status until removed. `exec` runs a non-interactive command with the container's environment and working directory; output appears when it exits.
 
 ## What works
 
 - Pull public OCI images for `linux/arm64`; optional credentials support private Bearer-token registries.
 - Run foreground and detached containers with image entrypoint, command, environment, working directory, user, and supplementary groups.
 - Use outbound networking, DNS, one localhost port mapping, and explicit file or directory volumes.
-- Inspect and manage detached containers with `ps`, `inspect`, `logs`, `stop`, `kill`, and `rm`.
+- Inspect and manage detached containers with `ps`, `inspect`, `logs`, non-interactive `exec`, `stop`, `kill`, and `rm`.
 - Check storage with `system df` and preview or remove unused data with `clean`.
 
 For private registries, set `RIFT_REGISTRY_USERNAME` and `RIFT_REGISTRY_PASSWORD` for the pull. Rift does not store them.
@@ -75,6 +76,7 @@ Host environment variables are not copied into containers. Volumes are read-only
 - Zig 0.16 or newer to build from source.
 - One lightweight Linux VM per run; the current guest limit is 2 CPUs and 256 MiB RAM.
 - One TCP port mapping per run; up to 16 explicit file or directory volumes.
+- `exec` does not support interactive stdin or TTY allocation yet.
 - OCI ownership, PAX metadata, extended attributes, special files, and broader process isolation are not implemented.
 - No Developer ID signature or notarized download yet. Build from source for now; do not use this preview as a Docker replacement.
 

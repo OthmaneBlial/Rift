@@ -10,7 +10,7 @@ const rootfs = @import("oci/rootfs.zig");
 const storage = @import("storage.zig");
 const vm = @import("vm.zig");
 
-pub fn execute(init: std.process.Init, arguments: []const []const u8, stop_path: ?[]const u8, kill_path: ?[]const u8) !u8 {
+pub fn execute(init: std.process.Init, arguments: []const []const u8, stop_path: ?[]const u8, kill_path: ?[]const u8, container_id: ?[]const u8) !u8 {
     if (builtin.os.tag != .macos or builtin.cpu.arch != .aarch64) return error.UnsupportedHost;
     const allocator = init.arena.allocator();
     const options = try parseOptions(allocator, arguments);
@@ -70,10 +70,15 @@ pub fn execute(init: std.process.Init, arguments: []const []const u8, stop_path:
     try data_dir.createDirPath(init.io, "runtime");
     var runtime = try data_dir.openDir(init.io, "runtime", .{});
     defer runtime.close(init.io);
-    var random: [16]u8 = undefined;
-    init.io.random(&random);
-    const hex = std.fmt.bytesToHex(random, .lower);
-    const name = try std.fmt.allocPrint(allocator, "run-{s}", .{hex});
+    const name = if (container_id) |id| blk: {
+        if (id.len != 32) return error.InvalidContainerId;
+        break :blk try std.fmt.allocPrint(allocator, "run-{s}", .{id});
+    } else blk: {
+        var random: [16]u8 = undefined;
+        init.io.random(&random);
+        const hex = std.fmt.bytesToHex(random, .lower);
+        break :blk try std.fmt.allocPrint(allocator, "run-{s}", .{hex});
+    };
     try runtime.createDir(init.io, name, .fromMode(0o700));
     errdefer runtime.deleteTree(init.io, name) catch {};
     var run_dir = try runtime.openDir(init.io, name, .{});
@@ -83,11 +88,12 @@ pub fn execute(init: std.process.Init, arguments: []const []const u8, stop_path:
     defer runtime.deleteTree(init.io, name) catch {};
     try run_dir.createDir(init.io, "rootfs", .default_dir);
     try run_dir.createDir(init.io, "control", .default_dir);
+    var control = try run_dir.openDir(init.io, "control", .{ .follow_symlinks = false });
+    defer control.close(init.io);
+    try control.createDir(init.io, "exec", .fromMode(0o700));
     const staged_volumes = try stageFileVolumes(allocator, init.io, run_dir, volumes);
     var image_root = try run_dir.openDir(init.io, "rootfs", .{});
     defer image_root.close(init.io);
-    var control = try run_dir.openDir(init.io, "control", .{});
-    defer control.close(init.io);
     try rootfs.assemble(allocator, init.io, image_root, store, manifest_digest);
     store.unlock();
     cache_locked = false;
@@ -105,7 +111,13 @@ pub fn execute(init: std.process.Init, arguments: []const []const u8, stop_path:
     const kernel_path = try std.fmt.allocPrint(allocator, "{s}/Image", .{guest_path});
     const initramfs_path = try std.fmt.allocPrint(allocator, "{s}/initramfs", .{run_path});
 
-    try vm.run(allocator, kernel_path, initramfs_path, "console=hvc0 quiet loglevel=0 rdinit=/rift-init", root_path, control_path, stop_path, kill_path, staged_volumes, true, port, 0, 1);
+    vm.run(allocator, kernel_path, initramfs_path, "console=hvc0 quiet loglevel=0 rdinit=/rift-init", root_path, control_path, stop_path, kill_path, staged_volumes, true, port, 0, 1) catch |err| {
+        if (container_id) |id| {
+            control.writeFile(init.io, .{ .sub_path = "host-exit", .data = "" }) catch {};
+            try waitForExecClients(init, id);
+        }
+        return err;
+    };
     const status_file = control.openFile(init.io, "exit", .{ .mode = .read_only, .allow_directory = false, .follow_symlinks = false }) catch |err| switch (err) {
         error.FileNotFound => return error.GuestStatusMissing,
         else => return err,
@@ -119,7 +131,24 @@ pub fn execute(init: std.process.Init, arguments: []const []const u8, stop_path:
     try status_reader.interface.readSliceAll(status_buffer[0..@intCast(status_size)]);
     const code = std.fmt.parseInt(u16, std.mem.trim(u8, status_buffer[0..@intCast(status_size)], "\r\n"), 10) catch return error.GuestStatusInvalid;
     if (code > 255) return error.GuestStatusInvalid;
+    if (container_id) |id| try waitForExecClients(init, id);
     return @intCast(code);
+}
+
+fn waitForExecClients(init: std.process.Init, id: []const u8) !void {
+    const home = init.environ_map.get("HOME") orelse return error.HomeDirectoryUnavailable;
+    var home_dir = try Io.Dir.openDirAbsolute(init.io, home, .{});
+    defer home_dir.close(init.io);
+    var data_dir = try home_dir.openDir(init.io, "Library/Application Support/Rift", .{ .follow_symlinks = false });
+    defer data_dir.close(init.io);
+    var containers = try data_dir.openDir(init.io, "containers", .{ .follow_symlinks = false });
+    defer containers.close(init.io);
+    var state = try containers.openDir(init.io, id, .{ .follow_symlinks = false });
+    defer state.close(init.io);
+    const lock = try state.openFile(init.io, "exec.lock", .{ .mode = .read_write, .follow_symlinks = false });
+    defer lock.close(init.io);
+    try lock.lock(init.io, .exclusive);
+    lock.unlock(init.io);
 }
 
 pub const Options = struct { image_index: usize, port: ?vm.PortMapping, working_dir: ?[]const u8, environments: []const []const u8, volumes: []const vm.Volume, remove_after_exit: bool };
