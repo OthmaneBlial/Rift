@@ -52,7 +52,8 @@ This checklist follows the goals in the original project brief. `[x]` marks work
 - [x] Smoke-test pulled Alpine BusyBox inside the VM through a read-only share.
 - [x] Keep image files read-only and use a disposable writable overlay for container changes.
 - [ ] Preserve OCI file ownership and groups during layer extraction.
-- [ ] Support PAX metadata, including extended paths and timestamps.
+- [x] Apply and test local PAX `path`, `linkpath`, and `size` overrides; recheck path and link safety after overrides.
+- [ ] Preserve PAX `mtime`/`uid`/`gid` fields; honor global PAX headers.
 - [ ] Support OCI extended attributes and file capabilities.
 - [ ] Support required special files such as FIFOs and device nodes.
 

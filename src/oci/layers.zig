@@ -382,6 +382,65 @@ test "applies final directory modes after all layers" {
     try std.testing.expectEqualStrings("ok", contents);
 }
 
+test "honors local PAX path and size overrides and rejects unsafe overrides" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var temp = std.testing.tmpDir(.{});
+    defer temp.cleanup();
+    try temp.dir.createDirPath(io, "root");
+    var root = try temp.dir.openDir(io, "root", .{});
+    defer root.close(io);
+
+    const component = try allocator.alloc(u8, 160);
+    defer allocator.free(component);
+    @memset(component, 'p');
+    const long_path = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ component, component });
+    defer allocator.free(long_path);
+
+    var valid_archive: Io.Writer.Allocating = .init(allocator);
+    defer valid_archive.deinit();
+    var valid_tar: std.tar.Writer = .{ .underlying_writer = &valid_archive.writer };
+    try writeTestPaxHeader(allocator, &valid_archive, &valid_tar, &.{
+        .{ .key = "path", .value = long_path },
+        .{ .key = "size", .value = "5" },
+    });
+    const file_header_offset = valid_archive.written().len;
+    try valid_tar.writeFileBytes("fallback", "hello", .{});
+    const valid_bytes = @constCast(valid_archive.written());
+    @memset(valid_bytes[file_header_offset + 124 .. file_header_offset + 136], 0);
+    updateTestTarChecksum(valid_bytes[file_header_offset..][0..512]);
+    try temp.dir.writeFile(io, .{ .sub_path = "valid-pax.tar", .data = valid_archive.written() });
+    const valid_blob = try temp.dir.openFile(io, "valid-pax.tar", .{ .mode = .read_only });
+    defer valid_blob.close(io);
+    try applyOne(allocator, io, root, valid_blob, "application/vnd.oci.image.layer.v1.tar");
+
+    const contents = try root.readFileAlloc(io, long_path, allocator, .limited(8));
+    defer allocator.free(contents);
+    try std.testing.expectEqualStrings("hello", contents);
+    try std.testing.expectError(error.FileNotFound, root.statFile(io, "fallback", .{}));
+
+    var unsafe_path_archive: Io.Writer.Allocating = .init(allocator);
+    defer unsafe_path_archive.deinit();
+    var unsafe_path_tar: std.tar.Writer = .{ .underlying_writer = &unsafe_path_archive.writer };
+    try writeTestPaxHeader(allocator, &unsafe_path_archive, &unsafe_path_tar, &.{.{ .key = "path", .value = "../outside" }});
+    try unsafe_path_tar.writeFileBytes("fallback", "blocked", .{});
+    try temp.dir.writeFile(io, .{ .sub_path = "unsafe-path.tar", .data = unsafe_path_archive.written() });
+    const unsafe_path_blob = try temp.dir.openFile(io, "unsafe-path.tar", .{ .mode = .read_only });
+    defer unsafe_path_blob.close(io);
+    try std.testing.expectError(error.UnsafeLayerPath, applyOne(allocator, io, root, unsafe_path_blob, "application/vnd.oci.image.layer.v1.tar"));
+    try std.testing.expectError(error.FileNotFound, temp.dir.statFile(io, "outside", .{}));
+
+    var unsafe_link_archive: Io.Writer.Allocating = .init(allocator);
+    defer unsafe_link_archive.deinit();
+    var unsafe_link_tar: std.tar.Writer = .{ .underlying_writer = &unsafe_link_archive.writer };
+    try writeTestPaxHeader(allocator, &unsafe_link_archive, &unsafe_link_tar, &.{.{ .key = "linkpath", .value = "../../outside" }});
+    try unsafe_link_tar.writeLink("unsafe-link", "inside", .{});
+    try temp.dir.writeFile(io, .{ .sub_path = "unsafe-link.tar", .data = unsafe_link_archive.written() });
+    const unsafe_link_blob = try temp.dir.openFile(io, "unsafe-link.tar", .{ .mode = .read_only });
+    defer unsafe_link_blob.close(io);
+    try std.testing.expectError(error.UnsafeLayerLink, applyOne(allocator, io, root, unsafe_link_blob, "application/vnd.oci.image.layer.v1.tar"));
+}
+
 test "rejects paths through symlink parents" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;
@@ -458,10 +517,42 @@ fn writeTestHardlink(writer: *Io.Writer, name: []const u8, target: []const u8) !
     try header.setLinkname(target);
     const bytes = std.mem.asBytes(&header);
     bytes[156] = '1';
-    @memset(bytes[148..156], ' ');
-    var checksum: usize = 0;
-    for (bytes) |byte| checksum += byte;
-    _ = try std.fmt.bufPrint(bytes[148..154], "{o:0>6}", .{checksum});
-    bytes[154] = 0;
+    updateTestTarChecksum(bytes);
     try writer.writeAll(bytes);
+}
+
+const TestPaxAttribute = struct { key: []const u8, value: []const u8 };
+
+fn writeTestPaxHeader(allocator: std.mem.Allocator, archive: *Io.Writer.Allocating, tar: *std.tar.Writer, attributes: []const TestPaxAttribute) !void {
+    var record: Io.Writer.Allocating = .init(allocator);
+    defer record.deinit();
+    for (attributes) |attribute| try writeTestPaxRecord(&record.writer, attribute.key, attribute.value);
+
+    const header_offset = archive.written().len;
+    try tar.writeFileBytes("PaxHeaders.0/entry", record.written(), .{});
+    const bytes = @constCast(archive.written());
+    bytes[header_offset + 156] = 'x';
+    updateTestTarChecksum(bytes[header_offset..][0..512]);
+}
+
+fn writeTestPaxRecord(writer: *Io.Writer, key: []const u8, value: []const u8) !void {
+    const without_length = key.len + value.len + 3;
+    var length = without_length + 1;
+    while (true) {
+        var digits: usize = 1;
+        var remaining = length;
+        while (remaining >= 10) : (remaining /= 10) digits += 1;
+        const next = without_length + digits;
+        if (next == length) break;
+        length = next;
+    }
+    try writer.print("{d} {s}={s}\n", .{ length, key, value });
+}
+
+fn updateTestTarChecksum(header: []u8) void {
+    @memset(header[148..156], ' ');
+    var checksum: usize = 0;
+    for (header) |byte| checksum += byte;
+    _ = std.fmt.bufPrint(header[148..154], "{o:0>6}", .{checksum}) catch unreachable;
+    header[154] = 0;
 }

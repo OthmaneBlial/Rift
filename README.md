@@ -77,7 +77,7 @@ Host environment variables are not copied into containers. Volumes are read-only
 - One lightweight Linux VM per run; the current guest limit is 2 CPUs and 256 MiB RAM.
 - One TCP port mapping per run; up to 16 explicit file or directory volumes.
 - `exec` does not support interactive stdin or TTY allocation yet.
-- OCI ownership, PAX metadata, extended attributes, special files, and broader process isolation are not implemented.
+- OCI file ownership, PAX `mtime`/`uid`/`gid` and global headers, extended attributes, special files, and broader process isolation remain unsupported.
 - No Developer ID signature or notarized download yet. Build from source for now; do not use this preview as a Docker replacement.
 
 Treat images and workloads as untrusted. Rift limits host access to explicitly mounted paths, but its security model still needs broader adversarial review.
