@@ -75,23 +75,38 @@ pub const BlobStore = struct {
         };
         defer file.close(store.io);
 
-        if ((try file.stat(store.io)).size != expected_size) return false;
+        return fileMatches(store.io, file, digest, expected_size);
+    }
 
-        var hash = std.crypto.hash.sha2.Sha256.init(.{});
-        var total: u64 = 0;
-        var reader_buffer: [32 * 1024]u8 = undefined;
+    pub fn openVerified(store: BlobStore, digest: []const u8, expected_size: u64) anyerror!std.Io.File {
+        const filename = try sha256Filename(digest);
+        const file = try store.blobs.openFile(store.io, filename, .{
+            .mode = .read_only,
+            .follow_symlinks = false,
+        });
+        errdefer file.close(store.io);
+        if (!(try fileMatches(store.io, file, digest, expected_size))) return error.CorruptCachedBlob;
+        return file;
+    }
+
+    pub fn readVerifiedAlloc(store: BlobStore, allocator: std.mem.Allocator, digest: []const u8, max_size: u64) anyerror![]u8 {
+        const filename = try sha256Filename(digest);
+        const file = try store.blobs.openFile(store.io, filename, .{
+            .mode = .read_only,
+            .follow_symlinks = false,
+        });
+        defer file.close(store.io);
+        const size = (try file.stat(store.io)).size;
+        if (size > max_size or size > std.math.maxInt(usize)) return error.BlobTooLarge;
+        const contents = try allocator.alloc(u8, @intCast(size));
+        errdefer allocator.free(contents);
         var buffer: [32 * 1024]u8 = undefined;
-        var reader = file.readerStreaming(store.io, &reader_buffer);
-        while (true) {
-            const count = try reader.interface.readSliceShort(&buffer);
-            if (count == 0) break;
-            const amount: u64 = @intCast(count);
-            if (total > expected_size or amount > expected_size - total) return false;
-            hash.update(buffer[0..count]);
-            total += amount;
-            if (count < buffer.len) break;
-        }
-        return total == expected_size and hashMatches(hash.finalResult(), digest);
+        var reader = file.reader(store.io, &buffer);
+        try reader.interface.readSliceAll(contents);
+        var hash = std.crypto.hash.sha2.Sha256.init(.{});
+        hash.update(contents);
+        if (!hashMatches(hash.finalResult(), digest)) return error.CorruptCachedBlob;
+        return contents;
     }
 
     pub fn writeVerified(store: BlobStore, digest: []const u8, expected_size: u64, body: *std.Io.Reader) anyerror!void {
@@ -110,7 +125,6 @@ pub const BlobStore = struct {
             hash.update(buffer[0..count]);
             try atomic.file.writeStreamingAll(store.io, buffer[0..count]);
             total += amount;
-            if (count < buffer.len) break;
         }
 
         if (total != expected_size) return error.BlobSizeMismatch;
@@ -118,6 +132,25 @@ pub const BlobStore = struct {
         try atomic.replace(store.io);
     }
 };
+
+fn fileMatches(io: std.Io, file: std.Io.File, digest: []const u8, expected_size: u64) !bool {
+    if ((try file.stat(io)).size != expected_size) return false;
+
+    var hash = std.crypto.hash.sha2.Sha256.init(.{});
+    var total: u64 = 0;
+    var reader_buffer: [32 * 1024]u8 = undefined;
+    var buffer: [32 * 1024]u8 = undefined;
+    var reader = file.reader(io, &reader_buffer);
+    while (true) {
+        const count = try reader.interface.readSliceShort(&buffer);
+        if (count == 0) break;
+        const amount: u64 = @intCast(count);
+        if (total > expected_size or amount > expected_size - total) return false;
+        hash.update(buffer[0..count]);
+        total += amount;
+    }
+    return total == expected_size and hashMatches(hash.finalResult(), digest);
+}
 
 pub const ImageRecord = struct {
     reference: []const u8,
@@ -223,6 +256,14 @@ test "stores a blob atomically and verifies cached bytes" {
     try store.writeVerified(digest, 5, &body);
     try std.testing.expect(try store.containsVerified(digest, 5));
     try std.testing.expect(!(try store.containsVerified(digest, 4)));
+    const file = try store.openVerified(digest, 5);
+    file.close(store.io);
+    const cached = try store.readVerifiedAlloc(std.testing.allocator, digest, 100);
+    defer std.testing.allocator.free(cached);
+    try std.testing.expectEqualStrings("hello", cached);
+    try store.blobs.writeFile(store.io, .{ .sub_path = digest[7..], .data = "other" });
+    try std.testing.expectError(error.CorruptCachedBlob, store.openVerified(digest, 5));
+    try std.testing.expectError(error.CorruptCachedBlob, store.readVerifiedAlloc(std.testing.allocator, digest, 100));
 }
 
 test "rejects wrong sizes and digests without publishing partial files" {

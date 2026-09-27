@@ -6,7 +6,7 @@
 
 Rift's Zig/Objective-C VM bridge boots an Alpine ARM64 kernel and initramfs to a shell, runs a command, and shuts down through the local `zig build vm-check` gate. `scripts/prepare_guest.py` reproduces those guest files from a pinned, SHA-256-verified Alpine ISO. Alpine packages its ARM64 kernel as a compressed EFI zboot image; the script extracts the uncompressed `Image` needed for direct boot. The public CLI has no container execution command yet.
 
-The layer installer now handles OCI tar, gzip, and zstd layers. It applies whiteouts before entries from the same layer and refuses archive paths or parent symlinks that could redirect host writes. A local smoke check extracted the pulled Alpine ARM64 layer and found BusyBox and its links. Hardlink entries and complete OCI ownership, directory modes, timestamps, and extended attributes still need implementation. No public command assembles or runs an image yet.
+The layer installer now handles OCI tar, gzip, and zstd layers. It applies whiteouts before entries from the same layer and refuses archive paths or parent symlinks that could redirect host writes. Root filesystem assembly reads a verified platform manifest, checks each cached layer digest and size again, and applies layers to a caller-owned staging directory. A local smoke check assembled the pulled Alpine ARM64 image and found BusyBox and its links. Hardlink entries and complete OCI ownership, directory modes, timestamps, and extended attributes still need implementation. No public command assembles or runs an image yet.
 
 ## Runtime shape
 

@@ -40,6 +40,12 @@ zig build vm-check
 
 This boots Alpine, runs a command in its initramfs shell, and shuts down. OCI container execution is still in development.
 
+To assemble a pulled Alpine root filesystem locally, use the manifest digest shown by `rift images`:
+
+```sh
+zig run src/rootfs_probe.zig -- "$HOME/Library/Application Support/Rift" sha256:REPLACE_WITH_DIGEST_FROM_RIFT_IMAGES
+```
+
 ## Runtime plan
 
 macOS uses a Linux VM to run Linux containers. Rift is being designed around Apple's Virtualization.framework, an OCI image store, and a small Linux guest agent. See [the architecture](docs/ARCHITECTURE.md) for the proposed boundaries, execution path, security constraints, and current status.
@@ -57,6 +63,7 @@ No Docker Engine, Docker CLI, Docker Desktop, or container daemon is part of the
 - [x] Local Virtualization.framework bridge and Alpine guest boot check
 - [ ] Image removal
 - [x] Initial safe extraction of tar, gzip, and zstd layers, including OCI whiteouts
+- [x] Local root filesystem assembly from verified manifest and layer blobs
 - [ ] Hardlinks and complete OCI filesystem metadata
 - [ ] OCI command execution through Rift's public CLI
 - [ ] Container lifecycle, logs, networking, and cleanup
