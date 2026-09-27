@@ -24,7 +24,7 @@ fn printHelp(writer: *Io.Writer) Io.Writer.Error!void {
             "  clean [--yes]      Preview or remove stale runtime staging\n" ++
             "  images             List locally pulled images\n" ++
             "  pull <image>       Pull an OCI image for this host\n" ++
-            "  run [-d] [--rm] [-p HOST:GUEST] [-w DIR] [-e KEY=VALUE] <image> [command] [args...] Run an image\n" ++
+            "  run [-d] [--rm] [-p HOST:GUEST] [-w DIR] [-e KEY=VALUE] [-v HOST:DIR[:ro|rw]] <image> [command] [args...] Run an image\n" ++
             "  ps                 List detached containers\n" ++
             "  logs <id>          Show a detached container's output\n" ++
             "  stop <id>          Stop a detached container\n" ++
@@ -147,6 +147,7 @@ fn ensurePulled(init: std.process.Init, arguments: []const []const u8, detached:
     if (builtin.os.tag != .macos or builtin.cpu.arch != .aarch64) return error.UnsupportedHost;
     const options = try runtime.parseOptions(init.arena.allocator(), arguments);
     if (detached and options.remove_after_exit) return error.DetachedAutoRemoveUnsupported;
+    _ = try runtime.resolveVolumes(init, options.volumes);
     const allocator = init.arena.allocator();
     const image_name = arguments[options.image_index];
     var image = try reference.parse(allocator, image_name);
@@ -265,9 +266,15 @@ pub fn main(init: std.process.Init) void {
             error.InvalidImageConfig => std.debug.print("rift: image configuration is invalid or mismatches its layers\n", .{}),
             error.ImageHasNoCommand => std.debug.print("rift: image has no default command; specify one after the image\n", .{}),
             error.UnsupportedWorkingDirectory => std.debug.print("rift: image working directory must be an absolute path\n", .{}),
+            error.InvalidVolumeSpecification => std.debug.print("rift: volume must use absolute HOST:DIR[:ro|rw] paths without . or .. components\n", .{}),
+            error.DuplicateVolumeTarget => std.debug.print("rift: each volume target must be unique\n", .{}),
+            error.InvalidVolumeSource => std.debug.print("rift: volume source must be an existing directory, not a symlink\n", .{}),
+            error.TooManyVolumes => std.debug.print("rift: at most 16 volumes are supported\n", .{}),
             else => std.debug.print("rift: output failed: {s}\n", .{@errorName(err)}),
         }
-        std.process.exit(if (err == error.InvalidArguments or err == error.CommandUnavailable) 2 else 1);
+        std.process.exit(if (err == error.InvalidArguments or err == error.CommandUnavailable or
+            err == error.InvalidVolumeSpecification or err == error.DuplicateVolumeTarget or
+            err == error.InvalidVolumeSource or err == error.TooManyVolumes) 2 else 1);
     };
     stdout.interface.flush() catch |err| {
         std.debug.print("rift: output failed: {s}\n", .{@errorName(err)});

@@ -14,6 +14,7 @@ pub fn execute(init: std.process.Init, arguments: []const []const u8, stop_path:
     if (builtin.os.tag != .macos or builtin.cpu.arch != .aarch64) return error.UnsupportedHost;
     const allocator = init.arena.allocator();
     const options = try parseOptions(allocator, arguments);
+    const volumes = try resolveVolumes(init, options.volumes);
     const offset = options.image_index;
     const port = options.port;
     var image = try reference.parse(allocator, arguments[offset]);
@@ -85,7 +86,7 @@ pub fn execute(init: std.process.Init, arguments: []const []const u8, stop_path:
     defer control.close(init.io);
     try rootfs.assemble(allocator, init.io, image_root, store, manifest_digest);
     const interactive = try Io.File.stdin().isTty(init.io);
-    try guest.writeInitramfs(allocator, init.io, base_initramfs, run_dir, command, environment, working_dir, process.User orelse "", interactive, port != null);
+    try guest.writeInitramfs(allocator, init.io, base_initramfs, run_dir, command, environment, working_dir, process.User orelse "", volumes, interactive, port != null);
 
     var root_path_buffer: [Io.Dir.max_path_bytes]u8 = undefined;
     var control_path_buffer: [Io.Dir.max_path_bytes]u8 = undefined;
@@ -98,7 +99,7 @@ pub fn execute(init: std.process.Init, arguments: []const []const u8, stop_path:
     const kernel_path = try std.fmt.allocPrint(allocator, "{s}/Image", .{guest_path});
     const initramfs_path = try std.fmt.allocPrint(allocator, "{s}/initramfs", .{run_path});
 
-    try vm.run(allocator, kernel_path, initramfs_path, "console=hvc0 quiet loglevel=0 rdinit=/rift-init", root_path, control_path, stop_path, true, port, 0, 1);
+    try vm.run(allocator, kernel_path, initramfs_path, "console=hvc0 quiet loglevel=0 rdinit=/rift-init", root_path, control_path, stop_path, volumes, true, port, 0, 1);
     const status_file = control.openFile(init.io, "exit", .{ .mode = .read_only, .allow_directory = false, .follow_symlinks = false }) catch |err| switch (err) {
         error.FileNotFound => return error.GuestStatusMissing,
         else => return err,
@@ -115,7 +116,7 @@ pub fn execute(init: std.process.Init, arguments: []const []const u8, stop_path:
     return @intCast(code);
 }
 
-pub const Options = struct { image_index: usize, port: ?vm.PortMapping, working_dir: ?[]const u8, environments: []const []const u8, remove_after_exit: bool };
+pub const Options = struct { image_index: usize, port: ?vm.PortMapping, working_dir: ?[]const u8, environments: []const []const u8, volumes: []const vm.Volume, remove_after_exit: bool };
 
 pub fn parseOptions(allocator: std.mem.Allocator, arguments: []const []const u8) !Options {
     var offset: usize = 0;
@@ -123,6 +124,8 @@ pub fn parseOptions(allocator: std.mem.Allocator, arguments: []const []const u8)
     var working_dir: ?[]const u8 = null;
     var environments: std.ArrayList([]const u8) = .empty;
     errdefer environments.deinit(allocator);
+    var volumes: std.ArrayList(vm.Volume) = .empty;
+    errdefer volumes.deinit(allocator);
     var remove_after_exit = false;
     while (offset < arguments.len) {
         if (std.mem.eql(u8, arguments[offset], "--rm")) {
@@ -141,10 +144,61 @@ pub fn parseOptions(allocator: std.mem.Allocator, arguments: []const []const u8)
             if (offset + 1 >= arguments.len or !validEnvironment(arguments[offset + 1])) return error.InvalidArguments;
             try environments.append(allocator, arguments[offset + 1]);
             offset += 2;
+        } else if (std.mem.eql(u8, arguments[offset], "-v")) {
+            if (offset + 1 >= arguments.len) return error.InvalidVolumeSpecification;
+            if (volumes.items.len == 16) return error.TooManyVolumes;
+            const volume = try parseVolume(arguments[offset + 1]);
+            for (volumes.items) |previous| {
+                if (std.mem.eql(u8, previous.target, volume.target)) return error.DuplicateVolumeTarget;
+            }
+            try volumes.append(allocator, volume);
+            offset += 2;
         } else break;
     }
     if (arguments.len < offset + 1) return error.InvalidArguments;
-    return .{ .image_index = offset, .port = port, .working_dir = working_dir, .environments = try environments.toOwnedSlice(allocator), .remove_after_exit = remove_after_exit };
+    const environment_slice = try environments.toOwnedSlice(allocator);
+    errdefer allocator.free(environment_slice);
+    return .{ .image_index = offset, .port = port, .working_dir = working_dir, .environments = environment_slice, .volumes = try volumes.toOwnedSlice(allocator), .remove_after_exit = remove_after_exit };
+}
+
+pub fn resolveVolumes(init: std.process.Init, volumes: []const vm.Volume) ![]const vm.Volume {
+    const allocator = init.arena.allocator();
+    const resolved = try allocator.alloc(vm.Volume, volumes.len);
+    for (volumes, 0..) |volume, index| {
+        var directory = Io.Dir.openDirAbsolute(init.io, volume.source, .{ .follow_symlinks = false }) catch |err| switch (err) {
+            error.FileNotFound, error.NotDir, error.SymLinkLoop => return error.InvalidVolumeSource,
+            else => return err,
+        };
+        defer directory.close(init.io);
+        var buffer: [Io.Dir.max_path_bytes]u8 = undefined;
+        const length = try directory.realPath(init.io, &buffer);
+        resolved[index] = .{ .source = try allocator.dupe(u8, buffer[0..length]), .target = volume.target, .read_only = volume.read_only };
+    }
+    std.mem.sort(vm.Volume, resolved, {}, struct {
+        fn lessThan(_: void, lhs: vm.Volume, rhs: vm.Volume) bool {
+            return lhs.target.len < rhs.target.len;
+        }
+    }.lessThan);
+    return resolved;
+}
+
+fn parseVolume(text: []const u8) !vm.Volume {
+    var parts = std.mem.splitScalar(u8, text, ':');
+    const source = parts.next() orelse return error.InvalidVolumeSpecification;
+    const target = parts.next() orelse return error.InvalidVolumeSpecification;
+    const mode = parts.next() orelse "ro";
+    if (parts.next() != null or !validVolumePath(source) or !validVolumePath(target)) return error.InvalidVolumeSpecification;
+    if (!std.mem.eql(u8, mode, "ro") and !std.mem.eql(u8, mode, "rw")) return error.InvalidVolumeSpecification;
+    return .{ .source = source, .target = target, .read_only = std.mem.eql(u8, mode, "ro") };
+}
+
+fn validVolumePath(path: []const u8) bool {
+    if (path.len < 2 or path.len > 4096 or path[0] != '/' or path[path.len - 1] == '/' or std.mem.indexOfScalar(u8, path, 0) != null) return false;
+    var parts = std.mem.splitScalar(u8, path[1..], '/');
+    while (parts.next()) |part| {
+        if (part.len == 0 or part.len > 255 or std.mem.eql(u8, part, ".") or std.mem.eql(u8, part, "..")) return false;
+    }
+    return true;
 }
 
 fn validEnvironment(variable: []const u8) bool {
@@ -197,4 +251,18 @@ test "environment overrides require explicit values" {
     try std.testing.expectEqualStrings("ONE=last", selected.environments[1]);
     try std.testing.expectError(error.InvalidArguments, parseOptions(allocator, &.{ "-e", "ONE", "alpine" }));
     try std.testing.expectError(error.InvalidArguments, parseOptions(allocator, &.{ "-e", "=bad", "alpine" }));
+}
+
+test "volume paths and modes are explicit" {
+    const read_only = try parseVolume("/Users/me/input:/input");
+    try std.testing.expect(read_only.read_only);
+    try std.testing.expectEqualStrings("/input", read_only.target);
+    const writable = try parseVolume("/tmp/output:/output:rw");
+    try std.testing.expect(!writable.read_only);
+    for ([_][]const u8{ "relative:/data", "/host:relative", "/:/data", "/host:/", "/host:/a/../b", "/host:/a//b", "/host:/data:other", "/host:/data:rw:extra" }) |invalid| {
+        try std.testing.expectError(error.InvalidVolumeSpecification, parseVolume(invalid));
+    }
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    try std.testing.expectError(error.DuplicateVolumeTarget, parseOptions(arena.allocator(), &.{ "-v", "/tmp/a:/data", "-v", "/tmp/b:/data", "alpine" }));
 }

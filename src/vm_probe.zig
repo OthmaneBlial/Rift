@@ -21,7 +21,7 @@ pub fn main(init: std.process.Init) void {
         std.process.exit(2);
     }
     const network = args.len == 4 and std.mem.eql(u8, args[3], "--network");
-    vm.run(allocator, args[1], args[2], "console=hvc0 rdinit=/usr/bin/sh", if (args.len == 4 and !network) args[3] else null, null, null, network, null, 0, 1) catch |err| {
+    vm.run(allocator, args[1], args[2], "console=hvc0 rdinit=/usr/bin/sh", if (args.len == 4 and !network) args[3] else null, null, null, &.{}, network, null, 0, 1) catch |err| {
         std.debug.print("rift-vm-probe: {s}\n", .{@errorName(err)});
         std.process.exit(1);
     };
@@ -54,5 +54,5 @@ fn runOci(init: std.process.Init, kernel: []const u8, initramfs: []const u8, ima
 
     var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const path_size = try root.realPath(init.io, &path_buffer);
-    try vm.run(allocator, kernel, initramfs, "console=hvc0 rdinit=/usr/bin/sh", path_buffer[0..path_size], null, null, false, null, 0, 1);
+    try vm.run(allocator, kernel, initramfs, "console=hvc0 rdinit=/usr/bin/sh", path_buffer[0..path_size], null, null, &.{}, false, null, 0, 1);
 }

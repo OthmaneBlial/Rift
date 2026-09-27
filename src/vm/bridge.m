@@ -7,6 +7,7 @@
 typedef struct RiftForwarder RiftForwarder;
 extern RiftForwarder *rift_forward_start(const char *control_path, uint16_t host_port, uint16_t guest_port);
 extern void rift_forward_stop(RiftForwarder *forwarder);
+typedef struct { const char *path; int read_only; } RiftShare;
 
 @interface RiftVMDelegate : NSObject <VZVirtualMachineDelegate>
 @property(nonatomic) BOOL finished;
@@ -27,11 +28,13 @@ extern void rift_forward_stop(RiftForwarder *forwarder);
 @end
 
 int rift_vm_run(const char *kernel_path, const char *initramfs_path, const char *command_line,
-                const char *share_path, const char *control_path, const char *stop_path, int network_enabled,
+                const char *share_path, const char *control_path, const char *stop_path,
+                const RiftShare *volumes, size_t volume_count, int network_enabled,
                 int host_port, int guest_port, int input_fd, int output_fd) {
     @autoreleasepool {
         if (![NSThread isMainThread] || ![VZVirtualMachine isSupported]) return 2;
         if (!kernel_path || !initramfs_path || !command_line || input_fd < 0 || output_fd < 0) return 1;
+        if (volume_count > 16 || (volume_count != 0 && !volumes)) return 1;
         if ((host_port != 0 || guest_port != 0) && (!network_enabled || !control_path || host_port < 1 || host_port > 65535 || guest_port < 1 || guest_port > 65535)) return 1;
 
         NSString *kernel = [NSString stringWithUTF8String:kernel_path];
@@ -75,6 +78,18 @@ int rift_vm_run(const char *kernel_path, const char *initramfs_path, const char 
                                                                    readOnly:NO];
             VZVirtioFileSystemDeviceConfiguration *filesystem =
                 [[VZVirtioFileSystemDeviceConfiguration alloc] initWithTag:@"rift-control"];
+            filesystem.share = [[VZSingleDirectoryShare alloc] initWithDirectory:directory];
+            [shares addObject:filesystem];
+        }
+        for (size_t index = 0; index < volume_count; ++index) {
+            if (!volumes[index].path) return 1;
+            NSString *path = [NSString stringWithUTF8String:volumes[index].path];
+            if (!path) return 1;
+            VZSharedDirectory *directory = [[VZSharedDirectory alloc] initWithURL:[NSURL fileURLWithPath:path]
+                                                                   readOnly:volumes[index].read_only != 0];
+            NSString *tag = [NSString stringWithFormat:@"rift-volume-%zu", index];
+            VZVirtioFileSystemDeviceConfiguration *filesystem =
+                [[VZVirtioFileSystemDeviceConfiguration alloc] initWithTag:tag];
             filesystem.share = [[VZSingleDirectoryShare alloc] initWithDirectory:directory];
             [shares addObject:filesystem];
         }
