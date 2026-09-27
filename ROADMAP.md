@@ -1,104 +1,104 @@
 # Rift roadmap
 
-This cumulative checklist follows the goals in the original project brief. `[x]` means implemented and verified within the stated scope; `[ ]` means still open. A checked item records a milestone, not overall product readiness. Partial support and its limits are stated explicitly.
+This roadmap carries the original plan forward from the first project commit. `[x]` means delivered and verified within the stated scope; `[ ]` means work remains. Completed work stays checked as Rift grows. No dates or completion percentage are implied.
 
-## Project foundation and distribution
+## 1. Start the project
 
-- [x] Build the runtime in Zig for Apple Silicon macOS.
-- [ ] Keep the architecture ready to support additional host architectures.
-- [x] Publish the Apache-2.0 source repository on GitHub with `main` as the default branch.
-- [x] Document the runtime architecture, security boundaries, current behavior, and limits.
-- [x] Provide local source-build instructions and a standalone Rift executable with no Zig or Python runtime dependency.
-- [x] Keep the runtime independent of Docker Engine and Docker CLI, with no permanent host daemon.
-- [x] Keep checks local-only as requested; `.github` has no hosted Actions workflow.
-- [x] Maintain the product README with setup, examples, current status, and limitations.
-- [x] Add the project logo, GitHub Pages site, repository homepage, and 17 relevant topics.
-- [x] Publish the semantic `v0.1.0` source-preview tag and release notes.
-- [ ] Sign and notarize public macOS binaries; publish release assets and checksums.
-- [ ] Provide a simple signed install and upgrade path, including Homebrew distribution.
-- [ ] Refresh and verify the project website when the roadmap reaches 100%.
+- [x] Create the public `OthmaneBlial/Rift` repository and use `main` as the default branch.
+- [x] Choose Zig, Apache-2.0, Apple Silicon macOS, and a Docker-free user experience.
+- [x] Add the complete license, `.gitignore`, source-build instructions, and local project checks.
+- [x] Build the host CLI in Zig with `--help`, `version`, and `system info`.
+- [x] Document the architecture, security boundaries, supported behavior, and limitations.
+- [x] Keep local checks in `scripts/check-local.sh`; leave GitHub Actions disabled as requested.
+- [x] Write the README with working setup steps, examples, status, and limitations.
+- [x] Link this cumulative roadmap from the README.
+- [x] Add the project logo, 17 repository topics, and the first GitHub Pages site.
+- [x] Publish the Apache-2.0 `v0.1.0` source-preview tag and release notes.
 
-## CLI and image workflow
+## 2. Boot Linux and run the first real container
 
-- [x] Provide `--help`, `version`, and `system info` commands.
-- [x] Pull OCI images and list local images with `pull` and `images`.
-- [x] Run foreground containers, including `--rm` cleanup.
-- [x] Apply image `Entrypoint`, `Cmd`, and `Env`, with explicit environment overrides.
-- [x] Apply image `WorkingDir` and the `-w` override.
-- [x] Apply numeric or named image users, primary groups, and supplementary groups.
-- [x] Run detached containers and manage them with `ps`, `inspect`, `logs`, `stop`, `kill`, and `rm`.
-- [x] Run non-interactive commands in detached containers with `exec` and preserve their exit status.
-- [x] Remove local image references with `rmi` and inspect storage with `system df`.
-- [x] Preview cleanup and require confirmation before deleting stale runtime data or unused image blobs.
-- [ ] Add image-building support with `rift build`.
-- [ ] Add interactive `exec` with stdin, TTY allocation, and signal cancellation.
-- [ ] Implement broader OCI process and resource settings.
-- [ ] Review command help and error messages across the supported CLI for clear, predictable use.
-- [ ] Add structured log output.
+- [x] Use Apple's `Virtualization.framework` to boot a Linux guest on Apple Silicon.
+- [x] Download pinned guest boot files on first use and verify their SHA-256 digest.
+- [x] Run real Alpine commands in the guest without Docker Engine, Docker CLI, Docker Desktop, or a permanent host daemon.
+- [x] Build a standalone Rift executable without Zig or Python runtime dependencies.
+- [x] Assemble image root filesystems from verified OCI manifests and layer blobs.
+- [x] Keep image files read-only and use a disposable writable overlay for container changes.
+- [x] Give each workload private PID and mount namespaces, basic `/dev` and `/proc`, reduced capabilities, and `no_new_privs`.
+- [x] Apply image `Entrypoint`, `Cmd`, `Env`, `WorkingDir`, user, primary group, and supplementary groups.
+- [x] Support explicit environment overrides and the `-w` working-directory override.
+- [ ] Extend the host and guest architecture support beyond Apple Silicon macOS and `linux/arm64`.
 
-## OCI registries and local image store
+## 3. Pull and store OCI images safely
 
 - [x] Parse and normalize OCI image references, including Docker Hub shorthand.
-- [x] Parse OCI manifests and indexes; select `linux/arm64` images explicitly.
-- [x] Pull public images using registry Bearer authentication.
-- [x] Support environment credentials for private Bearer-token challenges; verify the Basic-to-Bearer flow with a local registry fixture.
+- [x] Parse OCI manifests and indexes and select `linux/arm64` images explicitly.
+- [x] Pull public images with registry Bearer authentication.
 - [x] Verify downloaded blob digests and sizes before storing them.
-- [x] Store image blobs by content digest, deduplicate shared content, and keep local image-reference metadata.
+- [x] Store blobs by content digest, deduplicate shared content, and keep image-reference metadata.
 - [x] Pull uncached images automatically for foreground and detached runs.
-- [x] Coordinate image pulls, runs, and cache pruning with a shared cache lock.
-- [x] Reclaim unreferenced blobs while preserving blobs used by valid image records.
+- [x] Support environment credentials for private Bearer-token challenges; verify Basic-to-Bearer with a local registry fixture.
+- [x] Verify an anonymous ARM64 pull and container run from Amazon ECR Public (`amazonlinux:latest`).
+- [x] Coordinate pulls, runs, and cache pruning with a shared cache lock.
+- [x] Preview cleanup and reclaim unreferenced blobs while preserving valid image records.
 - [x] Cap each pull at 16 GiB of distinct image blobs missing from the verified cache.
 - [ ] Verify compatibility with more public registries and private registry providers.
 
-## Linux guest and image filesystem
+## 4. Build the everyday container workflow
 
-- [x] Boot Linux guests through Apple's Virtualization.framework bridge.
-- [x] Download pinned guest boot files on first use and verify their SHA-256 digest.
-- [x] Boot and exercise Alpine through local macOS VM checks.
-- [x] Assemble image root filesystems from verified manifests and layer blobs.
-- [x] Extract tar, gzip, and zstd layers; apply OCI whiteouts.
-- [x] Cap decompressed layer data at 8 GiB per layer and 32 GiB per image extraction pass.
+- [x] Pull images with `rift pull` and list them with `rift images`.
+- [x] Run foreground containers, including `--rm` cleanup.
+- [x] Run detached containers and manage them with `ps`, `inspect`, `logs`, `stop`, `kill`, and `rm`.
+- [x] Run non-interactive commands with `exec` and preserve their exit status.
+- [x] Remove image references with `rmi` and inspect storage with `system df`.
+- [x] Send graceful stop signals, force-stop after the timeout, and support immediate `kill`.
+- [x] Retain detached logs and status until `rm`; clean foreground state after normal completion.
+- [ ] Add interactive `exec` with stdin, TTY allocation, and signal cancellation.
+- [ ] Add image building with `rift build`.
+- [ ] Implement broader OCI process and resource settings.
+- [ ] Review help and error messages across supported commands for clear, predictable use.
+- [ ] Add structured log output.
+
+## 5. Complete image filesystem and host integration
+
+- [x] Extract tar, gzip, and zstd layers and apply OCI whiteouts.
+- [x] Cap decompressed data at 8 GiB per layer and 32 GiB per image extraction pass.
 - [x] Apply regular-file hardlinks and reject unsafe targets.
 - [x] Reject archive traversal, unsafe links, and writes redirected outside the image root.
 - [x] Preserve directory modes and standard tar modification times.
-- [x] Apply final directory metadata deepest-first so restrictive parents cannot block their children.
-- [x] Apply and test local PAX `path`, `linkpath`, and `size` overrides; recheck path and link safety after overrides.
-- [x] Apply local and global PAX `mtime` values, including fractional and negative timestamps.
-- [x] Smoke-test pulled Alpine BusyBox inside the VM through a read-only share.
-- [x] Keep image files read-only and use a disposable writable overlay for container changes.
-- [ ] Preserve OCI file ownership and groups during layer extraction.
-- [ ] Preserve PAX `uid`/`gid` and global PAX fields beyond `mtime`.
-- [ ] Support OCI extended attributes and file capabilities.
-- [ ] Support required special files such as FIFOs and device nodes.
-- [ ] Reduce guest disk footprint and optimize guest startup and shutdown based on measurements.
-- [ ] Evaluate guest reuse between container executions while preserving workload isolation and cleanup.
-
-## Container behavior, networking, and isolation
-
-- [x] Give each workload private PID and mount namespaces, basic `/dev` and `/proc`, reduced capabilities, and `no_new_privs`.
+- [x] Apply directory metadata deepest-first so restrictive parents do not block their children.
+- [x] Apply local PAX `path`, `linkpath`, and `size` overrides, then recheck path and link safety.
+- [x] Apply local and global PAX `mtime`, including fractional and negative timestamps.
+- [x] Ignore image character and block device entries below `/dev`; the guest replaces `/dev` with its restricted device filesystem.
 - [x] Provide outbound networking and DNS.
 - [x] Forward one TCP port from localhost into a container.
-- [x] Mount explicit host directories and files, read-only by default with opt-in write access.
-- [x] Run detached containers without a shared always-on daemon; keep one Rift worker per VM.
-- [x] Send graceful stop signals, force-stop workloads after the timeout, and support immediate `kill`.
-- [x] Retain detached logs and status until `rm`; clean foreground runtime state after normal completion.
-- [x] Document security assets, trust boundaries, current controls, and known limits.
-- [ ] Complete adversarial isolation review and test host/guest escape assumptions.
-- [ ] Measure and improve communication between macOS and the Linux guest where it affects startup or runtime cost.
+- [x] Mount explicit host files and directories read-only by default, with opt-in write access.
+- [ ] Preserve OCI file ownership, groups, PAX `uid`/`gid`, and other global PAX fields.
+- [ ] Support OCI extended attributes and file capabilities.
+- [ ] Support FIFOs and special files outside runtime-managed `/dev`.
+- [ ] Reduce guest disk footprint and optimize startup and shutdown using measurements.
+- [ ] Evaluate guest reuse while preserving workload isolation and cleanup.
 
-## Verification, performance, and adoption
+## 6. Verify reliability, security, and performance
 
-- [x] Run formatting, Zig unit tests, a `ReleaseSafe` build, guest preparation, and macOS integration checks through `scripts/check-local.sh`.
-- [x] Verify real CLI runs, automatic image pulls, DNS, detached lifecycle, and container exit codes locally.
-- [x] Verify nginx over the forwarded localhost port, including a detached run.
+- [x] Run formatting, Zig unit tests, a `ReleaseSafe` build, guest preparation, and macOS integration checks locally.
+- [x] Verify real CLI runs, automatic image pulls, DNS, detached lifecycle, and exit codes.
+- [x] Verify Nginx over the forwarded localhost port, including a detached run.
 - [x] Verify read-only and writable file and directory volumes.
-- [x] Verify private-registry authentication against a local registry fixture.
-- [x] Provide a reproducible local benchmark script and methodology for cached Alpine startup, CLI startup, host-worker RSS, binary size, and logical store size.
+- [x] Verify private-registry authentication against a local fixture.
+- [x] Provide a reproducible local benchmark script and methodology.
 - [x] Package and check a local release archive.
-- [x] Verify the source-built Alpine and Nginx workflow in a fresh Rift home on this Apple Silicon Mac without Docker, including first guest setup, localhost HTTP, lifecycle, and cache cleanup.
-- [x] Record one fresh-home workflow and one cached benchmark sample with scope and limitations in `docs/BENCHMARKS.md`.
-- [ ] Record end-to-end cold and warm startup, guest boot time, installation footprint, image pull/cache behavior, disk usage, and total host-plus-VM memory.
-- [ ] Repeat the performance measurements across more Macs.
-- [ ] Verify the complete first-use workflow on a clean Apple Silicon Mac without Docker: install, pull Alpine, run a command, serve nginx, and clean up.
+- [x] Verify a fresh Rift home on this Apple Silicon Mac without Docker: first guest setup, Alpine, Nginx HTTP, lifecycle, and cache cleanup.
+- [x] Record fresh-home and cached benchmark samples with scope and limitations.
+- [ ] Complete an adversarial review of host/guest isolation assumptions.
+- [ ] Measure cold and warm startup, guest boot time, install footprint, image pull/cache behavior, disk usage, and total host-plus-VM memory.
+- [ ] Repeat performance measurements across more Macs.
+- [ ] Verify the full install-to-clean workflow on a clean Apple Silicon Mac without Docker.
+- [ ] Measure host/guest communication where it affects startup or runtime cost.
+
+## 7. Ship a straightforward public release
+
+- [ ] Sign and notarize macOS binaries; publish release assets and checksums.
+- [ ] Provide a simple signed install and upgrade path, including Homebrew distribution.
+- [ ] Refresh and verify the GitHub Pages site when all roadmap work is complete.
 
 Rift remains an early source preview. Local checks do not establish registry-wide compatibility, a complete Docker replacement, or a signed and notarized release.
