@@ -1,5 +1,7 @@
 #import <Foundation/Foundation.h>
 #import <Virtualization/Virtualization.h>
+#include <fcntl.h>
+#include <limits.h>
 #include <stdio.h>
 #include <stdint.h>
 #include <unistd.h>
@@ -8,6 +10,15 @@ typedef struct RiftForwarder RiftForwarder;
 extern RiftForwarder *rift_forward_start(const char *control_path, uint16_t host_port, uint16_t guest_port);
 extern void rift_forward_stop(RiftForwarder *forwarder);
 typedef struct { const char *path; int read_only; } RiftShare;
+
+static int request_guest_stop(const char *control_path) {
+    char path[PATH_MAX];
+    const int length = snprintf(path, sizeof(path), "%s/stop", control_path);
+    if (length < 0 || length >= (int)sizeof(path)) return -1;
+    const int descriptor = open(path, O_WRONLY | O_CREAT | O_CLOEXEC, 0600);
+    if (descriptor < 0) return -1;
+    return close(descriptor);
+}
 
 @interface RiftVMDelegate : NSObject <VZVirtualMachineDelegate>
 @property(nonatomic) BOOL finished;
@@ -36,6 +47,7 @@ int rift_vm_run(const char *kernel_path, const char *initramfs_path, const char 
         if (!kernel_path || !initramfs_path || !command_line || input_fd < 0 || output_fd < 0) return 1;
         if (volume_count > 16 || (volume_count != 0 && !volumes)) return 1;
         if ((host_port != 0 || guest_port != 0) && (!network_enabled || !control_path || host_port < 1 || host_port > 65535 || guest_port < 1 || guest_port > 65535)) return 1;
+        if (stop_path && !control_path) return 1;
 
         NSString *kernel = [NSString stringWithUTF8String:kernel_path];
         NSString *initramfs = [NSString stringWithUTF8String:initramfs_path];
@@ -122,10 +134,21 @@ int rift_vm_run(const char *kernel_path, const char *initramfs_path, const char 
             }
         }];
         BOOL stopRequested = NO;
+        BOOL forceStopRequested = NO;
         __block BOOL stopFailed = NO;
+        NSTimeInterval stopRequestedAt = 0;
         while (!delegate.finished) {
             if (stop_path && !stopRequested && access(stop_path, F_OK) == 0 && machine.state == VZVirtualMachineStateRunning) {
                 stopRequested = YES;
+                stopRequestedAt = NSProcessInfo.processInfo.systemUptime;
+                if (request_guest_stop(control_path) != 0) {
+                    fprintf(stderr, "rift-vm: could not notify guest to stop\n");
+                    stopRequestedAt -= 10.0;
+                }
+            }
+            if (stopRequested && !forceStopRequested && machine.state == VZVirtualMachineStateRunning &&
+                NSProcessInfo.processInfo.systemUptime - stopRequestedAt >= 10.0) {
+                forceStopRequested = YES;
                 [machine stopWithCompletionHandler:^(NSError *stop_error) {
                     if (stop_error) {
                         fprintf(stderr, "rift-vm: stop failed: %s\n", stop_error.description.UTF8String);

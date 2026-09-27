@@ -7,6 +7,7 @@
 #include <limits.h>
 #include <pwd.h>
 #include <sched.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -18,6 +19,41 @@
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
+
+static int fail(const char *operation);
+
+static volatile sig_atomic_t child_pid = -1;
+static volatile sig_atomic_t pending_signal = 0;
+
+static void forward_stop_signal(int signal_number) {
+    int saved_errno = errno;
+    pending_signal = signal_number;
+    if (child_pid > 0) kill((pid_t)child_pid, signal_number);
+    errno = saved_errno;
+}
+
+static int install_stop_signal_handler(void) {
+    struct sigaction action = {.sa_handler = forward_stop_signal};
+    sigemptyset(&action.sa_mask);
+    return sigaction(SIGTERM, &action, NULL);
+}
+
+static void restore_default_stop_signal(void) {
+    struct sigaction action = {.sa_handler = SIG_DFL};
+    sigemptyset(&action.sa_mask);
+    sigaction(SIGTERM, &action, NULL);
+}
+
+static int child_status(pid_t child) {
+    int status;
+    while (waitpid(child, &status, 0) < 0) {
+        if (errno != EINTR) return fail("wait for container process");
+    }
+    child_pid = -1;
+    if (WIFEXITED(status)) return WEXITSTATUS(status);
+    if (WIFSIGNALED(status)) return 128 + WTERMSIG(status);
+    return 125;
+}
 
 static int fail(const char *operation) {
     fprintf(stderr, "rift-exec: %s: %s\n", operation, strerror(errno));
@@ -311,8 +347,19 @@ static int run_container(char **argv, unsigned long volume_count) {
     if (setuid(uid) != 0) return fail("setuid");
     if (chdir(argv[2]) != 0) return fail("chdir working directory");
     if (syscall(SYS_close_range, 3U, ~0U, 0U) != 0) return fail("close inherited descriptors");
-    execvp(argv[5 + volume_count * 4], argv + 5 + volume_count * 4);
-    return fail("exec");
+    if (pending_signal) return 128 + pending_signal;
+    pid_t workload = fork();
+    if (workload < 0) return fail("fork container workload");
+    if (workload == 0) {
+        child_pid = -1;
+        pending_signal = 0;
+        restore_default_stop_signal();
+        execvp(argv[5 + volume_count * 4], argv + 5 + volume_count * 4);
+        _exit(fail("exec"));
+    }
+    child_pid = workload;
+    if (pending_signal) kill(workload, pending_signal);
+    return child_status(workload);
 }
 
 int main(int argc, char **argv) {
@@ -327,17 +374,16 @@ int main(int argc, char **argv) {
         fputs("rift-exec: invalid volume count or missing command\n", stderr);
         return 125;
     }
+    if (install_stop_signal_handler() != 0) return fail("install stop signal handler");
     if (unshare(CLONE_NEWNS | CLONE_NEWPID) != 0) return fail("create container namespaces");
     if (mount(NULL, "/", NULL, MS_REC | MS_PRIVATE, NULL) != 0) return fail("make mounts private");
     pid_t child = fork();
     if (child < 0) return fail("fork container process");
-    if (child == 0) return run_container(argv, volume_count);
-
-    int status;
-    while (waitpid(child, &status, 0) < 0) {
-        if (errno != EINTR) return fail("wait for container process");
+    if (child == 0) {
+        child_pid = -1;
+        return run_container(argv, volume_count);
     }
-    if (WIFEXITED(status)) return WEXITSTATUS(status);
-    if (WIFSIGNALED(status)) return 128 + WTERMSIG(status);
-    return 125;
+    child_pid = child;
+    if (pending_signal) kill(child, pending_signal);
+    return child_status(child);
 }

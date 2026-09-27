@@ -129,7 +129,7 @@ pub fn stop(init: std.process.Init, id: []const u8, writer: *Io.Writer) !void {
         else => return err,
     };
     if (request) |file| file.close(init.io);
-    for (0..100) |_| {
+    for (0..250) |_| {
         if (!(try isRunning(init.io, state))) {
             try writer.print("Stopped {s}\n", .{id});
             return;

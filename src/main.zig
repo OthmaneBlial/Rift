@@ -25,7 +25,7 @@ fn printHelp(writer: *Io.Writer) Io.Writer.Error!void {
             "  images             List locally pulled images\n" ++
             "  pull <image>       Pull an OCI image for this host\n" ++
             "  rmi <image>        Remove a local image reference\n" ++
-            "  run [-d] [--rm] [-p HOST:GUEST] [-w DIR] [-e KEY=VALUE] [-v HOST:DIR[:ro|rw]] <image> [command] [args...] Run an image\n" ++
+            "  run [-d] [--rm] [-p HOST:GUEST] [-w DIR] [-e KEY=VALUE] [-v HOST:TARGET[:ro|rw]] <image> [command] [args...] Run an image\n" ++
             "  ps                 List detached containers\n" ++
             "  logs <id>          Show a detached container's output\n" ++
             "  stop <id>          Stop a detached container\n" ++
@@ -322,7 +322,7 @@ pub fn main(init: std.process.Init) void {
             error.InvalidImageConfig => std.debug.print("rift: image configuration is invalid or mismatches its layers\n", .{}),
             error.ImageHasNoCommand => std.debug.print("rift: image has no default command; specify one after the image\n", .{}),
             error.UnsupportedWorkingDirectory => std.debug.print("rift: image working directory must be an absolute path\n", .{}),
-            error.InvalidVolumeSpecification => std.debug.print("rift: volume must use absolute HOST:DIR[:ro|rw] paths without . or .. components\n", .{}),
+            error.InvalidVolumeSpecification => std.debug.print("rift: volume must use absolute HOST:TARGET[:ro|rw] paths without . or .. components\n", .{}),
             error.ReservedVolumeTarget => std.debug.print("rift: volume target cannot be /dev or /proc\n", .{}),
             error.DuplicateVolumeTarget => std.debug.print("rift: each volume target must be unique\n", .{}),
             error.InvalidVolumeSource => std.debug.print("rift: volume source must be an existing directory or regular file, not a symlink\n", .{}),

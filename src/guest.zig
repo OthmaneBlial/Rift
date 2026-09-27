@@ -77,7 +77,24 @@ fn makeScript(allocator: std.mem.Allocator, command: []const []const u8, environ
         if (output.written().len > 64 * 1024) return error.CommandTooLong;
     }
     if (!interactive) try writer.writeAll(" < /dev/null");
-    try writer.writeAll("\n    status=$?\n");
+    try writer.writeAll(
+        " &\n" ++
+            "    workload_pid=$!\n" ++
+            "    (\n" ++
+            "      while /usr/bin/busybox kill -0 \"$workload_pid\" 2>/dev/null; do\n" ++
+            "        if [ -e /mnt/control/stop ]; then\n" ++
+            "          /usr/bin/busybox kill -TERM \"$workload_pid\" 2>/dev/null\n" ++
+            "          exit\n" ++
+            "        fi\n" ++
+            "        /usr/bin/busybox sleep 1\n" ++
+            "      done\n" ++
+            "    ) &\n" ++
+            "    watcher_pid=$!\n" ++
+            "    wait \"$workload_pid\"\n" ++
+            "    status=$?\n" ++
+            "    /usr/bin/busybox kill \"$watcher_pid\" 2>/dev/null || true\n" ++
+            "    wait \"$watcher_pid\" 2>/dev/null || true\n",
+    );
     if (require_network) try writer.writeAll("    fi\n");
     try writer.writeAll(
         "  fi\n" ++
@@ -126,6 +143,8 @@ test "shell arguments remain quoted" {
     const bare = try makeScript(std.testing.allocator, &.{ "echo", "hello" }, &.{}, "/", "", &.{}, true, false);
     defer std.testing.allocator.free(bare);
     try std.testing.expect(std.mem.indexOf(u8, bare, "/rift-exec /mnt/root '/' '' 0 'echo' 'hello'") != null);
+    try std.testing.expect(std.mem.indexOf(u8, bare, "if [ -e /mnt/control/stop ]; then") != null);
+    try std.testing.expect(std.mem.indexOf(u8, bare, "/usr/bin/busybox kill -TERM \"$workload_pid\"") != null);
     const workdir = try makeScript(std.testing.allocator, &.{"/bin/pwd"}, &.{}, "/tmp/a'b", "nobody", &.{}, false, false);
     defer std.testing.allocator.free(workdir);
     try std.testing.expect(std.mem.indexOf(u8, workdir, "/rift-exec /mnt/root '/tmp/a'\"'\"'b' 'nobody' 0 '/bin/pwd'") != null);

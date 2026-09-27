@@ -9,7 +9,7 @@ from pathlib import Path
 
 
 def call(rift: str, *args: str) -> subprocess.CompletedProcess[str]:
-    return subprocess.run([rift, *args], capture_output=True, text=True, timeout=15)
+    return subprocess.run([rift, *args], capture_output=True, text=True, timeout=30)
 
 
 def main() -> int:
@@ -19,11 +19,22 @@ def main() -> int:
     rift = sys.argv[1]
     runtime = Path.home() / "Library/Application Support/Rift/runtime"
     before = set(runtime.iterdir()) if runtime.exists() else set()
-    started = call(rift, "run", "-d", "-e", "RIFT_CHECK=RIFT_DETACHED_OK", "alpine", "/bin/sh", "-c", 'echo "$RIFT_CHECK"; sleep 30')
+    started = call(
+        rift,
+        "run",
+        "-d",
+        "-e",
+        "RIFT_CHECK=RIFT_DETACHED_OK",
+        "alpine",
+        "/bin/sh",
+        "-c",
+        'trap "echo RIFT_TERM_RECEIVED; exit 0" TERM; echo "$RIFT_CHECK"; while :; do sleep 1; done',
+    )
     identifier = started.stdout.strip()
     if started.returncode != 0 or re.fullmatch(r"[0-9a-f]{32}", identifier) is None:
         print(f"Rift detached check failed to start: {started!r}", file=sys.stderr)
         return 1
+    forced_id = ""
     try:
         deadline = time.monotonic() + 15
         while time.monotonic() < deadline:
@@ -41,12 +52,38 @@ def main() -> int:
         stopped = call(rift, "stop", identifier)
         if stopped.returncode != 0 or f"Stopped {identifier}" not in stopped.stdout:
             raise RuntimeError(f"stop failed: {stopped!r}")
+        logged = call(rift, "logs", identifier)
+        if "RIFT_TERM_RECEIVED" not in logged.stdout:
+            raise RuntimeError(f"stop did not deliver SIGTERM to the container process: {logged!r}")
         listed = call(rift, "ps")
         if f"{identifier}  alpine  stopped" not in listed.stdout:
             raise RuntimeError(f"stopped container missing from ps: {listed!r}")
         removed = call(rift, "rm", identifier)
         if removed.returncode != 0 or f"Removed {identifier}" not in removed.stdout:
             raise RuntimeError(f"rm failed: {removed!r}")
+
+        unresponsive = call(rift, "run", "-d", "alpine", "/bin/sh", "-c", 'trap "" TERM; echo RIFT_FORCE_STOP_READY; sleep 60')
+        forced_id = unresponsive.stdout.strip()
+        if unresponsive.returncode != 0 or re.fullmatch(r"[0-9a-f]{32}", forced_id) is None:
+            raise RuntimeError(f"unresponsive container did not start: {unresponsive!r}")
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline:
+            logged = call(rift, "logs", forced_id)
+            if "RIFT_FORCE_STOP_READY" in logged.stdout:
+                break
+            time.sleep(0.2)
+        else:
+            raise RuntimeError("unresponsive container never reached running state")
+        force_started = time.monotonic()
+        forced = call(rift, "stop", forced_id)
+        if forced.returncode != 0 or f"Stopped {forced_id}" not in forced.stdout or time.monotonic() - force_started < 8:
+            raise RuntimeError(f"stop did not force shutdown after its grace period: {forced!r}")
+        forced_listed = call(rift, "ps")
+        if f"{forced_id}  alpine  stopped" not in forced_listed.stdout:
+            raise RuntimeError(f"forced container missing from ps: {forced_listed!r}")
+        forced_removed = call(rift, "rm", forced_id)
+        if forced_removed.returncode != 0:
+            raise RuntimeError(f"forced container state was not removed: {forced_removed!r}")
         after = set(runtime.iterdir()) if runtime.exists() else set()
         if after != before:
             raise RuntimeError(f"temporary state remains: {after - before}")
@@ -60,6 +97,11 @@ def main() -> int:
         if state.exists():
             call(rift, "stop", identifier)
             call(rift, "rm", identifier)
+        if forced_id:
+            forced_state = Path.home() / "Library/Application Support/Rift/containers" / forced_id
+            if forced_state.exists():
+                call(rift, "stop", forced_id)
+                call(rift, "rm", forced_id)
 
 
 if __name__ == "__main__":
