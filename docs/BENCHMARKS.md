@@ -29,29 +29,31 @@ The first launch already has the image and guest files cached. It is **not** a f
 
 ## Latest cached benchmark
 
-Apple M2, macOS 26.6, Zig 0.16.0, `ReleaseSafe`, runtime commit `c5c3dd6`, benchmark script commit `7be9f98`, 2026-09-27 20:49:20 UTC. One run with the cached store:
+Apple M2, macOS 26.6, Zig 0.16.0, `ReleaseSafe`, runtime commit `cdeb627`, benchmark script commit `fc4c3e5`, 2026-09-27 22:18:39 UTC. One run with the cached store:
 
 | Metric | Result |
 | --- | ---: |
-| Local executable size | 1,730,064 bytes |
-| First Alpine launch with cached assets | 1,468.6 ms |
-| Subsequent Alpine launches, median of 5 | 1,131.2 ms |
-| Subsequent Alpine launch samples | 1,123.2, 1,170.4, 1,134.9, 1,131.2, 1,117.3 ms |
-| VM start to guest control ready | 435.5 ms |
-| Detached run to workload-ready marker | 970.1 ms |
+| Local executable size | 1,782,832 bytes |
+| First Alpine launch with cached assets | 1,213.6 ms |
+| Subsequent Alpine launches, median of 5 | 1,141.8 ms |
+| Subsequent Alpine launch samples | 1,104.1, 1,113.8, 1,148.4, 1,141.8, 1,149.9 ms |
+| VM start to guest control ready | 433.6 ms |
+| Detached run to workload-ready marker | 1,092.9 ms |
+| Warm detached `rift exec <id> /bin/true`, median of 5 | 72.1 ms |
+| Warm detached exec samples | 68.6, 75.5, 71.0, 72.1, 132.8 ms |
 | `rift version`, median of 5 | 7.0 ms |
-| Detached Rift worker RSS | 10,800 KiB |
-| Virtualization.framework VM-service RSS | 209,472 KiB |
-| VM-service process footprint | 164,250,440 bytes (156.6 MiB) |
-| Worker and VM-service combined process footprint | 167,003,432 bytes (159.3 MiB) |
+| Detached Rift worker RSS | 10,832 KiB |
+| Virtualization.framework VM-service RSS | 201,504 KiB |
+| VM-service process footprint | 156,058,440 bytes (148.8 MiB) |
+| Worker and VM-service combined process footprint | 158,844,200 bytes (151.5 MiB) |
 | Whole-Mac physical RAM | 16 GiB |
 | Whole-Mac memory pressure available | 64% before VM; 64% across 3 idle-guest samples |
-| Whole-Mac free pages | 104,404 before VM; 92,684–92,802 across 3 idle-guest samples |
+| Whole-Mac free pages | 61,715 before VM; 50,462–50,506 across 3 idle-guest samples |
 | Copied store, logical file bytes | 151,145,470 bytes |
-| Host load average, 1/5/15 minute, before | 7.89 / 5.24 / 4.52 |
-| Host load average, 1/5/15 minute, after | 7.45 / 5.23 / 4.52 |
+| Host load average, 1/5/15 minute, before | 3.41 / 3.68 / 3.86 |
+| Host load average, 1/5/15 minute, after | 3.35 / 3.65 / 3.85 |
 
-This is one local sample. The whole-Mac memory values include unrelated host processes and must not be attributed to Rift. The VM-start metric ends at guest control-share readiness, before overlay setup and workload startup.
+This is one local sample. The warm exec figure is command overhead through the guest control path, not isolated IPC latency. The whole-Mac memory values include unrelated host processes and must not be attributed to Rift. The VM-start metric ends at guest control-share readiness, before overlay setup and workload startup.
 
 ## Previous cached benchmark
 

@@ -102,7 +102,7 @@ This roadmap carries the original plan forward from the first project commit. `[
 - [ ] Repeat performance measurements across more Macs.
 - [ ] Run the full runtime workflow on macOS 12 to verify the oldest declared host version.
 - [ ] Verify the full install-to-clean workflow on a clean Apple Silicon Mac without Docker.
-- [ ] Measure host/guest communication where it affects startup or runtime cost.
+- [x] Measure warm detached `rift exec /bin/true` end-to-end overhead on Apple M2; document that the sample includes the host CLI, guest control request/response, supervisor dispatch, and command startup rather than claiming isolated IPC latency.
 
 ## 7. Ship a straightforward public release
 
