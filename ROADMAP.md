@@ -51,6 +51,7 @@ This roadmap carries the original plan forward from the first project commit. `[
 - [x] Run foreground containers, including `--rm` cleanup.
 - [x] Run detached containers and manage them with `ps`, `inspect`, `logs`, `stop`, `kill`, and `rm`.
 - [x] Run non-interactive commands with `exec` and preserve their exit status.
+- [x] Stream detached `exec` output while the command runs.
 - [x] Remove image references with `rmi` and inspect storage with `system df`.
 - [x] Send graceful stop signals, force-stop after the timeout, and support immediate `kill`.
 - [x] Retain detached logs and status until `rm`; clean foreground state after normal completion.

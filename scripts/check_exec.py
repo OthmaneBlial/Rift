@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Check detached exec argument, environment, filesystem, namespace, and exit behavior."""
 
+import os
 import re
+import select
 import shutil
 import subprocess
 import sys
@@ -79,6 +81,33 @@ def main() -> int:
         if lines[2:5] != ["<a b>", "<>", "<a'b>"]:
             raise RuntimeError(f"exec changed command argument boundaries: {executed!r}")
 
+        streamed = subprocess.Popen(
+            [
+                rift,
+                "exec",
+                identifier,
+                "/bin/sh",
+                "-c",
+                "printf 'RIFT_EXEC_STREAM_EARLY\\n' >&2; sleep 4; printf 'RIFT_EXEC_STREAM_LATE\\n'",
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        try:
+            ready, _, _ = select.select([streamed.stdout], [], [], 3)
+            if not ready:
+                raise RuntimeError("exec output was not forwarded before the command exited")
+            early_output = os.read(streamed.stdout.fileno(), 128)
+            if not early_output.startswith(b"RIFT_EXEC_STREAM_EARLY\n") or streamed.poll() is not None:
+                raise RuntimeError(f"exec did not stream live output: {early_output!r}")
+            late_output, _ = streamed.communicate(timeout=15)
+            if streamed.returncode != 0 or b"RIFT_EXEC_STREAM_LATE\n" not in late_output:
+                raise RuntimeError(f"streamed exec did not finish cleanly: {streamed.returncode}, {late_output!r}")
+        finally:
+            if streamed.poll() is None:
+                streamed.terminate()
+                streamed.communicate(timeout=5)
+
         persisted = call(rift, "exec", identifier, "/bin/cat", "/tmp/rift-exec-file")
         if persisted.returncode != 0 or persisted.stdout != "persistent":
             raise RuntimeError(f"exec did not share the container filesystem: {persisted!r}")
@@ -100,7 +129,7 @@ def main() -> int:
         removed = call(rift, "rm", identifier)
         if removed.returncode != 0:
             raise RuntimeError(f"container removal failed after exec: {removed!r}")
-        print("Rift exec check passed: arguments, environment, working directory, PID namespace, filesystem, exit status, lifecycle")
+        print("Rift exec check passed: streaming output, arguments, environment, working directory, PID namespace, filesystem, exit status, lifecycle")
         return 0
     except Exception as error:
         print(f"Rift exec check failed: {error}", file=sys.stderr)

@@ -44,7 +44,7 @@ rift stop "$id"
 rift rm "$id"
 ```
 
-Rift forwards one TCP port per run. Detached containers keep their logs and status until removed. `exec` runs a non-interactive command with the container's environment and working directory; output appears when it exits.
+Rift forwards one TCP port per run. Detached containers keep their logs and status until removed. `exec` runs a non-interactive command with the container's environment and working directory, streaming combined stdout and stderr while it runs.
 
 ## What works
 

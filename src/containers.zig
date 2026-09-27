@@ -195,6 +195,14 @@ pub fn exec(init: std.process.Init, id: []const u8, command: []const []const u8,
         active_channel.exec.deleteFile(init.io, output_name) catch {};
         active_channel.exec.deleteFile(init.io, exit_name) catch {};
     }
+    const output_placeholder = try active_channel.exec.createFile(init.io, output_name, .{ .exclusive = true, .permissions = .fromMode(0o600) });
+    output_placeholder.close(init.io);
+    const output = try active_channel.exec.openFile(init.io, output_name, .{ .mode = .read_write, .follow_symlinks = false });
+    defer output.close(init.io);
+    var reader_buffer: [32 * 1024]u8 = undefined;
+    var chunk: [32 * 1024]u8 = undefined;
+    var reader = output.reader(init.io, &reader_buffer);
+    var output_offset: u64 = 0;
     var atomic = try active_channel.exec.createFileAtomic(init.io, request_name, .{ .permissions = .fromMode(0o600) });
     defer atomic.deinit(init.io);
     try atomic.file.writeStreamingAll(init.io, request);
@@ -203,6 +211,14 @@ pub fn exec(init: std.process.Init, id: []const u8, command: []const []const u8,
     var status_text: ?[]u8 = null;
     defer if (status_text) |contents| allocator.free(contents);
     while (status_text == null) {
+        const available = (try output.stat(init.io)).size;
+        while (output_offset < available) {
+            const count = try reader.interface.readSliceShort(chunk[0..@intCast(@min(available - output_offset, chunk.len))]);
+            if (count == 0) break;
+            try writer.writeAll(chunk[0..count]);
+            try writer.flush();
+            output_offset += count;
+        }
         status_text = active_channel.exec.readFileAlloc(init.io, exit_name, allocator, .limited(16)) catch |err| switch (err) {
             error.FileNotFound => null,
             else => return err,
@@ -213,22 +229,16 @@ pub fn exec(init: std.process.Init, id: []const u8, command: []const []const u8,
         try Io.sleep(init.io, .fromMilliseconds(50), .awake);
     }
 
-    const code = std.fmt.parseInt(u8, std.mem.trim(u8, status_text.?, "\r\n"), 10) catch return error.InvalidExecStatus;
-    const output = active_channel.exec.openFile(init.io, output_name, .{ .mode = .read_only, .follow_symlinks = false }) catch |err| switch (err) {
-        error.FileNotFound => return error.ExecOutputMissing,
-        else => return err,
-    };
-    defer output.close(init.io);
-    var reader_buffer: [32 * 1024]u8 = undefined;
-    var chunk: [32 * 1024]u8 = undefined;
-    var reader = output.reader(init.io, &reader_buffer);
-    var remaining = (try output.stat(init.io)).size;
-    while (remaining > 0) {
-        const count = try reader.interface.readSliceShort(chunk[0..@intCast(@min(remaining, chunk.len))]);
+    const final_size = (try output.stat(init.io)).size;
+    while (output_offset < final_size) {
+        const count = try reader.interface.readSliceShort(chunk[0..@intCast(@min(final_size - output_offset, chunk.len))]);
         if (count == 0) return error.ExecOutputTruncated;
         try writer.writeAll(chunk[0..count]);
-        remaining -= count;
+        output_offset += count;
     }
+    try writer.flush();
+
+    const code = std.fmt.parseInt(u8, std.mem.trim(u8, status_text.?, "\r\n"), 10) catch return error.InvalidExecStatus;
     return code;
 }
 
