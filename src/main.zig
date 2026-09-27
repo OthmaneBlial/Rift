@@ -88,3 +88,7 @@ test "unfinished commands are not advertised as available" {
     defer output.deinit();
     try std.testing.expectError(error.CommandUnavailable, dispatch(&.{"run"}, &output.writer));
 }
+
+test {
+    _ = @import("oci/reference.zig");
+}
