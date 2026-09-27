@@ -13,7 +13,9 @@ zig-out/bin/rift run --rm alpine /bin/true
 zig build -Doptimize=ReleaseSafe benchmark
 ```
 
-The benchmark copies local image blobs, image records, and guest boot files into a temporary `HOME`; setup and copying are outside the timed region. It measures one Alpine `/bin/true` launch, five subsequent launches, five `rift version` calls, VM-start-to-guest-control-ready latency, and detached-run-to-workload-ready latency. The VM timer starts immediately before `startWithCompletionHandler` and stops when the host observes an initramfs marker written after the guest mounts the rootfs and control VirtioFS shares, before overlay setup, DHCP, or workload execution. Host polling checks for this marker about every 10 ms.
+The benchmark copies local image blobs, image records, and guest boot files into a temporary `HOME`; setup and copying are outside the timed region. It measures one Alpine `/bin/true` launch, five subsequent launches, five `rift version` calls, VM-start-to-guest-control-ready latency, detached-run-to-workload-ready latency, and five warm `rift exec <id> /bin/true` calls. The VM timer starts immediately before `startWithCompletionHandler` and stops when the host observes an initramfs marker written after the guest mounts the rootfs and control VirtioFS shares, before overlay setup, DHCP, or workload execution. Host polling checks for this marker about every 10 ms.
+
+Warm `exec` timing starts a fresh host CLI process for each call against the already-ready detached VM. It includes host request creation, guest control-share polling and dispatch, `/bin/true` startup, and result collection. It is end-to-end command overhead, not an isolated VirtioFS latency measurement. The five calls run before the idle-guest memory samples.
 
 The detached timer starts before `rift run -d` and stops when the first `rift logs` poll returns the workload-ready marker. It includes host rootfs setup, VM startup, workload execution, and log polling; it excludes the later RSS and footprint sampling. Each launch starts a new VM.
 

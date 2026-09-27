@@ -157,6 +157,7 @@ def measure_worker(binary: Path, env: dict[str, str]) -> dict[str, object]:
                 if guest_boot_ms is None:
                     raise RuntimeError("detached VM exited or became ready without a guest boot measurement")
                 detached_ready_ms = round((time.perf_counter_ns() - run_started_ns) / 1_000_000, 1)
+                exec_samples = [timed(binary, env, "exec", identifier, "/bin/true") for _ in range(5)]
                 worker_rss = []
                 vm_rss = []
                 vm_footprints = []
@@ -190,6 +191,8 @@ def measure_worker(binary: Path, env: dict[str, str]) -> dict[str, object]:
                 return {
                     "vm_start_to_guest_control_ready_ms": guest_boot_ms,
                     "detached_run_to_guest_ready_ms": detached_ready_ms,
+                    "warm_detached_exec_true_ms": [round(sample, 1) for sample in exec_samples],
+                    "warm_detached_exec_true_median_ms": round(statistics.median(exec_samples), 1),
                     "detached_worker_rss_kib": int(statistics.median(worker_rss)),
                     "virtualization_vm_service_rss_kib": int(statistics.median(vm_rss)) if len(vm_rss) == 3 else None,
                     "virtualization_vm_service_footprint_bytes": int(statistics.median(vm_footprints)) if len(vm_footprints) == 3 else None,
