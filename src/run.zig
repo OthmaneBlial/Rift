@@ -10,7 +10,7 @@ const rootfs = @import("oci/rootfs.zig");
 const storage = @import("storage.zig");
 const vm = @import("vm.zig");
 
-pub fn execute(init: std.process.Init, arguments: []const []const u8, stop_path: ?[]const u8) !u8 {
+pub fn execute(init: std.process.Init, arguments: []const []const u8, stop_path: ?[]const u8, kill_path: ?[]const u8) !u8 {
     if (builtin.os.tag != .macos or builtin.cpu.arch != .aarch64) return error.UnsupportedHost;
     const allocator = init.arena.allocator();
     const options = try parseOptions(allocator, arguments);
@@ -105,7 +105,7 @@ pub fn execute(init: std.process.Init, arguments: []const []const u8, stop_path:
     const kernel_path = try std.fmt.allocPrint(allocator, "{s}/Image", .{guest_path});
     const initramfs_path = try std.fmt.allocPrint(allocator, "{s}/initramfs", .{run_path});
 
-    try vm.run(allocator, kernel_path, initramfs_path, "console=hvc0 quiet loglevel=0 rdinit=/rift-init", root_path, control_path, stop_path, staged_volumes, true, port, 0, 1);
+    try vm.run(allocator, kernel_path, initramfs_path, "console=hvc0 quiet loglevel=0 rdinit=/rift-init", root_path, control_path, stop_path, kill_path, staged_volumes, true, port, 0, 1);
     const status_file = control.openFile(init.io, "exit", .{ .mode = .read_only, .allow_directory = false, .follow_symlinks = false }) catch |err| switch (err) {
         error.FileNotFound => return error.GuestStatusMissing,
         else => return err,

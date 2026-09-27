@@ -35,7 +35,7 @@ Image pulls support public registries and optional credentials for private Beare
 
 `run` uses the image's `Entrypoint`, `Cmd`, `Env`, `User`, and absolute `WorkingDir` defaults, with command, `-e KEY=VALUE`, and `-w` overrides. Environment overrides must include a value; Rift does not copy host variables implicitly. A static guest executor applies the working directory and numeric or named UID/GID from the image, including images without `/bin/sh`.
 
-Each run gets a disposable writable overlay inside its own Linux VM, currently configured with 256 MiB of guest RAM. `-v HOST:TARGET[:ro|rw]` shares an existing host directory or regular file with the guest. Shares are read-only by default; `:rw` allows the container to change host files. Paths must be absolute, the host source cannot be a symlink, and the guest target cannot traverse image symlinks. File-volume sources must share a filesystem with Rift's runtime storage. `/dev` and `/proc` are reserved for the guest. Up to 16 shares can be mounted. `-p` accepts one `HOST:GUEST` TCP mapping bound to `127.0.0.1`. `run -d` starts one background Rift process per VM and prints its container ID. `stop` sends SIGTERM to the workload and forces the VM off after 10 seconds if it has not exited; `--rm` is unavailable with `-d`.
+Each run gets a disposable writable overlay inside its own Linux VM, currently configured with 256 MiB of guest RAM. `-v HOST:TARGET[:ro|rw]` shares an existing host directory or regular file with the guest. Shares are read-only by default; `:rw` allows the container to change host files. Paths must be absolute, the host source cannot be a symlink, and the guest target cannot traverse image symlinks. File-volume sources must share a filesystem with Rift's runtime storage. `/dev` and `/proc` are reserved for the guest. Up to 16 shares can be mounted. `-p` accepts one `HOST:GUEST` TCP mapping bound to `127.0.0.1`. `run -d` starts one background Rift process per VM and prints its container ID. `stop` sends SIGTERM to the workload and forces the VM off after 10 seconds if it has not exited. `kill` immediately forces the VM off. `--rm` is unavailable with `-d`.
 
 For a persistent writable directory:
 
@@ -128,14 +128,14 @@ No Docker Engine, Docker CLI, Docker Desktop, or container daemon is part of the
 - [ ] Broader OCI process settings and isolation
 - [x] Outbound NAT and DNS for foreground commands
 - [x] One localhost TCP port mapping for foreground commands
-- [x] Detached run, process listing, plain logs, stop, and remove
+- [x] Detached run, process listing, plain logs, graceful stop, force kill, and remove
 - [x] Explicit read-only and writable directory volumes
 - [x] Explicit read-only and writable file volumes
 - [x] Preview and confirmed cleanup of abandoned runtime staging
 - [x] Preview and confirmed pruning of unreferenced image blobs under a cache lock
 - [ ] Structured logs
 
-Foreground runs remove their temporary state on normal completion, including runs without `--rm`. Detached runs keep their logs and status until `rift rm`; the VM and temporary root filesystem are removed on stop or exit. Local checks have served the nginx welcome page over a forwarded localhost port, including with `run -d`. An interrupted foreground run can leave staging, which `rift clean` can preview and remove after the process exits. `clean` also reclaims blobs left by interrupted or refreshed pulls when no recorded image uses them. A local release archive is packaged and checked, but no public notarized release exists yet. Do not use Rift as a Docker replacement today.
+Foreground runs remove their temporary state on normal completion, including runs without `--rm`. Detached runs keep their logs and status until `rift rm`; the VM and temporary root filesystem are removed on stop, kill, or exit. Local checks have served the nginx welcome page over a forwarded localhost port, including with `run -d`. An interrupted foreground run can leave staging, which `rift clean` can preview and remove after the process exits. `clean` also reclaims blobs left by interrupted or refreshed pulls when no recorded image uses them. A local release archive is packaged and checked, but no public notarized release exists yet. Do not use Rift as a Docker replacement today.
 
 ## License
 

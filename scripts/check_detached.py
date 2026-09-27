@@ -35,6 +35,7 @@ def main() -> int:
         print(f"Rift detached check failed to start: {started!r}", file=sys.stderr)
         return 1
     forced_id = ""
+    killed_id = ""
     try:
         deadline = time.monotonic() + 15
         while time.monotonic() < deadline:
@@ -84,10 +85,33 @@ def main() -> int:
         forced_removed = call(rift, "rm", forced_id)
         if forced_removed.returncode != 0:
             raise RuntimeError(f"forced container state was not removed: {forced_removed!r}")
+
+        unresponsive = call(rift, "run", "-d", "alpine", "/bin/sh", "-c", 'trap "" TERM; echo RIFT_KILL_READY; sleep 60')
+        killed_id = unresponsive.stdout.strip()
+        if unresponsive.returncode != 0 or re.fullmatch(r"[0-9a-f]{32}", killed_id) is None:
+            raise RuntimeError(f"kill target did not start: {unresponsive!r}")
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline:
+            logged = call(rift, "logs", killed_id)
+            if "RIFT_KILL_READY" in logged.stdout:
+                break
+            time.sleep(0.2)
+        else:
+            raise RuntimeError("kill target never reached running state")
+        kill_started = time.monotonic()
+        killed = call(rift, "kill", killed_id)
+        if killed.returncode != 0 or f"Killed {killed_id}" not in killed.stdout or time.monotonic() - kill_started >= 8:
+            raise RuntimeError(f"kill did not stop the VM immediately: {killed!r}")
+        killed_listed = call(rift, "ps")
+        if f"{killed_id}  alpine  killed" not in killed_listed.stdout:
+            raise RuntimeError(f"killed container missing from ps: {killed_listed!r}")
+        killed_removed = call(rift, "rm", killed_id)
+        if killed_removed.returncode != 0:
+            raise RuntimeError(f"killed container state was not removed: {killed_removed!r}")
         after = set(runtime.iterdir()) if runtime.exists() else set()
         if after != before:
             raise RuntimeError(f"temporary state remains: {after - before}")
-        print("Rift detached check passed: process, logs, stop, removal, cleanup")
+        print("Rift detached check passed: process, logs, graceful stop, forced stop, kill, removal, cleanup")
         return 0
     except Exception as error:
         print(f"Rift detached check failed: {error}", file=sys.stderr)
@@ -102,6 +126,11 @@ def main() -> int:
             if forced_state.exists():
                 call(rift, "stop", forced_id)
                 call(rift, "rm", forced_id)
+        if killed_id:
+            killed_state = Path.home() / "Library/Application Support/Rift/containers" / killed_id
+            if killed_state.exists():
+                call(rift, "kill", killed_id)
+                call(rift, "rm", killed_id)
 
 
 if __name__ == "__main__":

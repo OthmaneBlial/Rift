@@ -73,9 +73,14 @@ pub fn worker(init: std.process.Init, id: []const u8, arguments: []const []const
     var state_path_buffer: [Io.Dir.max_path_bytes]u8 = undefined;
     const state_path = state_path_buffer[0..try state.realPath(init.io, &state_path_buffer)];
     const stop_path = try std.fmt.allocPrint(allocator, "{s}/stop", .{state_path});
-    const code = run.execute(init, arguments, stop_path) catch |err| {
+    const kill_path = try std.fmt.allocPrint(allocator, "{s}/kill", .{state_path});
+    const code = run.execute(init, arguments, stop_path, kill_path) catch |err| {
         if (err == error.ContainerStopped) {
             try state.writeFile(init.io, .{ .sub_path = "exit", .data = "stopped\n" });
+            return 0;
+        }
+        if (err == error.ContainerKilled) {
+            try state.writeFile(init.io, .{ .sub_path = "exit", .data = "killed\n" });
             return 0;
         }
         const message = try std.fmt.allocPrint(allocator, "failed {s}\n", .{@errorName(err)});
@@ -121,17 +126,26 @@ pub fn logs(init: std.process.Init, id: []const u8, writer: *Io.Writer) !void {
 }
 
 pub fn stop(init: std.process.Init, id: []const u8, writer: *Io.Writer) !void {
+    try terminate(init, id, writer, false);
+}
+
+pub fn kill(init: std.process.Init, id: []const u8, writer: *Io.Writer) !void {
+    try terminate(init, id, writer, true);
+}
+
+fn terminate(init: std.process.Init, id: []const u8, writer: *Io.Writer, force: bool) !void {
     var state = try openState(init, id);
     defer state.close(init.io);
     if (!(try isRunning(init.io, state))) return error.ContainerNotRunning;
-    const request = state.createFile(init.io, "stop", .{ .exclusive = true }) catch |err| switch (err) {
+    const marker = if (force) "kill" else "stop";
+    const request = state.createFile(init.io, marker, .{ .exclusive = true }) catch |err| switch (err) {
         error.PathAlreadyExists => null,
         else => return err,
     };
     if (request) |file| file.close(init.io);
     for (0..250) |_| {
         if (!(try isRunning(init.io, state))) {
-            try writer.print("Stopped {s}\n", .{id});
+            try writer.print("{s} {s}\n", .{ if (force) "Killed" else "Stopped", id });
             return;
         }
         try Io.sleep(init.io, .fromMilliseconds(100), .awake);

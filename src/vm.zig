@@ -9,6 +9,7 @@ extern fn rift_vm_run(
     share_path: ?[*:0]const u8,
     control_path: ?[*:0]const u8,
     stop_path: ?[*:0]const u8,
+    kill_path: ?[*:0]const u8,
     volumes: ?[*]const Share,
     volume_count: usize,
     network_enabled: c_int,
@@ -29,6 +30,7 @@ pub fn run(
     share_path: ?[]const u8,
     control_path: ?[]const u8,
     stop_path: ?[]const u8,
+    kill_path: ?[]const u8,
     volumes: []const Volume,
     network_enabled: bool,
     port: ?PortMapping,
@@ -48,6 +50,8 @@ pub fn run(
     defer if (control_path_z) |path| allocator.free(path);
     const stop_path_z = if (stop_path) |path| try allocator.dupeZ(u8, path) else null;
     defer if (stop_path_z) |path| allocator.free(path);
+    const kill_path_z = if (kill_path) |path| try allocator.dupeZ(u8, path) else null;
+    defer if (kill_path_z) |path| allocator.free(path);
     const volume_paths = try allocator.alloc([:0]u8, volumes.len);
     defer allocator.free(volume_paths);
     var converted: usize = 0;
@@ -60,11 +64,12 @@ pub fn run(
         shares[index] = .{ .path = volume_paths[index].ptr, .read_only = @intFromBool(volume.read_only) };
     }
 
-    return switch (rift_vm_run(kernel_z.ptr, initramfs_z.ptr, command_line_z.ptr, if (share_path_z) |path| path.ptr else null, if (control_path_z) |path| path.ptr else null, if (stop_path_z) |path| path.ptr else null, if (shares.len == 0) null else shares.ptr, shares.len, @intFromBool(network_enabled), if (port) |mapping| mapping.host else 0, if (port) |mapping| mapping.guest else 0, input_fd, output_fd)) {
+    return switch (rift_vm_run(kernel_z.ptr, initramfs_z.ptr, command_line_z.ptr, if (share_path_z) |path| path.ptr else null, if (control_path_z) |path| path.ptr else null, if (stop_path_z) |path| path.ptr else null, if (kill_path_z) |path| path.ptr else null, if (shares.len == 0) null else shares.ptr, shares.len, @intFromBool(network_enabled), if (port) |mapping| mapping.host else 0, if (port) |mapping| mapping.guest else 0, input_fd, output_fd)) {
         0 => {},
         2 => error.VirtualizationUnavailable,
         3 => error.HostPortUnavailable,
         4 => error.ContainerStopped,
+        5 => error.ContainerKilled,
         else => error.VirtualMachineFailed,
     };
 }

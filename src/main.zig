@@ -29,6 +29,7 @@ fn printHelp(writer: *Io.Writer) Io.Writer.Error!void {
             "  ps                 List detached containers\n" ++
             "  logs <id>          Show a detached container's output\n" ++
             "  stop <id>          Stop a detached container\n" ++
+            "  kill <id>          Force-kill a detached container\n" ++
             "  rm <id>            Remove a stopped container\n",
     );
 }
@@ -92,7 +93,7 @@ fn dispatch(args: []const []const u8, writer: *Io.Writer, init: ?std.process.Ini
             try containers.spawn(process, run_args, writer);
             return 0;
         }
-        return runtime.execute(process, run_args, null);
+        return runtime.execute(process, run_args, null, null);
     }
 
     if (args.len == 1 and std.mem.eql(u8, args[0], "ps")) {
@@ -105,6 +106,10 @@ fn dispatch(args: []const []const u8, writer: *Io.Writer, init: ?std.process.Ini
     }
     if (args.len == 2 and std.mem.eql(u8, args[0], "stop")) {
         try containers.stop(init orelse return error.CommandUnavailable, args[1], writer);
+        return 0;
+    }
+    if (args.len == 2 and std.mem.eql(u8, args[0], "kill")) {
+        try containers.kill(init orelse return error.CommandUnavailable, args[1], writer);
         return 0;
     }
     if (args.len == 2 and std.mem.eql(u8, args[0], "rm")) {
@@ -317,7 +322,7 @@ pub fn main(init: std.process.Init) void {
             error.ContainerNotFound => std.debug.print("rift: container not found\n", .{}),
             error.ContainerNotRunning => std.debug.print("rift: container is not running\n", .{}),
             error.ContainerRunning => std.debug.print("rift: stop the container before removing it\n", .{}),
-            error.ContainerStopTimedOut => std.debug.print("rift: timed out waiting for the container to stop\n", .{}),
+            error.ContainerStopTimedOut => std.debug.print("rift: timed out waiting for the container to terminate\n", .{}),
             error.DetachedAutoRemoveUnsupported => std.debug.print("rift: --rm is not available with detached runs yet\n", .{}),
             error.InvalidImageConfig => std.debug.print("rift: image configuration is invalid or mismatches its layers\n", .{}),
             error.ImageHasNoCommand => std.debug.print("rift: image has no default command; specify one after the image\n", .{}),
@@ -347,6 +352,7 @@ test "help is available without a command" {
     defer output.deinit();
     _ = try dispatch(&.{}, &output.writer, null);
     try std.testing.expect(std.mem.startsWith(u8, output.written(), "Rift — Ridiculously lightweight containers for macOS\n"));
+    try std.testing.expect(std.mem.indexOf(u8, output.written(), "kill <id>") != null);
 }
 
 test "version prints the package version" {

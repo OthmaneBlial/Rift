@@ -39,7 +39,7 @@ static int request_guest_stop(const char *control_path) {
 @end
 
 int rift_vm_run(const char *kernel_path, const char *initramfs_path, const char *command_line,
-                const char *share_path, const char *control_path, const char *stop_path,
+                const char *share_path, const char *control_path, const char *stop_path, const char *kill_path,
                 const RiftShare *volumes, size_t volume_count, int network_enabled,
                 int host_port, int guest_port, int input_fd, int output_fd) {
     @autoreleasepool {
@@ -134,6 +134,7 @@ int rift_vm_run(const char *kernel_path, const char *initramfs_path, const char 
             }
         }];
         BOOL stopRequested = NO;
+        BOOL killRequested = NO;
         BOOL forceStopRequested = NO;
         __block BOOL stopFailed = NO;
         NSTimeInterval stopRequestedAt = 0;
@@ -146,8 +147,11 @@ int rift_vm_run(const char *kernel_path, const char *initramfs_path, const char 
                     stopRequestedAt -= 10.0;
                 }
             }
-            if (stopRequested && !forceStopRequested && machine.state == VZVirtualMachineStateRunning &&
-                NSProcessInfo.processInfo.systemUptime - stopRequestedAt >= 10.0) {
+            if (kill_path && !killRequested && access(kill_path, F_OK) == 0 && machine.state == VZVirtualMachineStateRunning) {
+                killRequested = YES;
+            }
+            if (!forceStopRequested && machine.state == VZVirtualMachineStateRunning &&
+                (killRequested || (stopRequested && NSProcessInfo.processInfo.systemUptime - stopRequestedAt >= 10.0))) {
                 forceStopRequested = YES;
                 [machine stopWithCompletionHandler:^(NSError *stop_error) {
                     if (stop_error) {
@@ -163,6 +167,7 @@ int rift_vm_run(const char *kernel_path, const char *initramfs_path, const char 
         }
         machine.delegate = nil;
         rift_forward_stop(forwarder);
+        if (killRequested && !stopFailed && delegate.result == 0) return 5;
         return stopRequested && !stopFailed && delegate.result == 0 ? 4 : delegate.result;
     }
 }
