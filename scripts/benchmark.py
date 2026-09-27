@@ -13,6 +13,7 @@ import statistics
 import subprocess
 import tempfile
 import time
+from typing import Optional
 
 
 def run(binary: Path, env: dict[str, str], *args: str) -> subprocess.CompletedProcess[str]:
@@ -53,19 +54,56 @@ def total_bytes(binary: Path, env: dict[str, str]) -> int:
     return int(match.group(1))
 
 
-def worker_rss_kib(identifier: str) -> int:
+def process_rows() -> list[tuple[int, int, str]]:
     output = subprocess.run(["ps", "-axo", "pid=,rss=,command="], capture_output=True, text=True, check=True).stdout
-    workers = []
+    processes = []
     for line in output.splitlines():
         parts = line.split(None, 2)
-        if len(parts) == 3 and re.search(rf"(?:^|\s)_worker {identifier}(?:\s|$)", parts[2]):
-            workers.append(int(parts[1]))
+        if len(parts) == 3:
+            processes.append((int(parts[0]), int(parts[1]), parts[2]))
+    return processes
+
+
+def worker_process(identifier: str) -> tuple[int, int]:
+    workers = [(pid, rss) for pid, rss, command in process_rows() if re.search(rf"(?:^|\s)_worker {identifier}(?:\s|$)", command)]
     if len(workers) != 1:
         raise RuntimeError(f"expected one Rift worker for {identifier}, found {len(workers)}")
     return workers[0]
 
 
-def measure_worker(binary: Path, env: dict[str, str]) -> int:
+def virtualization_processes() -> dict[int, int]:
+    return {
+        pid: rss
+        for pid, rss, command in process_rows()
+        if "com.apple.Virtualization.VirtualMachine" in command
+    }
+
+
+def process_footprints(pids: list[int]) -> Optional[tuple[int, dict[int, int]]]:
+    with tempfile.TemporaryDirectory(prefix="rift-footprint-") as directory:
+        report = Path(directory) / "footprint.json"
+        command = ["/usr/bin/footprint", "--format", "bytes", "--noCategories", "--json", str(report)]
+        for pid in pids:
+            command.extend(("--pid", str(pid)))
+        try:
+            result = subprocess.run(command, capture_output=True, text=True, timeout=30)
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            return None
+        if result.returncode != 0:
+            return None
+        try:
+            data = json.loads(report.read_text())
+            per_process = {item["pid"]: item["footprint"] for item in data["processes"]}
+            total = data["total footprint"]
+        except (OSError, ValueError, KeyError, TypeError):
+            return None
+        if data.get("errors") or any(pid not in per_process for pid in pids):
+            return None
+        return int(total), {pid: int(per_process[pid]) for pid in pids}
+
+
+def measure_worker(binary: Path, env: dict[str, str]) -> dict[str, object]:
+    vm_processes_before = set(virtualization_processes())
     started = run(binary, env, "run", "-d", "alpine", "/bin/sh", "-c", "echo RIFT_BENCH_READY; sleep 60")
     identifier = started.stdout.strip()
     if re.fullmatch(r"[0-9a-f]{32}", identifier) is None:
@@ -74,11 +112,41 @@ def measure_worker(binary: Path, env: dict[str, str]) -> int:
         deadline = time.monotonic() + 30
         while time.monotonic() < deadline:
             if "RIFT_BENCH_READY" in run(binary, env, "logs", identifier).stdout:
-                samples = []
+                worker_rss = []
+                vm_rss = []
+                vm_footprints = []
+                combined_footprints = []
+                vm_pid = None
+                note = None
                 for _ in range(3):
-                    samples.append(worker_rss_kib(identifier))
+                    worker_pid, worker_sample = worker_process(identifier)
+                    worker_rss.append(worker_sample)
+                    vm_processes = virtualization_processes()
+                    candidates = set(vm_processes) - vm_processes_before
+                    if len(candidates) != 1:
+                        note = f"expected one new Virtualization.framework VM process, found {len(candidates)}"
+                    else:
+                        sample_vm_pid = candidates.pop()
+                        if vm_pid is not None and sample_vm_pid != vm_pid:
+                            note = "Virtualization.framework VM process changed during sampling"
+                        else:
+                            vm_pid = sample_vm_pid
+                            vm_rss.append(vm_processes[vm_pid])
+                            footprints = process_footprints([worker_pid, vm_pid])
+                            if footprints is None:
+                                note = "macOS footprint data was unavailable for the Rift worker and VM process"
+                            else:
+                                combined, per_process = footprints
+                                combined_footprints.append(combined)
+                                vm_footprints.append(per_process[vm_pid])
                     time.sleep(0.1)
-                return int(statistics.median(samples))
+                return {
+                    "detached_worker_rss_kib": int(statistics.median(worker_rss)),
+                    "virtualization_vm_service_rss_kib": int(statistics.median(vm_rss)) if len(vm_rss) == 3 else None,
+                    "virtualization_vm_service_footprint_bytes": int(statistics.median(vm_footprints)) if len(vm_footprints) == 3 else None,
+                    "worker_and_vm_process_footprint_bytes": int(statistics.median(combined_footprints)) if len(combined_footprints) == 3 else None,
+                    "memory_measurement_note": note,
+                }
             time.sleep(0.1)
         raise RuntimeError(f"detached Alpine did not become ready: {run(binary, env, 'ps').stdout}")
     finally:
@@ -107,7 +175,7 @@ def main() -> None:
         first = timed(binary, env, "run", "alpine", "/bin/true")
         subsequent = [timed(binary, env, "run", "alpine", "/bin/true") for _ in range(args.samples)]
         cli = [timed(binary, env, "version") for _ in range(args.samples)]
-        rss = measure_worker(binary, env)
+        memory = measure_worker(binary, env)
         load_after = os.getloadavg()
         after = total_bytes(binary, env)
         if after != before:
@@ -129,7 +197,7 @@ def main() -> None:
         "subsequent_alpine_median_ms": round(statistics.median(subsequent), 1),
         "version_ms": [round(sample, 1) for sample in cli],
         "version_median_ms": round(statistics.median(cli), 1),
-        "detached_worker_rss_kib": rss,
+        **memory,
     }
     print(json.dumps(result, indent=2))
 
