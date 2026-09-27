@@ -21,6 +21,7 @@
 @end
 
 int rift_vm_run(const char *kernel_path, const char *initramfs_path, const char *command_line,
+                const char *share_path,
                 int input_fd, int output_fd) {
     @autoreleasepool {
         if (![NSThread isMainThread] || ![VZVirtualMachine isSupported]) return 2;
@@ -47,6 +48,16 @@ int rift_vm_run(const char *kernel_path, const char *initramfs_path, const char 
         config.bootLoader = boot;
         config.platform = [[VZGenericPlatformConfiguration alloc] init];
         config.serialPorts = @[serial];
+        if (share_path) {
+            NSString *path = [NSString stringWithUTF8String:share_path];
+            if (!path) return 1;
+            VZSharedDirectory *directory = [[VZSharedDirectory alloc] initWithURL:[NSURL fileURLWithPath:path]
+                                                                   readOnly:YES];
+            VZVirtioFileSystemDeviceConfiguration *filesystem =
+                [[VZVirtioFileSystemDeviceConfiguration alloc] initWithTag:@"rift-rootfs"];
+            filesystem.share = [[VZSingleDirectoryShare alloc] initWithDirectory:directory];
+            config.directorySharingDevices = @[filesystem];
+        }
         NSError *error = nil;
         if (![config validateWithError:&error]) {
             fprintf(stderr, "rift-vm: invalid configuration: %s\n", error.description.UTF8String);

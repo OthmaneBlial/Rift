@@ -60,5 +60,28 @@ pub fn build(b: *std.Build) void {
         });
         check_vm.step.dependOn(&sign.step);
         b.step("vm-check", "Boot Alpine, run a guest command, and shut down").dependOn(&check_vm.step);
+
+        const check_share = b.addSystemCommand(&.{"/usr/bin/python3"});
+        check_share.addFileArg(b.path("scripts/check_vm.py"));
+        check_share.addArgs(&.{
+            probe_path,
+            b.pathFromRoot(".zig-cache/guest/Image"),
+            b.pathFromRoot(".zig-cache/guest/initramfs-virt"),
+            b.pathFromRoot(".zig-cache/guest"),
+        });
+        check_share.step.dependOn(&sign.step);
+        b.step("vm-share-check", "Mount a read-only host directory in Alpine").dependOn(&check_share.step);
+
+        const check_oci = b.addSystemCommand(&.{"/usr/bin/python3"});
+        check_oci.addFileArg(b.path("scripts/check_vm.py"));
+        check_oci.addArgs(&.{
+            probe_path,
+            b.pathFromRoot(".zig-cache/guest/Image"),
+            b.pathFromRoot(".zig-cache/guest/initramfs-virt"),
+            "--oci",
+            "registry-1.docker.io/library/alpine:latest",
+        });
+        check_oci.step.dependOn(&sign.step);
+        b.step("oci-vm-check", "Run pulled Alpine BusyBox inside a VM").dependOn(&check_oci.step);
     }
 }

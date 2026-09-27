@@ -4,6 +4,7 @@ extern fn rift_vm_run(
     kernel: [*:0]const u8,
     initramfs: [*:0]const u8,
     command_line: [*:0]const u8,
+    share_path: ?[*:0]const u8,
     input_fd: c_int,
     output_fd: c_int,
 ) c_int;
@@ -13,6 +14,7 @@ pub fn run(
     kernel: []const u8,
     initramfs: []const u8,
     command_line: []const u8,
+    share_path: ?[]const u8,
     input_fd: c_int,
     output_fd: c_int,
 ) !void {
@@ -22,8 +24,10 @@ pub fn run(
     defer allocator.free(initramfs_z);
     const command_line_z = try allocator.dupeZ(u8, command_line);
     defer allocator.free(command_line_z);
+    const share_path_z = if (share_path) |path| try allocator.dupeZ(u8, path) else null;
+    defer if (share_path_z) |path| allocator.free(path);
 
-    return switch (rift_vm_run(kernel_z.ptr, initramfs_z.ptr, command_line_z.ptr, input_fd, output_fd)) {
+    return switch (rift_vm_run(kernel_z.ptr, initramfs_z.ptr, command_line_z.ptr, if (share_path_z) |path| path.ptr else null, input_fd, output_fd)) {
         0 => {},
         2 => error.VirtualizationUnavailable,
         else => error.VirtualMachineFailed,

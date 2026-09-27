@@ -36,9 +36,11 @@ To check the macOS VM bridge on Apple Silicon, prepare the pinned Alpine guest a
 ```sh
 python3 scripts/prepare_guest.py
 zig build vm-check
+zig build vm-share-check
+zig build oci-vm-check
 ```
 
-This boots Alpine, runs a command in its initramfs shell, and shuts down. OCI container execution is still in development.
+These checks boot Alpine, mount a read-only host directory, and run `/bin/echo` from a pulled Alpine root filesystem inside the VM. Run `rift pull alpine` before `oci-vm-check`. The public `rift` CLI still has no `run` command.
 
 To assemble a pulled Alpine root filesystem locally, use the manifest digest shown by `rift images`:
 
@@ -64,6 +66,7 @@ No Docker Engine, Docker CLI, Docker Desktop, or container daemon is part of the
 - [ ] Image removal
 - [x] Initial safe extraction of tar, gzip, and zstd layers, including OCI whiteouts
 - [x] Local root filesystem assembly from verified manifest and layer blobs
+- [x] Local VM smoke that executes pulled Alpine BusyBox through a read-only share
 - [ ] Hardlinks and complete OCI filesystem metadata
 - [ ] OCI command execution through Rift's public CLI
 - [ ] Container lifecycle, logs, networking, and cleanup
