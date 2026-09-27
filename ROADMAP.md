@@ -2,7 +2,7 @@
 
 This cumulative checklist keeps the goals from Rift's first project brief and tracks progress since day one. Completed work stays visible as `[x]` only after verification; `[ ]` marks open work. Partial support is split from what remains.
 
-**Checklist progress: 56 of 71 items complete (79%).** This is verified roadmap progress; Rift remains an early source preview until the open release, compatibility, security, and adoption work is complete.
+**Checklist progress: 57 of 72 items complete (79%).** This is verified roadmap progress; Rift remains an early source preview until the open release, compatibility, security, and adoption work is complete.
 
 ## Project foundation
 
@@ -49,6 +49,7 @@ This cumulative checklist keeps the goals from Rift's first project brief and tr
 - [x] Boot and exercise Alpine through local macOS VM checks.
 - [x] Assemble image root filesystems from verified manifests and layer blobs.
 - [x] Extract tar, gzip, and zstd layers; apply OCI whiteouts.
+- [x] Cap decompressed layer data at 8 GiB per layer and 32 GiB per image extraction pass.
 - [x] Apply regular-file hardlinks and reject unsafe targets.
 - [x] Reject archive traversal, unsafe links, and writes redirected outside the image root.
 - [x] Preserve directory modes and standard tar modification times.

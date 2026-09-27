@@ -2,7 +2,14 @@ const std = @import("std");
 const Io = std.Io;
 
 const max_layer_bytes = 8 * 1024 * 1024 * 1024;
+const max_image_layer_bytes = 32 * 1024 * 1024 * 1024;
 const max_pax_header_bytes = 1024 * 1024;
+
+pub const ExpansionBudget = struct {
+    // apply decompresses every layer once for whiteouts and again for entries.
+    whiteouts: u64 = 0,
+    entries: u64 = 0,
+};
 
 pub const DirectoryMetadata = struct {
     mode: u32,
@@ -11,9 +18,17 @@ pub const DirectoryMetadata = struct {
 
 /// Apply a verified OCI layer to a private, unpublished root directory.
 /// Whiteouts run first so they cannot delete files added by the same layer.
-pub fn apply(allocator: std.mem.Allocator, io: Io, root: Io.Dir, blob: Io.File, media_type: []const u8, directory_metadata: *std.StringHashMap(DirectoryMetadata)) !void {
-    try pass(allocator, io, root, blob, media_type, directory_metadata, .whiteouts);
-    try pass(allocator, io, root, blob, media_type, directory_metadata, .entries);
+pub fn apply(
+    allocator: std.mem.Allocator,
+    io: Io,
+    root: Io.Dir,
+    blob: Io.File,
+    media_type: []const u8,
+    directory_metadata: *std.StringHashMap(DirectoryMetadata),
+    budget: *ExpansionBudget,
+) !void {
+    try pass(allocator, io, root, blob, media_type, directory_metadata, &budget.whiteouts, .whiteouts);
+    try pass(allocator, io, root, blob, media_type, directory_metadata, &budget.entries, .entries);
 }
 
 const Pass = enum { whiteouts, entries };
@@ -41,6 +56,8 @@ const PaxOverrides = struct {
 const LayerTarIterator = struct {
     allocator: std.mem.Allocator,
     reader: *Io.Reader,
+    image_total: *u64,
+    layer_total: u64 = 0,
     file_name_buffer: []u8,
     link_name_buffer: []u8,
     header_buffer: [512]u8 = undefined,
@@ -48,17 +65,28 @@ const LayerTarIterator = struct {
     unread_file_bytes: u64 = 0,
     global_mtime: ?Io.Timestamp = null,
 
-    fn init(allocator: std.mem.Allocator, reader: *Io.Reader, file_name_buffer: []u8, link_name_buffer: []u8) LayerTarIterator {
+    fn init(allocator: std.mem.Allocator, reader: *Io.Reader, image_total: *u64, file_name_buffer: []u8, link_name_buffer: []u8) LayerTarIterator {
         return .{
             .allocator = allocator,
             .reader = reader,
+            .image_total = image_total,
             .file_name_buffer = file_name_buffer,
             .link_name_buffer = link_name_buffer,
         };
     }
 
+    fn account(self: *LayerTarIterator, amount: u64) !void {
+        const layer_total = std.math.add(u64, self.layer_total, amount) catch return error.LayerTooLarge;
+        if (layer_total > max_layer_bytes) return error.LayerTooLarge;
+        const image_total = std.math.add(u64, self.image_total.*, amount) catch return error.ImageLayersTooLarge;
+        if (image_total > max_image_layer_bytes) return error.ImageLayersTooLarge;
+        self.layer_total = layer_total;
+        self.image_total.* = image_total;
+    }
+
     fn next(self: *LayerTarIterator) !?LayerTarEntry {
         if (self.unread_file_bytes > 0) {
+            try self.account(self.unread_file_bytes);
             try self.reader.discardAll64(self.unread_file_bytes);
             self.unread_file_bytes = 0;
         }
@@ -115,17 +143,20 @@ const LayerTarIterator = struct {
         return null;
     }
 
-    fn streamRemaining(self: *LayerTarIterator, entry: LayerTarEntry, writer: *Io.Writer) Io.Reader.StreamError!void {
+    fn streamRemaining(self: *LayerTarIterator, entry: LayerTarEntry, writer: *Io.Writer) !void {
+        try self.account(entry.size);
         try self.reader.streamExact64(writer, entry.size);
         self.unread_file_bytes = 0;
     }
 
     fn readHeader(self: *LayerTarIterator) !bool {
         if (self.padding > 0) {
+            try self.account(self.padding);
             try self.reader.discardAll(self.padding);
             self.padding = 0;
         }
         const count = try self.reader.readSliceShort(&self.header_buffer);
+        try self.account(count);
         if (count == 0) return false;
         if (count < self.header_buffer.len) return error.UnexpectedEndOfStream;
 
@@ -144,6 +175,7 @@ const LayerTarIterator = struct {
 
     fn readPaxHeader(self: *LayerTarIterator, size: u64, pax: *PaxOverrides, global: bool) !void {
         if (size > max_pax_header_bytes) return error.TarHeadersTooBig;
+        try self.account(size);
         const body = try self.allocator.alloc(u8, @intCast(size));
         defer self.allocator.free(body);
         try self.reader.readSliceAll(body);
@@ -184,6 +216,7 @@ const LayerTarIterator = struct {
 
     fn readGnuString(self: *LayerTarIterator, size: u64, buffer: []u8) ![]const u8 {
         if (size > buffer.len) return error.TarInsufficientBuffer;
+        try self.account(size);
         const value = buffer[0..@intCast(size)];
         try self.reader.readSliceAll(value);
         self.padding = tarBlockPadding(size);
@@ -247,35 +280,35 @@ fn parsePaxMtime(value: []const u8) !Io.Timestamp {
     return .fromNanoseconds(nanoseconds);
 }
 
-fn pass(allocator: std.mem.Allocator, io: Io, root: Io.Dir, blob: Io.File, media_type: []const u8, directory_metadata: *std.StringHashMap(DirectoryMetadata), phase: Pass) !void {
+fn pass(allocator: std.mem.Allocator, io: Io, root: Io.Dir, blob: Io.File, media_type: []const u8, directory_metadata: *std.StringHashMap(DirectoryMetadata), image_total: *u64, phase: Pass) !void {
     var input_buffer: [32 * 1024]u8 = undefined;
     var input = blob.reader(io, &input_buffer);
     if (std.mem.eql(u8, media_type, "application/vnd.oci.image.layer.v1.tar") or
         std.mem.eql(u8, media_type, "application/vnd.docker.image.rootfs.diff.tar"))
     {
-        return applyTar(allocator, io, root, &input.interface, directory_metadata, phase);
+        return applyTar(allocator, io, root, &input.interface, directory_metadata, image_total, phase);
     }
     if (std.mem.eql(u8, media_type, "application/vnd.oci.image.layer.v1.tar+gzip") or
         std.mem.eql(u8, media_type, "application/vnd.docker.image.rootfs.diff.tar.gzip"))
     {
         var output_buffer: [std.compress.flate.max_window_len]u8 = undefined;
         var decompressor = std.compress.flate.Decompress.init(&input.interface, .gzip, &output_buffer);
-        return applyTar(allocator, io, root, &decompressor.reader, directory_metadata, phase);
+        return applyTar(allocator, io, root, &decompressor.reader, directory_metadata, image_total, phase);
     }
     if (std.mem.eql(u8, media_type, "application/vnd.oci.image.layer.v1.tar+zstd")) {
         const output_buffer = try allocator.alloc(u8, std.compress.zstd.default_window_len + std.compress.zstd.block_size_max);
         defer allocator.free(output_buffer);
         var decompressor = std.compress.zstd.Decompress.init(&input.interface, output_buffer, .{});
-        return applyTar(allocator, io, root, &decompressor.reader, directory_metadata, phase);
+        return applyTar(allocator, io, root, &decompressor.reader, directory_metadata, image_total, phase);
     }
     return error.UnsupportedLayerMediaType;
 }
 
-fn applyTar(allocator: std.mem.Allocator, io: Io, root: Io.Dir, reader: *Io.Reader, directory_metadata: *std.StringHashMap(DirectoryMetadata), phase: Pass) !void {
+fn applyTar(allocator: std.mem.Allocator, io: Io, root: Io.Dir, reader: *Io.Reader, directory_metadata: *std.StringHashMap(DirectoryMetadata), image_total: *u64, phase: Pass) !void {
     var name_buffer: [Io.Dir.max_path_bytes]u8 = undefined;
     var link_buffer: [Io.Dir.max_path_bytes]u8 = undefined;
     var clean_buffer: [Io.Dir.max_path_bytes]u8 = undefined;
-    var it = LayerTarIterator.init(allocator, reader, &name_buffer, &link_buffer);
+    var it = LayerTarIterator.init(allocator, reader, image_total, &name_buffer, &link_buffer);
     var total: u64 = 0;
     var count: usize = 0;
     while (true) {
@@ -563,6 +596,41 @@ test "applies whiteouts before current layer entries" {
     try std.testing.expectEqualStrings("new", newer);
 }
 
+test "rejects aggregate decompressed layer bytes before extracting entries" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var temp = std.testing.tmpDir(.{});
+    defer temp.cleanup();
+    try temp.dir.createDirPath(io, "root");
+    var root = try temp.dir.openDir(io, "root", .{});
+    defer root.close(io);
+
+    var archive: Io.Writer.Allocating = .init(allocator);
+    defer archive.deinit();
+    var tar: std.tar.Writer = .{ .underlying_writer = &archive.writer };
+    try tar.writeFileBytes("must-not-exist", "payload", .{});
+    try temp.dir.writeFile(io, .{ .sub_path = "layer.tar", .data = archive.written() });
+    const blob = try temp.dir.openFile(io, "layer.tar", .{ .mode = .read_only });
+    defer blob.close(io);
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    var directory_metadata = std.StringHashMap(DirectoryMetadata).init(arena.allocator());
+    defer directory_metadata.deinit();
+    var budget: ExpansionBudget = .{ .entries = max_image_layer_bytes - 1 };
+
+    try std.testing.expectError(error.ImageLayersTooLarge, apply(
+        allocator,
+        io,
+        root,
+        blob,
+        "application/vnd.oci.image.layer.v1.tar",
+        &directory_metadata,
+        &budget,
+    ));
+    try std.testing.expectError(error.FileNotFound, root.statFile(io, "must-not-exist", .{ .follow_symlinks = false }));
+}
+
 test "applies final directory modes after all layers" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;
@@ -583,7 +651,8 @@ test "applies final directory modes after all layers" {
     try temp.dir.writeFile(io, .{ .sub_path = "first.tar", .data = first_archive.written() });
     const first_blob = try temp.dir.openFile(io, "first.tar", .{ .mode = .read_only });
     defer first_blob.close(io);
-    try apply(allocator, io, root, first_blob, "application/vnd.oci.image.layer.v1.tar", &directory_metadata);
+    var budget: ExpansionBudget = .{};
+    try apply(allocator, io, root, first_blob, "application/vnd.oci.image.layer.v1.tar", &directory_metadata, &budget);
 
     var second_archive: Io.Writer.Allocating = .init(allocator);
     defer second_archive.deinit();
@@ -593,7 +662,7 @@ test "applies final directory modes after all layers" {
     try temp.dir.writeFile(io, .{ .sub_path = "second.tar", .data = second_archive.written() });
     const second_blob = try temp.dir.openFile(io, "second.tar", .{ .mode = .read_only });
     defer second_blob.close(io);
-    try apply(allocator, io, root, second_blob, "application/vnd.oci.image.layer.v1.tar", &directory_metadata);
+    try apply(allocator, io, root, second_blob, "application/vnd.oci.image.layer.v1.tar", &directory_metadata, &budget);
 
     try applyDirectoryMetadata(io, root, &directory_metadata);
     const stat = try root.statFile(io, "tmp", .{ .follow_symlinks = false });
@@ -827,7 +896,8 @@ fn applyOne(allocator: std.mem.Allocator, io: Io, root: Io.Dir, blob: Io.File, m
     defer arena.deinit();
     var directory_metadata = std.StringHashMap(DirectoryMetadata).init(arena.allocator());
     defer directory_metadata.deinit();
-    try apply(allocator, io, root, blob, media_type, &directory_metadata);
+    var budget: ExpansionBudget = .{};
+    try apply(allocator, io, root, blob, media_type, &directory_metadata, &budget);
     try applyDirectoryMetadata(io, root, &directory_metadata);
 }
 

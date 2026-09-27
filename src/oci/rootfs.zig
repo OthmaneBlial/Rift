@@ -14,10 +14,11 @@ pub fn assemble(allocator: std.mem.Allocator, io: Io, root: Io.Dir, store: stora
     const image = try manifest.parseManifest(arena.allocator(), body);
     var directory_metadata = std.StringHashMap(layers.DirectoryMetadata).init(arena.allocator());
     defer directory_metadata.deinit();
+    var expansion_budget: layers.ExpansionBudget = .{};
     for (image.layers) |layer| {
         const blob = try store.openVerified(layer.digest, layer.size);
         defer blob.close(io);
-        try layers.apply(allocator, io, root, blob, layer.mediaType, &directory_metadata);
+        try layers.apply(allocator, io, root, blob, layer.mediaType, &directory_metadata, &expansion_budget);
     }
     try layers.applyDirectoryMetadata(io, root, &directory_metadata);
 }
