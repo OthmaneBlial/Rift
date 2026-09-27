@@ -2,7 +2,7 @@
 
 This checklist follows the goals in the original project brief. `[x]` marks work implemented and verified within the stated scope; `[ ]` marks work still open. Partial support is split from the work that remains.
 
-**Checklist progress: 53 of 68 items complete (78%).** This is verified roadmap progress; Rift remains an early source preview until the open release, compatibility, security, and adoption work is complete.
+**Checklist progress: 54 of 69 items complete (78%).** This is verified roadmap progress; Rift remains an early source preview until the open release, compatibility, security, and adoption work is complete.
 
 ## Project foundation
 
@@ -56,7 +56,8 @@ This checklist follows the goals in the original project brief. `[x]` marks work
 - [x] Keep image files read-only and use a disposable writable overlay for container changes.
 - [ ] Preserve OCI file ownership and groups during layer extraction.
 - [x] Apply and test local PAX `path`, `linkpath`, and `size` overrides; recheck path and link safety after overrides.
-- [ ] Preserve PAX `mtime`/`uid`/`gid` fields; honor global PAX headers.
+- [x] Apply local and global PAX `mtime` values, including fractional and negative timestamps.
+- [ ] Preserve PAX `uid`/`gid` and global PAX fields beyond `mtime`.
 - [ ] Support OCI extended attributes and file capabilities.
 - [ ] Support required special files such as FIFOs and device nodes.
 

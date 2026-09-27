@@ -2,6 +2,7 @@ const std = @import("std");
 const Io = std.Io;
 
 const max_layer_bytes = 8 * 1024 * 1024 * 1024;
+const max_pax_header_bytes = 1024 * 1024;
 
 pub const DirectoryMetadata = struct {
     mode: u32,
@@ -16,6 +17,235 @@ pub fn apply(allocator: std.mem.Allocator, io: Io, root: Io.Dir, blob: Io.File, 
 }
 
 const Pass = enum { whiteouts, entries };
+
+const LayerTarEntryKind = enum { directory, sym_link, file, hard_link };
+const LayerTarEntry = struct {
+    name: []const u8,
+    link_name: []const u8,
+    size: u64,
+    mode: u32,
+    kind: LayerTarEntryKind,
+    mtime: Io.Timestamp,
+};
+
+const PaxOverrides = struct {
+    path: ?[]const u8 = null,
+    linkpath: ?[]const u8 = null,
+    size: ?u64 = null,
+    has_mtime: bool = false,
+    mtime: ?Io.Timestamp = null,
+};
+
+/// std.tar.Iterator drops PAX mtime records and global PAX headers. Keep its
+/// supported entry behavior while retaining the timestamps needed by OCI layers.
+const LayerTarIterator = struct {
+    allocator: std.mem.Allocator,
+    reader: *Io.Reader,
+    file_name_buffer: []u8,
+    link_name_buffer: []u8,
+    header_buffer: [512]u8 = undefined,
+    padding: usize = 0,
+    unread_file_bytes: u64 = 0,
+    global_mtime: ?Io.Timestamp = null,
+
+    fn init(allocator: std.mem.Allocator, reader: *Io.Reader, file_name_buffer: []u8, link_name_buffer: []u8) LayerTarIterator {
+        return .{
+            .allocator = allocator,
+            .reader = reader,
+            .file_name_buffer = file_name_buffer,
+            .link_name_buffer = link_name_buffer,
+        };
+    }
+
+    fn next(self: *LayerTarIterator) !?LayerTarEntry {
+        if (self.unread_file_bytes > 0) {
+            try self.reader.discardAll64(self.unread_file_bytes);
+            self.unread_file_bytes = 0;
+        }
+
+        var pax: PaxOverrides = .{};
+        var gnu_name: ?[]const u8 = null;
+        var gnu_link_name: ?[]const u8 = null;
+        while (try self.readHeader()) {
+            const header = &self.header_buffer;
+            const kind = header[156];
+            const size = try tarHeaderSize(header);
+            switch (kind) {
+                'g' => try self.readPaxHeader(size, &pax, true),
+                'x' => {
+                    pax = .{};
+                    gnu_name = null;
+                    gnu_link_name = null;
+                    try self.readPaxHeader(size, &pax, false);
+                },
+                'L' => gnu_name = try self.readGnuString(size, self.file_name_buffer),
+                'K' => gnu_link_name = try self.readGnuString(size, self.link_name_buffer),
+                '0', 0, '2', '5', '1' => {
+                    const entry_size = pax.size orelse size;
+                    if (entry_size > max_layer_bytes) return error.LayerTooLarge;
+                    const mtime = if (pax.has_mtime)
+                        pax.mtime orelse try tarMtime(header)
+                    else
+                        self.global_mtime orelse try tarMtime(header);
+                    var raw_name_buffer: [Io.Dir.max_path_bytes]u8 = undefined;
+                    const raw_name = try tarHeaderName(header, &raw_name_buffer);
+                    const name = pax.path orelse gnu_name orelse try copyTarString(self.file_name_buffer, raw_name);
+                    const raw_link_name = std.mem.sliceTo(header[157..257], 0);
+                    const link_name = pax.linkpath orelse gnu_link_name orelse try copyTarString(self.link_name_buffer, raw_link_name);
+                    const entry_kind: LayerTarEntryKind = switch (kind) {
+                        '5' => .directory,
+                        '2' => .sym_link,
+                        '1' => .hard_link,
+                        else => .file,
+                    };
+                    self.padding = tarBlockPadding(entry_size);
+                    self.unread_file_bytes = entry_size;
+                    return .{
+                        .name = name,
+                        .link_name = link_name,
+                        .size = entry_size,
+                        .mode = try tarHeaderMode(header),
+                        .kind = entry_kind,
+                        .mtime = mtime,
+                    };
+                },
+                else => return error.TarUnsupportedHeader,
+            }
+        }
+        return null;
+    }
+
+    fn streamRemaining(self: *LayerTarIterator, entry: LayerTarEntry, writer: *Io.Writer) Io.Reader.StreamError!void {
+        try self.reader.streamExact64(writer, entry.size);
+        self.unread_file_bytes = 0;
+    }
+
+    fn readHeader(self: *LayerTarIterator) !bool {
+        if (self.padding > 0) {
+            try self.reader.discardAll(self.padding);
+            self.padding = 0;
+        }
+        const count = try self.reader.readSliceShort(&self.header_buffer);
+        if (count == 0) return false;
+        if (count < self.header_buffer.len) return error.UnexpectedEndOfStream;
+
+        const expected = try tarHeaderOctal(self.header_buffer[148..156]);
+        var unsigned: u64 = 0;
+        var signed: i64 = 0;
+        for (self.header_buffer, 0..) |byte, index| {
+            const value = if (index >= 148 and index < 156) 32 else byte;
+            unsigned += value;
+            signed += @as(i8, @bitCast(value));
+        }
+        if (expected == 0 and unsigned == 256) return false;
+        if (expected != unsigned and expected != signed) return error.TarHeaderChksum;
+        return true;
+    }
+
+    fn readPaxHeader(self: *LayerTarIterator, size: u64, pax: *PaxOverrides, global: bool) !void {
+        if (size > max_pax_header_bytes) return error.TarHeadersTooBig;
+        const body = try self.allocator.alloc(u8, @intCast(size));
+        defer self.allocator.free(body);
+        try self.reader.readSliceAll(body);
+        self.padding = tarBlockPadding(size);
+        var offset: usize = 0;
+        while (offset < body.len) {
+            const separator = std.mem.indexOfScalarPos(u8, body, offset, ' ') orelse return error.PaxInvalidAttribute;
+            const length = std.fmt.parseInt(usize, body[offset..separator], 10) catch return error.PaxInvalidAttribute;
+            if (length == 0 or length > body.len - offset) return error.PaxInvalidAttribute;
+            const end = offset + length;
+            const record = body[offset..end];
+            if (record.len < separator - offset + 4 or record[record.len - 1] != '\n') return error.PaxInvalidAttribute;
+            const equals = std.mem.indexOfScalar(u8, record, '=') orelse return error.PaxInvalidAttribute;
+            const key_start = separator - offset + 1;
+            if (equals <= key_start or std.mem.indexOfScalar(u8, record, 0) != null) return error.PaxInvalidAttribute;
+            const key = record[key_start..equals];
+            const value = record[equals + 1 .. record.len - 1];
+
+            if (global) {
+                if (std.mem.eql(u8, key, "mtime")) {
+                    self.global_mtime = if (value.len == 0) null else try parsePaxMtime(value);
+                    pax.has_mtime = false;
+                    pax.mtime = null;
+                }
+            } else if (std.mem.eql(u8, key, "path")) {
+                pax.path = try copyTarString(self.file_name_buffer, value);
+            } else if (std.mem.eql(u8, key, "linkpath")) {
+                pax.linkpath = try copyTarString(self.link_name_buffer, value);
+            } else if (std.mem.eql(u8, key, "size")) {
+                pax.size = std.fmt.parseInt(u64, value, 10) catch return error.PaxInvalidAttribute;
+            } else if (std.mem.eql(u8, key, "mtime")) {
+                pax.has_mtime = true;
+                pax.mtime = if (value.len == 0) null else try parsePaxMtime(value);
+            }
+            offset = end;
+        }
+    }
+
+    fn readGnuString(self: *LayerTarIterator, size: u64, buffer: []u8) ![]const u8 {
+        if (size > buffer.len) return error.TarInsufficientBuffer;
+        const value = buffer[0..@intCast(size)];
+        try self.reader.readSliceAll(value);
+        self.padding = tarBlockPadding(size);
+        return std.mem.sliceTo(value, 0);
+    }
+};
+
+fn copyTarString(buffer: []u8, value: []const u8) ![]const u8 {
+    if (value.len > buffer.len) return error.TarInsufficientBuffer;
+    @memcpy(buffer[0..value.len], value);
+    return buffer[0..value.len];
+}
+
+fn tarBlockPadding(size: u64) usize {
+    return @intCast((512 - size % 512) % 512);
+}
+
+fn tarHeaderOctal(field: []const u8) !u64 {
+    const value = std.mem.trim(u8, field, " \x00");
+    if (value.len == 0) return 0;
+    return std.fmt.parseInt(u64, value, 8) catch return error.TarHeader;
+}
+
+fn tarHeaderSize(header: *const [512]u8) !u64 {
+    const field = header[124..136];
+    if (field[0] == 0xff) return error.TarNumericValueNegative;
+    if (field[0] == 0x80) {
+        if (field[1] != 0 or field[2] != 0 or field[3] != 0) return error.TarNumericValueTooBig;
+        return std.mem.readInt(u64, field[4..12], .big);
+    }
+    return tarHeaderOctal(field);
+}
+
+fn tarHeaderMode(header: *const [512]u8) !u32 {
+    return @intCast(try tarHeaderOctal(header[100..108]));
+}
+
+fn parsePaxMtime(value: []const u8) !Io.Timestamp {
+    if (value.len == 0) return error.InvalidLayerTimestamp;
+    const dot = std.mem.indexOfScalar(u8, value, '.') orelse value.len;
+    if (dot == 0 or (dot < value.len and dot + 1 == value.len)) return error.InvalidLayerTimestamp;
+    const seconds_text = value[0..dot];
+    const digit_start: usize = if (seconds_text[0] == '-' or seconds_text[0] == '+') 1 else 0;
+    if (digit_start == seconds_text.len) return error.InvalidLayerTimestamp;
+    for (seconds_text[digit_start..]) |digit| if (digit < '0' or digit > '9') return error.InvalidLayerTimestamp;
+    const seconds = std.fmt.parseInt(i96, seconds_text, 10) catch return error.InvalidLayerTimestamp;
+    const negative = value[0] == '-';
+    var nanoseconds = std.math.mul(i96, seconds, std.time.ns_per_s) catch return error.InvalidLayerTimestamp;
+    if (dot < value.len) {
+        const fraction = value[dot + 1 ..];
+        // Io.Timestamp has nanosecond precision; finer PAX fractions are truncated.
+        for (fraction) |digit| if (digit < '0' or digit > '9') return error.InvalidLayerTimestamp;
+        const precision = @min(fraction.len, 9);
+        var fractional_ns = std.fmt.parseInt(i96, fraction[0..precision], 10) catch return error.InvalidLayerTimestamp;
+        for (precision..9) |_| fractional_ns *= 10;
+        nanoseconds = if (negative)
+            std.math.sub(i96, nanoseconds, fractional_ns) catch return error.InvalidLayerTimestamp
+        else
+            std.math.add(i96, nanoseconds, fractional_ns) catch return error.InvalidLayerTimestamp;
+    }
+    return .fromNanoseconds(nanoseconds);
+}
 
 fn pass(allocator: std.mem.Allocator, io: Io, root: Io.Dir, blob: Io.File, media_type: []const u8, directory_metadata: *std.StringHashMap(DirectoryMetadata), phase: Pass) !void {
     var input_buffer: [32 * 1024]u8 = undefined;
@@ -45,26 +275,14 @@ fn applyTar(allocator: std.mem.Allocator, io: Io, root: Io.Dir, reader: *Io.Read
     var name_buffer: [Io.Dir.max_path_bytes]u8 = undefined;
     var link_buffer: [Io.Dir.max_path_bytes]u8 = undefined;
     var clean_buffer: [Io.Dir.max_path_bytes]u8 = undefined;
-    var it: std.tar.Iterator = .init(reader, .{
-        .file_name_buffer = &name_buffer,
-        .link_name_buffer = &link_buffer,
-    });
+    var it = LayerTarIterator.init(allocator, reader, &name_buffer, &link_buffer);
     var total: u64 = 0;
     var count: usize = 0;
     while (true) {
         @memset(&name_buffer, 0);
         @memset(&link_buffer, 0);
-        const next = it.next() catch |err| switch (err) {
-            error.TarUnsupportedHeader => {
-                count += 1;
-                if (count > 1_000_000) return error.LayerTooLarge;
-                try applyHardlink(io, root, &it, &name_buffer, &link_buffer, phase);
-                continue;
-            },
-            else => return err,
-        };
+        const next = try it.next();
         const entry = next orelse break;
-        const mtime = try tarMtime(&it.header_buffer);
         count += 1;
         if (count > 1_000_000 or entry.size > max_layer_bytes - total) return error.LayerTooLarge;
         total += entry.size;
@@ -80,14 +298,22 @@ fn applyTar(allocator: std.mem.Allocator, io: Io, root: Io.Dir, reader: *Io.Read
             if (phase == .whiteouts) try applyWhiteout(allocator, io, root, path, name);
             continue;
         }
-        if (phase == .whiteouts or path.len == 0) continue;
+        if (path.len == 0) continue;
+        if (phase == .whiteouts) {
+            if (entry.kind == .hard_link) try applyHardlink(io, root, path, entry.link_name, entry.size, entry.mtime, phase);
+            continue;
+        }
+        if (entry.kind == .hard_link) {
+            try applyHardlink(io, root, path, entry.link_name, entry.size, entry.mtime, phase);
+            continue;
+        }
 
         var parent = (try openParent(io, root, parentPath(path), true)).?;
         defer parent.close(io);
         switch (entry.kind) {
             .directory => {
                 const mode: u32 = @intCast(entry.mode & 0o7777);
-                const metadata: DirectoryMetadata = .{ .mode = mode, .mtime = mtime };
+                const metadata: DirectoryMetadata = .{ .mode = mode, .mtime = entry.mtime };
                 if (directory_metadata.getPtr(path)) |stored_metadata| {
                     stored_metadata.* = metadata;
                 } else {
@@ -115,7 +341,7 @@ fn applyTar(allocator: std.mem.Allocator, io: Io, root: Io.Dir, reader: *Io.Read
                 try it.streamRemaining(entry, &writer.interface);
                 try writer.interface.flush();
                 try output.setPermissions(io, .fromMode(@intCast(entry.mode & 0o777)));
-                try output.setTimestamps(io, .{ .modify_timestamp = .init(mtime) });
+                try output.setTimestamps(io, .{ .modify_timestamp = .init(entry.mtime) });
             },
             .sym_link => {
                 try checkLink(path, entry.link_name);
@@ -123,9 +349,10 @@ fn applyTar(allocator: std.mem.Allocator, io: Io, root: Io.Dir, reader: *Io.Read
                 try parent.symLink(io, entry.link_name, name, .{});
                 try parent.setTimestamps(io, name, .{
                     .follow_symlinks = false,
-                    .modify_timestamp = .init(mtime),
+                    .modify_timestamp = .init(entry.mtime),
                 });
             },
+            .hard_link => unreachable,
         }
     }
 }
@@ -167,22 +394,13 @@ fn applyDirectoryMetadataEntry(io: Io, root: Io.Dir, path: []const u8, metadata:
     });
 }
 
-fn applyHardlink(io: Io, root: Io.Dir, it: *std.tar.Iterator, name_buffer: []const u8, link_buffer: []const u8, phase: Pass) !void {
-    const header = &it.header_buffer;
-    if (header[156] != '1' or !std.mem.eql(u8, std.mem.trim(u8, header[124..136], "0 \x00"), "")) return error.TarUnsupportedHeader;
-
-    var raw_name_buffer: [Io.Dir.max_path_bytes]u8 = undefined;
-    const raw_name = if (name_buffer[0] != 0) std.mem.sliceTo(name_buffer, 0) else try tarHeaderName(header, &raw_name_buffer);
-    const raw_target = if (link_buffer[0] != 0) std.mem.sliceTo(link_buffer, 0) else std.mem.sliceTo(header[157..257], 0);
-    var clean_name_buffer: [Io.Dir.max_path_bytes]u8 = undefined;
+fn applyHardlink(io: Io, root: Io.Dir, path: []const u8, raw_target: []const u8, size: u64, mtime: Io.Timestamp, phase: Pass) !void {
+    if (size != 0) return error.TarUnsupportedHeader;
     var clean_target_buffer: [Io.Dir.max_path_bytes]u8 = undefined;
-    const path = try cleanPath(raw_name, &clean_name_buffer);
     const target = try cleanPath(raw_target, &clean_target_buffer);
     if (path.len == 0 or target.len == 0 or std.mem.eql(u8, path, target)) return error.UnsafeLayerLink;
     if (std.mem.startsWith(u8, basename(path), ".wh.")) return error.InvalidWhiteout;
     if (phase == .whiteouts) return;
-    const mtime = try tarMtime(header);
-
     var source = (try openParent(io, root, parentPath(target), false)) orelse return error.InvalidHardlink;
     defer source.close(io);
     if ((try source.statFile(io, basename(target), .{ .follow_symlinks = false })).kind != .file) return error.InvalidHardlink;
@@ -499,6 +717,50 @@ test "honors local PAX path and size overrides and rejects unsafe overrides" {
     try std.testing.expectError(error.UnsafeLayerLink, applyOne(allocator, io, root, unsafe_link_blob, "application/vnd.oci.image.layer.v1.tar"));
 }
 
+test "honors local and global PAX modification times" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var temp = std.testing.tmpDir(.{});
+    defer temp.cleanup();
+    try temp.dir.createDirPath(io, "root");
+    var root = try temp.dir.openDir(io, "root", .{});
+    defer root.close(io);
+
+    var archive: Io.Writer.Allocating = .init(allocator);
+    defer archive.deinit();
+    var tar: std.tar.Writer = .{ .underlying_writer = &archive.writer };
+    try writeTestPaxHeaderKind(allocator, &archive, &tar, 'g', &.{.{ .key = "mtime", .value = "1234.125" }});
+    try tar.writeFileBytes("global", "g", .{ .mtime = 1 });
+    try tar.writeFileBytes("global-inherited", "gi", .{ .mtime = 3 });
+    try writeTestPaxHeader(allocator, &archive, &tar, &.{.{ .key = "mtime", .value = "-1.75" }});
+    try tar.writeFileBytes("local", "l", .{ .mtime = 2 });
+    try writeTestPaxHeader(allocator, &archive, &tar, &.{.{ .key = "mtime", .value = "" }});
+    try tar.writeFileBytes("base", "b", .{ .mtime = 42 });
+    try writeTestPaxHeader(allocator, &archive, &tar, &.{.{ .key = "mtime", .value = "8.25" }});
+    try tar.writeDir("dated-dir", .{ .mtime = 3 });
+    try writeTestPaxHeader(allocator, &archive, &tar, &.{.{ .key = "mtime", .value = "-0.5" }});
+    try tar.writeLink("dated-link", "global", .{ .mtime = 4 });
+    try temp.dir.writeFile(io, .{ .sub_path = "pax-mtime.tar", .data = archive.written() });
+    const blob = try temp.dir.openFile(io, "pax-mtime.tar", .{ .mode = .read_only });
+    defer blob.close(io);
+    try applyOne(allocator, io, root, blob, "application/vnd.oci.image.layer.v1.tar");
+
+    const global_stat = try root.statFile(io, "global", .{ .follow_symlinks = false });
+    try std.testing.expectEqual(Io.Timestamp.fromNanoseconds(1_234_125_000_000), global_stat.mtime);
+    const inherited_stat = try root.statFile(io, "global-inherited", .{ .follow_symlinks = false });
+    try std.testing.expectEqual(Io.Timestamp.fromNanoseconds(1_234_125_000_000), inherited_stat.mtime);
+    const local_stat = try root.statFile(io, "local", .{ .follow_symlinks = false });
+    try std.testing.expectEqual(Io.Timestamp.fromNanoseconds(-1_750_000_000), local_stat.mtime);
+    const base_stat = try root.statFile(io, "base", .{ .follow_symlinks = false });
+    try std.testing.expectEqual(Io.Timestamp.fromNanoseconds(42_000_000_000), base_stat.mtime);
+    const directory_stat = try root.statFile(io, "dated-dir", .{ .follow_symlinks = false });
+    try std.testing.expectEqual(Io.Timestamp.fromNanoseconds(8_250_000_000), directory_stat.mtime);
+    const link_stat = try root.statFile(io, "dated-link", .{ .follow_symlinks = false });
+    try std.testing.expectEqual(Io.Timestamp.fromNanoseconds(-500_000_000), link_stat.mtime);
+    try std.testing.expectEqual(Io.Timestamp.fromNanoseconds(7_123_456_789), try parsePaxMtime("7.1234567899"));
+    try std.testing.expectError(error.InvalidLayerTimestamp, parsePaxMtime("7.-5"));
+}
+
 test "rejects paths through symlink parents" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;
@@ -582,6 +844,10 @@ fn writeTestHardlink(writer: *Io.Writer, name: []const u8, target: []const u8) !
 const TestPaxAttribute = struct { key: []const u8, value: []const u8 };
 
 fn writeTestPaxHeader(allocator: std.mem.Allocator, archive: *Io.Writer.Allocating, tar: *std.tar.Writer, attributes: []const TestPaxAttribute) !void {
+    return writeTestPaxHeaderKind(allocator, archive, tar, 'x', attributes);
+}
+
+fn writeTestPaxHeaderKind(allocator: std.mem.Allocator, archive: *Io.Writer.Allocating, tar: *std.tar.Writer, kind: u8, attributes: []const TestPaxAttribute) !void {
     var record: Io.Writer.Allocating = .init(allocator);
     defer record.deinit();
     for (attributes) |attribute| try writeTestPaxRecord(&record.writer, attribute.key, attribute.value);
@@ -589,7 +855,7 @@ fn writeTestPaxHeader(allocator: std.mem.Allocator, archive: *Io.Writer.Allocati
     const header_offset = archive.written().len;
     try tar.writeFileBytes("PaxHeaders.0/entry", record.written(), .{});
     const bytes = @constCast(archive.written());
-    bytes[header_offset + 156] = 'x';
+    bytes[header_offset + 156] = kind;
     updateTestTarChecksum(bytes[header_offset..][0..512]);
 }
 
