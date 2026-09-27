@@ -4,7 +4,7 @@
 
 `help`, `version`, `system info`, public `pull`, and `images` work. Pull downloads and verifies OCI metadata and blobs for the host architecture, then records the resolved reference locally. Rift cannot start a VM or execute a container. The rest of this document records the intended design and work still to prove.
 
-A local Virtualization.framework probe booted an Alpine ARM64 kernel and initramfs to a shell and ran a command. `scripts/prepare_guest.py` reproduces those guest files from a pinned, SHA-256-verified Alpine ISO. Alpine packages its ARM64 kernel as a compressed EFI zboot image; the script extracts the uncompressed `Image` needed for direct boot. The probe is not yet wired into Rift.
+Rift's Zig/Objective-C VM bridge boots an Alpine ARM64 kernel and initramfs to a shell, runs a command, and shuts down through the local `zig build vm-check` gate. `scripts/prepare_guest.py` reproduces those guest files from a pinned, SHA-256-verified Alpine ISO. Alpine packages its ARM64 kernel as a compressed EFI zboot image; the script extracts the uncompressed `Image` needed for direct boot. The public CLI has no container execution command yet.
 
 ## Runtime shape
 
@@ -52,7 +52,7 @@ Warm VM reuse is a measured optimization, not a prerequisite for correctness. An
 
 Apple silicon is the first target. OCI platform selection must be explicit; an `arm64` host must not silently run an `amd64` image through emulation.
 
-Boot time, memory, binary size, image storage, and cleanup behavior will be measured before performance claims are published. CI can test portable parsing and storage code, but it cannot prove a real VM boot or container execution. Those need macOS integration runs.
+Boot time, memory, binary size, image storage, and cleanup behavior will be measured before performance claims are published. Local parsing and storage tests cannot prove a real VM boot or container execution. Those need macOS integration runs.
 
 ## Milestones
 

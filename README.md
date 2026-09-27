@@ -31,6 +31,15 @@ zig build run -- system info
 
 GitHub Actions is disabled; run these checks locally.
 
+To check the macOS VM bridge on Apple Silicon, prepare the pinned Alpine guest and run the local integration check:
+
+```sh
+python3 scripts/prepare_guest.py
+zig build vm-check
+```
+
+This boots Alpine, runs a command in its initramfs shell, and shuts down. OCI container execution is still in development.
+
 ## Runtime plan
 
 macOS uses a Linux VM to run Linux containers. Rift is being designed around Apple's Virtualization.framework, an OCI image store, and a small Linux guest agent. See [the architecture](docs/ARCHITECTURE.md) for the proposed boundaries, execution path, security constraints, and current status.
@@ -45,9 +54,10 @@ No Docker Engine, Docker CLI, Docker Desktop, or container daemon is part of the
 - [x] Streaming content-addressed blob storage with SHA-256 and size verification
 - [x] Public OCI pulls with Bearer token auth, platform selection, and verified blob downloads
 - [x] Local image metadata and listing
+- [x] Local Virtualization.framework bridge and Alpine guest boot check
 - [ ] Image removal
 - [ ] Safe layer extraction
-- [ ] Linux VM boot and guest command execution
+- [ ] OCI command execution through Rift's public CLI
 - [ ] Container lifecycle, logs, networking, and cleanup
 
 There is no container execution workflow or release artifact yet. Do not use Rift as a Docker replacement today.
