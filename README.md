@@ -10,7 +10,7 @@
   </p>
 </div>
 
-Rift is an experimental OCI container runtime for Apple Silicon Macs. It runs Linux workloads in Apple's Virtualization.framework and builds with Zig. The current [v0.1.1 release](https://github.com/OthmaneBlial/Rift/releases/tag/v0.1.1) is a source preview; public notarized binaries are not available yet.
+Rift is an experimental OCI container runtime for Apple Silicon Macs. It runs Linux workloads in Apple's Virtualization.framework and builds with Zig. The current [v0.1.2 release](https://github.com/OthmaneBlial/Rift/releases/tag/v0.1.2) is a source preview; public notarized binaries are not available yet.
 
 ## Quick start
 
