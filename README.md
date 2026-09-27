@@ -29,7 +29,7 @@ rift stop <container-id>
 rift rm <container-id>
 ```
 
-Image pulls use anonymous registry access and save SHA-256-verified OCI blobs and reference metadata under `~/Library/Application Support/Rift`. `run` pulls an uncached image automatically; `pull` fetches or refreshes it explicitly. `system df` reports logical file bytes. `clean` previews abandoned runtime staging, and `clean --yes` removes only staging whose Rift process lock has been released. Image cache, active VMs, and container logs are preserved.
+Image pulls use anonymous registry access and save SHA-256-verified OCI blobs and reference metadata under `~/Library/Application Support/Rift`. `run` pulls an uncached image automatically; `pull` fetches or refreshes it explicitly. `system df` reports logical file bytes. `clean` previews abandoned runtime staging and unreferenced image blobs; `clean --yes` removes those candidates. Referenced images, active VMs, guest boot files, and container logs are preserved. If image metadata is corrupt, cache pruning stops without deleting blobs.
 
 `run` uses the image's `Entrypoint`, `Cmd`, `Env`, `User`, and absolute `WorkingDir` defaults, with command, `-e KEY=VALUE`, and `-w` overrides. Environment overrides must include a value; Rift does not copy host variables implicitly. A static guest executor applies the working directory and numeric or named UID/GID from the image, including images without `/bin/sh`.
 
@@ -57,6 +57,7 @@ zig build run-port-check
 zig build run-detached-check
 zig build run-auto-pull-check
 zig build cache-lock-check
+zig build cache-prune-check
 zig build run-process-check
 zig build run-volume-check
 zig build run -- system info
@@ -126,9 +127,10 @@ No Docker Engine, Docker CLI, Docker Desktop, or container daemon is part of the
 - [x] Detached run, process listing, plain logs, stop, and remove
 - [x] Explicit read-only and writable directory volumes
 - [x] Preview and confirmed cleanup of abandoned runtime staging
-- [ ] Structured logs, file volumes, and image cache pruning
+- [x] Preview and confirmed pruning of unreferenced image blobs under a cache lock
+- [ ] Structured logs and file volumes
 
-Foreground runs remove their temporary state on normal completion, including runs without `--rm`. Detached runs keep their logs and status until `rift rm`; the VM and temporary root filesystem are removed on stop or exit. Local checks have served the nginx welcome page over a forwarded localhost port, including with `run -d`. An interrupted foreground run can leave staging, which `rift clean` can preview and remove after the process exits. A local release archive is packaged and checked, but no public notarized release exists yet. Do not use Rift as a Docker replacement today.
+Foreground runs remove their temporary state on normal completion, including runs without `--rm`. Detached runs keep their logs and status until `rift rm`; the VM and temporary root filesystem are removed on stop or exit. Local checks have served the nginx welcome page over a forwarded localhost port, including with `run -d`. An interrupted foreground run can leave staging, which `rift clean` can preview and remove after the process exits. Image removal is not exposed yet; `clean` reclaims blobs left by interrupted or refreshed pulls when no recorded image uses them. A local release archive is packaged and checked, but no public notarized release exists yet. Do not use Rift as a Docker replacement today.
 
 ## License
 

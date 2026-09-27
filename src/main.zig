@@ -21,7 +21,7 @@ fn printHelp(writer: *Io.Writer) Io.Writer.Error!void {
             "  version, --version Show version\n" ++
             "  system info        Show host information\n" ++
             "  system df          Show Rift storage usage\n" ++
-            "  clean [--yes]      Preview or remove stale runtime staging\n" ++
+            "  clean [--yes]      Preview or remove stale staging and unused image blobs\n" ++
             "  images             List locally pulled images\n" ++
             "  pull <image>       Pull an OCI image for this host\n" ++
             "  run [-d] [--rm] [-p HOST:GUEST] [-w DIR] [-e KEY=VALUE] [-v HOST:DIR[:ro|rw]] <image> [command] [args...] Run an image\n" ++
@@ -200,7 +200,7 @@ fn openImageStore(init: std.process.Init) !storage.BlobStore {
     var home_dir = try Io.Dir.openDirAbsolute(init.io, home, .{});
     defer home_dir.close(init.io);
     try home_dir.createDirPath(init.io, "Library/Application Support/Rift");
-    var data_dir = try home_dir.openDir(init.io, "Library/Application Support/Rift", .{});
+    var data_dir = try home_dir.openDir(init.io, "Library/Application Support/Rift", .{ .follow_symlinks = false });
     defer data_dir.close(init.io);
     return storage.BlobStore.init(init.io, data_dir);
 }
@@ -214,7 +214,24 @@ fn reportDisk(init: std.process.Init, writer: *Io.Writer) !void {
 fn cleanDisk(init: std.process.Init, confirmed: bool, writer: *Io.Writer) !void {
     var data_dir = (try openDataDir(init)) orelse return writer.writeAll("No stale runtime staging found.\n");
     defer data_dir.close(init.io);
-    try disk.clean(init.arena.allocator(), init.io, data_dir, confirmed, writer);
+    const allocator = init.arena.allocator();
+    try disk.clean(allocator, init.io, data_dir, confirmed, writer);
+    var store = try storage.BlobStore.init(init.io, data_dir);
+    defer store.deinit();
+    try store.lockExclusive();
+    defer store.unlock();
+    const plan = try store.planPrune(allocator);
+    defer plan.deinit(allocator);
+    if (plan.candidates.len == 0) return writer.writeAll("No unreferenced image blobs found.\n");
+    if (confirmed) {
+        try store.applyPrune(plan);
+        try writer.print("Removed {d} unreferenced image blobs ({d} logical bytes).\n", .{ plan.candidates.len, plan.bytes });
+    } else {
+        for (plan.candidates) |candidate| {
+            try writer.print("blobs/sha256/{s}: {d} logical bytes\n", .{ candidate.filename, candidate.bytes });
+        }
+        try writer.print("Would remove {d} unreferenced image blobs ({d} logical bytes). Run 'rift clean --yes' to confirm.\n", .{ plan.candidates.len, plan.bytes });
+    }
 }
 
 fn openDataDir(init: std.process.Init) !?Io.Dir {

@@ -1,4 +1,5 @@
 const std = @import("std");
+const manifest = @import("oci/manifest.zig");
 
 const sha256_prefix = "sha256:";
 
@@ -9,7 +10,10 @@ pub const BlobStore = struct {
     images: std.Io.Dir,
 
     pub fn init(io: std.Io, root: std.Io.Dir) anyerror!BlobStore {
-        try root.createDirPath(io, "blobs/sha256");
+        try root.createDirPath(io, "blobs");
+        var blobs_parent = try root.openDir(io, "blobs", .{ .follow_symlinks = false });
+        defer blobs_parent.close(io);
+        try blobs_parent.createDirPath(io, "sha256");
         try root.createDirPath(io, "images");
         const guard = root.openFile(io, "cache.lock", .{ .mode = .read_write, .allow_directory = false, .follow_symlinks = false }) catch |err| switch (err) {
             error.FileNotFound => root.createFile(io, "cache.lock", .{ .exclusive = true, .read = true, .permissions = .fromMode(0o600) }) catch |create_err| switch (create_err) {
@@ -19,13 +23,13 @@ pub const BlobStore = struct {
             else => return err,
         };
         errdefer guard.close(io);
-        const blobs = try root.openDir(io, "blobs/sha256", .{ .iterate = true });
+        const blobs = try blobs_parent.openDir(io, "sha256", .{ .follow_symlinks = false, .iterate = true });
         errdefer blobs.close(io);
         return .{
             .io = io,
             .guard = guard,
             .blobs = blobs,
-            .images = try root.openDir(io, "images", .{ .iterate = true }),
+            .images = try root.openDir(io, "images", .{ .follow_symlinks = false, .iterate = true }),
         };
     }
 
@@ -69,13 +73,14 @@ pub const BlobStore = struct {
     pub fn listImages(store: BlobStore, allocator: std.mem.Allocator) anyerror![]ImageRecord {
         var records: std.ArrayList(ImageRecord) = .empty;
         errdefer {
-            deinitImageRecords(allocator, records.items);
+            for (records.items) |*record| record.deinit(allocator);
             records.deinit(allocator);
         }
 
         var entries = store.images.iterate();
         while (try entries.next(store.io)) |entry| {
-            if (entry.kind != .file or !std.mem.endsWith(u8, entry.name, ".rift")) continue;
+            if (!std.mem.endsWith(u8, entry.name, ".rift")) continue;
+            if (entry.kind != .file) return error.InvalidImageMetadata;
             const record = try readImageRecord(store, allocator, entry.name);
             try records.append(allocator, record);
         }
@@ -86,6 +91,57 @@ pub const BlobStore = struct {
             }
         }.lessThan);
         return records.toOwnedSlice(allocator);
+    }
+
+    /// Requires the exclusive cache lock until the plan is applied or discarded.
+    pub fn planPrune(store: BlobStore, allocator: std.mem.Allocator) !PrunePlan {
+        var arena = std.heap.ArenaAllocator.init(allocator);
+        defer arena.deinit();
+        const scratch = arena.allocator();
+        var reachable = std.StringHashMap(void).init(scratch);
+        defer reachable.deinit();
+        const records = try store.listImages(scratch);
+        for (records) |record| {
+            const body = try store.readVerifiedAlloc(scratch, record.digest, 4 * 1024 * 1024);
+            const image = try manifest.parseManifest(scratch, body);
+            if (image.layers.len != record.layer_count) return error.InvalidImageMetadata;
+            try reachable.put(record.digest[sha256_prefix.len..], {});
+            try reachable.put(image.config.digest[sha256_prefix.len..], {});
+            for (image.layers) |layer| try reachable.put(layer.digest[sha256_prefix.len..], {});
+        }
+
+        var candidates: std.ArrayList(PruneCandidate) = .empty;
+        errdefer {
+            for (candidates.items) |candidate| allocator.free(candidate.filename);
+            candidates.deinit(allocator);
+        }
+        var total: u64 = 0;
+        var entries = store.blobs.iterate();
+        while (try entries.next(store.io)) |entry| {
+            if (entry.kind != .file or !validSha256Filename(entry.name) or reachable.contains(entry.name)) continue;
+            const info = try store.blobs.statFile(store.io, entry.name, .{ .follow_symlinks = false });
+            if (info.kind != .file) continue;
+            total = std.math.add(u64, total, info.size) catch return error.StoreTooLarge;
+            const filename = try allocator.dupe(u8, entry.name);
+            candidates.append(allocator, .{ .filename = filename, .bytes = info.size }) catch |err| {
+                allocator.free(filename);
+                return err;
+            };
+        }
+        std.mem.sort(PruneCandidate, candidates.items, {}, struct {
+            fn lessThan(_: void, lhs: PruneCandidate, rhs: PruneCandidate) bool {
+                return std.mem.lessThan(u8, lhs.filename, rhs.filename);
+            }
+        }.lessThan);
+        return .{ .candidates = try candidates.toOwnedSlice(allocator), .bytes = total };
+    }
+
+    /// Requires the same exclusive cache lock used to build the plan.
+    pub fn applyPrune(store: BlobStore, plan: PrunePlan) !void {
+        for (plan.candidates) |candidate| {
+            if (!validSha256Filename(candidate.filename)) return error.InvalidPruneCandidate;
+            try store.blobs.deleteFile(store.io, candidate.filename);
+        }
     }
 
     pub fn containsVerified(store: BlobStore, digest: []const u8, expected_size: u64) anyerror!bool {
@@ -190,6 +246,18 @@ pub const ImageRecord = struct {
     }
 };
 
+pub const PruneCandidate = struct { filename: []u8, bytes: u64 };
+
+pub const PrunePlan = struct {
+    candidates: []PruneCandidate,
+    bytes: u64,
+
+    pub fn deinit(plan: PrunePlan, allocator: std.mem.Allocator) void {
+        for (plan.candidates) |candidate| allocator.free(candidate.filename);
+        allocator.free(plan.candidates);
+    }
+};
+
 pub fn deinitImageRecords(allocator: std.mem.Allocator, records: []ImageRecord) void {
     for (records) |*record| record.deinit(allocator);
     allocator.free(records);
@@ -258,6 +326,14 @@ fn sha256Filename(digest: []const u8) error{UnsupportedDigestAlgorithm}![]const 
         if (!std.ascii.isDigit(char) and !(char >= 'a' and char <= 'f')) return error.UnsupportedDigestAlgorithm;
     }
     return digest[sha256_prefix.len..];
+}
+
+fn validSha256Filename(filename: []const u8) bool {
+    if (filename.len != 64) return false;
+    for (filename) |char| {
+        if (!std.ascii.isDigit(char) and !(char >= 'a' and char <= 'f')) return false;
+    }
+    return true;
 }
 
 fn hashMatches(hash: [std.crypto.hash.sha2.Sha256.digest_length]u8, digest: []const u8) bool {
@@ -360,4 +436,113 @@ test "rejects unsafe or non SHA-256 image records" {
         .platform = "linux/arm64",
         .layer_count = 1,
     }));
+}
+
+fn writeTestBlob(store: BlobStore, allocator: std.mem.Allocator, body: []const u8) ![]const u8 {
+    var hash = std.crypto.hash.sha2.Sha256.init(.{});
+    hash.update(body);
+    const hex = std.fmt.bytesToHex(hash.finalResult(), .lower);
+    const digest = try std.fmt.allocPrint(allocator, "sha256:{s}", .{hex});
+    var input = std.Io.Reader.fixed(body);
+    try store.writeVerified(digest, body.len, &input);
+    return digest;
+}
+
+test "cache pruning preserves shared and referenced blobs" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    var temp = std.testing.tmpDir(.{});
+    defer temp.cleanup();
+    var store = try BlobStore.init(std.testing.io, temp.dir);
+    defer store.deinit();
+    try store.lockExclusive();
+    defer store.unlock();
+
+    const config_a = try writeTestBlob(store, allocator, "{}");
+    const config_b = try writeTestBlob(store, allocator, "{\"different\":true}");
+    const shared = try writeTestBlob(store, allocator, "shared layer");
+    const unique = try writeTestBlob(store, allocator, "unique layer");
+    const orphan = try writeTestBlob(store, allocator, "orphan");
+    const config_type = "application/vnd.oci.image.config.v1+json";
+    const layer_type = "application/vnd.oci.image.layer.v1.tar";
+    const manifest_a_body = try std.json.Stringify.valueAlloc(allocator, manifest.Manifest{
+        .schemaVersion = 2,
+        .config = .{ .mediaType = config_type, .digest = config_a, .size = 2 },
+        .layers = &.{
+            .{ .mediaType = layer_type, .digest = shared, .size = 12 },
+            .{ .mediaType = layer_type, .digest = unique, .size = 12 },
+        },
+    }, .{});
+    const manifest_b_body = try std.json.Stringify.valueAlloc(allocator, manifest.Manifest{
+        .schemaVersion = 2,
+        .config = .{ .mediaType = config_type, .digest = config_b, .size = 18 },
+        .layers = &.{.{ .mediaType = layer_type, .digest = shared, .size = 12 }},
+    }, .{});
+    const manifest_a = try writeTestBlob(store, allocator, manifest_a_body);
+    const manifest_b = try writeTestBlob(store, allocator, manifest_b_body);
+    const reference_a = "registry-1.docker.io/library/a:latest";
+    try store.recordImage(allocator, .{ .reference = reference_a, .digest = manifest_a, .platform = "linux/arm64", .layer_count = 2 });
+    try store.recordImage(allocator, .{ .reference = "registry-1.docker.io/library/b:latest", .digest = manifest_b, .platform = "linux/arm64", .layer_count = 1 });
+
+    const first = try store.planPrune(allocator);
+    defer first.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 1), first.candidates.len);
+    try std.testing.expectEqual(@as(u64, 6), first.bytes);
+    try std.testing.expectEqualStrings(orphan[sha256_prefix.len..], first.candidates[0].filename);
+    try std.testing.expect(try store.containsVerified(orphan, 6));
+    try store.applyPrune(first);
+    try std.testing.expect(!(try store.containsVerified(orphan, 6)));
+
+    const record_a_name = try imageFilename(allocator, reference_a);
+    try store.images.deleteFile(store.io, record_a_name);
+    const second = try store.planPrune(allocator);
+    defer second.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 3), second.candidates.len);
+    try store.applyPrune(second);
+    try std.testing.expect(!(try store.containsVerified(manifest_a, manifest_a_body.len)));
+    try std.testing.expect(!(try store.containsVerified(config_a, 2)));
+    try std.testing.expect(!(try store.containsVerified(unique, 12)));
+    try std.testing.expect(try store.containsVerified(manifest_b, manifest_b_body.len));
+    try std.testing.expect(try store.containsVerified(config_b, 18));
+    try std.testing.expect(try store.containsVerified(shared, 12));
+}
+
+test "cache pruning fails closed on corrupt image metadata" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var temp = std.testing.tmpDir(.{});
+    defer temp.cleanup();
+    var store = try BlobStore.init(std.testing.io, temp.dir);
+    defer store.deinit();
+    try store.lockExclusive();
+    defer store.unlock();
+    const orphan = try writeTestBlob(store, arena.allocator(), "orphan");
+    try store.images.writeFile(store.io, .{ .sub_path = "bad.rift", .data = "invalid" });
+    try std.testing.expectError(error.InvalidImageMetadata, store.planPrune(arena.allocator()));
+    try std.testing.expectError(error.InvalidImageMetadata, store.listImages(std.testing.allocator));
+    try std.testing.expect(try store.containsVerified(orphan, 6));
+    try store.images.deleteFile(store.io, "bad.rift");
+    try store.images.symLink(store.io, "missing.rift", "bad.rift", .{});
+    try std.testing.expectError(error.InvalidImageMetadata, store.planPrune(arena.allocator()));
+    try std.testing.expect(try store.containsVerified(orphan, 6));
+}
+
+test "cache store rejects symlinked directories" {
+    for ([_][]const u8{ "blobs", "blobs/sha256", "images" }) |path| {
+        var temp = std.testing.tmpDir(.{});
+        defer temp.cleanup();
+        try temp.dir.createDirPath(std.testing.io, "outside");
+        try temp.dir.writeFile(std.testing.io, .{ .sub_path = "outside/keep", .data = "untouched" });
+        if (std.mem.eql(u8, path, "blobs/sha256")) try temp.dir.createDirPath(std.testing.io, "blobs");
+        try temp.dir.symLink(std.testing.io, if (std.mem.eql(u8, path, "blobs/sha256")) "../outside" else "outside", path, .{});
+        if (BlobStore.init(std.testing.io, temp.dir)) |opened| {
+            var store = opened;
+            store.deinit();
+            return error.UnexpectedStoreOpen;
+        } else |_| {}
+        const sentinel = try temp.dir.readFileAlloc(std.testing.io, "outside/keep", std.testing.allocator, .limited(16));
+        defer std.testing.allocator.free(sentinel);
+        try std.testing.expectEqualStrings("untouched", sentinel);
+    }
 }

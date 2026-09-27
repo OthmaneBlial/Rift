@@ -50,7 +50,11 @@ def main() -> int:
             writer = blocked_until_unlock(binary, env, lock, ["pull", "@@"])
             if writer.returncode == 0 or "invalid OCI image reference" not in writer.stderr:
                 raise RuntimeError(f"cache writer did not resume after shared lock release: {writer!r}")
-    print("Rift cache lock check passed: shared readers, exclusive pull, cross-process waiting")
+            fcntl.flock(lock, fcntl.LOCK_SH)
+            cleaner = blocked_until_unlock(binary, env, lock, ["clean", "--yes"])
+            if cleaner.returncode != 0 or "No unreferenced image blobs found." not in cleaner.stdout:
+                raise RuntimeError(f"cache cleanup did not resume after shared lock release: {cleaner!r}")
+    print("Rift cache lock check passed: shared readers, exclusive pull and cleanup, cross-process waiting")
     return 0
 
 

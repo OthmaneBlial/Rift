@@ -25,7 +25,7 @@ pub fn execute(init: std.process.Init, arguments: []const []const u8, stop_path:
     var home_dir = try Io.Dir.openDirAbsolute(init.io, home, .{});
     defer home_dir.close(init.io);
     try home_dir.createDirPath(init.io, "Library/Application Support/Rift");
-    var data_dir = try home_dir.openDir(init.io, "Library/Application Support/Rift", .{});
+    var data_dir = try home_dir.openDir(init.io, "Library/Application Support/Rift", .{ .follow_symlinks = false });
     defer data_dir.close(init.io);
     var store = try storage.BlobStore.init(init.io, data_dir);
     defer store.deinit();

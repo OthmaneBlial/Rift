@@ -46,8 +46,7 @@ pub fn scan(io: Io, root: Io.Dir) !Report {
     };
 }
 
-/// Only stale staging with a released Rift lock is eligible. Image cache and logs stay intact.
-/// ponytail: Add cache pruning only when blob reachability and active image use are tracked.
+/// Only stale staging with a released Rift lock is eligible. Cache pruning runs separately.
 pub fn clean(allocator: std.mem.Allocator, io: Io, root: Io.Dir, confirmed: bool, writer: *Io.Writer) !void {
     var runtime = root.openDir(io, "runtime", .{ .follow_symlinks = false, .iterate = true }) catch |err| switch (err) {
         error.FileNotFound => return writer.writeAll("No stale runtime staging found.\n"),

@@ -30,7 +30,7 @@ def timed(binary: Path, env: dict[str, str], *args: str) -> float:
 
 def copy_cache(source: Path, destination: Path) -> None:
     for section in ("images", "blobs", "guest"):
-        if not (source / section).is_dir():
+        if (source / section).is_symlink() or not (source / section).is_dir():
             raise RuntimeError(f"missing {section} cache; pull and run Alpine before benchmarking")
         for base, dirs, files in os.walk(source / section):
             base_path = Path(base)
