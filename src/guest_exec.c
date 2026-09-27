@@ -39,13 +39,16 @@ static void forward_stop_signal(int signal_number) {
 static int install_stop_signal_handler(void) {
     struct sigaction action = {.sa_handler = forward_stop_signal};
     sigemptyset(&action.sa_mask);
-    return sigaction(SIGTERM, &action, NULL);
+    if (sigaction(SIGTERM, &action, NULL) != 0) return -1;
+    action.sa_handler = SIG_IGN;
+    return sigaction(SIGPIPE, &action, NULL);
 }
 
 static void restore_default_stop_signal(void) {
     struct sigaction action = {.sa_handler = SIG_DFL};
     sigemptyset(&action.sa_mask);
     sigaction(SIGTERM, &action, NULL);
+    sigaction(SIGPIPE, &action, NULL);
 }
 
 static int decode_status(int status) {
@@ -355,6 +358,7 @@ static int restrict_capabilities(void) {
 #define EXEC_REQUEST_MAX (64U * 1024U)
 #define EXEC_ARGUMENTS_MAX 256
 #define EXEC_REQUEST_HEADER "RIFTEXEC1\n"
+#define EXEC_INTERACTIVE_REQUEST_HEADER "RIFTEXEC2\n"
 
 static int write_all(int descriptor, const void *contents, size_t length) {
     const char *cursor = contents;
@@ -421,10 +425,21 @@ static int publish_exec_error(int directory, const char *id, const char *message
     return write_exec_result(directory, id, 125);
 }
 
-static int parse_exec_arguments(char *contents, size_t length, char **command, size_t *count) {
-    const size_t header_length = sizeof(EXEC_REQUEST_HEADER) - 1;
-    if (length <= header_length || memcmp(contents, EXEC_REQUEST_HEADER, header_length) != 0 || contents[length - 1] != 0) return 0;
-    size_t offset = header_length;
+static int parse_exec_arguments(char *contents, size_t length, char **command, size_t *count, int *interactive) {
+    const size_t header_v1_length = sizeof(EXEC_REQUEST_HEADER) - 1;
+    const size_t header_v2_length = sizeof(EXEC_INTERACTIVE_REQUEST_HEADER) - 1;
+    if (length <= header_v1_length || contents[length - 1] != 0) return 0;
+    size_t offset;
+    if (memcmp(contents, EXEC_REQUEST_HEADER, header_v1_length) == 0) {
+        offset = header_v1_length;
+        *interactive = 0;
+    } else if (length > header_v2_length + 1 && memcmp(contents, EXEC_INTERACTIVE_REQUEST_HEADER, header_v2_length) == 0 &&
+               contents[header_v2_length] == '1' && contents[header_v2_length + 1] == 0) {
+        offset = header_v2_length + 2;
+        *interactive = 1;
+    } else {
+        return 0;
+    }
     *count = 0;
     while (offset < length) {
         if (*count == EXEC_ARGUMENTS_MAX) return 0;
@@ -439,9 +454,9 @@ static int parse_exec_arguments(char *contents, size_t length, char **command, s
     return 1;
 }
 
-static int run_exec(char *root, char *working_directory, char *user, char **command, int output) {
+static int run_exec(char *root, char *working_directory, char *user, char **command, int output, int input) {
     if (dup2(output, STDOUT_FILENO) < 0 || dup2(output, STDERR_FILENO) < 0) return fail("attach exec output");
-    int input = open("/dev/null", O_RDONLY | O_CLOEXEC);
+    if (input < 0) input = open("/dev/null", O_RDONLY | O_CLOEXEC);
     if (input < 0 || dup2(input, STDIN_FILENO) < 0) return fail("attach exec input");
     if (chroot(root) != 0) return fail("chroot exec process");
     if (chdir("/") != 0) return fail("chdir exec root");
@@ -515,18 +530,47 @@ static int service_exec_request(int directory, char *root, char *working_directo
 
     char *command[EXEC_ARGUMENTS_MAX + 1];
     size_t argument_count = 0;
-    if (!valid || !parse_exec_arguments(contents, length, command, &argument_count)) {
+    int interactive = 0;
+    if (!valid || !parse_exec_arguments(contents, length, command, &argument_count, &interactive)) {
         publish_exec_error(directory, id, "rift-exec: invalid exec request\n");
         return 1;
     }
 
+    int input_file = -1;
+    int input_pipe[2] = {-1, -1};
+    if (interactive) {
+        char input_name[64];
+        struct stat input_info;
+        if (exec_filename(input_name, sizeof(input_name), id, "input") != 0 ||
+            (input_file = openat(directory, input_name, O_RDONLY | O_CLOEXEC | O_NOFOLLOW)) < 0 ||
+            fstat(input_file, &input_info) != 0 || !S_ISREG(input_info.st_mode) || pipe2(input_pipe, O_CLOEXEC) != 0) {
+            if (input_file >= 0) close(input_file);
+            publish_exec_error(directory, id, "rift-exec: invalid exec input stream\n");
+            return 1;
+        }
+        const int write_flags = fcntl(input_pipe[1], F_GETFL);
+        if (write_flags < 0 || fcntl(input_pipe[1], F_SETFL, write_flags | O_NONBLOCK) != 0) {
+            close(input_pipe[0]);
+            close(input_pipe[1]);
+            close(input_file);
+            publish_exec_error(directory, id, "rift-exec: configure exec input stream\n");
+            return 1;
+        }
+    }
+
     char output_name[64];
     if (exec_filename(output_name, sizeof(output_name), id, "output") != 0) {
+        if (input_file >= 0) close(input_file);
+        if (input_pipe[0] >= 0) close(input_pipe[0]);
+        if (input_pipe[1] >= 0) close(input_pipe[1]);
         publish_exec_error(directory, id, "rift-exec: invalid exec output path\n");
         return 1;
     }
     int output = openat(directory, output_name, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC | O_NOFOLLOW, 0600);
     if (output < 0) {
+        if (input_file >= 0) close(input_file);
+        if (input_pipe[0] >= 0) close(input_pipe[0]);
+        if (input_pipe[1] >= 0) close(input_pipe[1]);
         write_exec_result(directory, id, 125);
         return 1;
     }
@@ -536,6 +580,9 @@ static int service_exec_request(int directory, char *root, char *working_directo
         int count = snprintf(message, sizeof(message), "rift-exec: fork exec process: %s\n", strerror(errno));
         if (count > 0) write_all(output, message, (size_t)count);
         close(output);
+        if (input_file >= 0) close(input_file);
+        if (input_pipe[0] >= 0) close(input_pipe[0]);
+        if (input_pipe[1] >= 0) close(input_pipe[1]);
         write_exec_result(directory, id, 125);
         return 1;
     }
@@ -544,19 +591,112 @@ static int service_exec_request(int directory, char *root, char *working_directo
         exec_pid = -1;
         pending_signal = 0;
         restore_default_stop_signal();
-        _exit(run_exec(root, working_directory, user, command, output));
+        if (interactive) {
+            close(input_file);
+            close(input_pipe[1]);
+        }
+        _exit(run_exec(root, working_directory, user, command, output, interactive ? input_pipe[0] : -1));
     }
 
     close(output);
+    if (interactive) close(input_pipe[0]);
     exec_pid = process;
     if (pending_signal) kill(process, pending_signal);
     int status;
-    while (waitpid(process, &status, 0) < 0) {
-        if (errno != EINTR) {
+    if (!interactive) {
+        while (waitpid(process, &status, 0) < 0) {
+            if (errno == EINTR) continue;
             exec_pid = -1;
             write_exec_result(directory, id, 125);
             return fail("wait for exec process");
         }
+    } else {
+        char input_closed_name[64];
+        if (exec_filename(input_closed_name, sizeof(input_closed_name), id, "input-closed") != 0) {
+            close(input_file);
+            close(input_pipe[1]);
+            exec_pid = -1;
+            write_exec_result(directory, id, 125);
+            return fail("name exec input state");
+        }
+        off_t input_offset = 0;
+        char input_buffer[8192];
+        size_t buffered = 0;
+        size_t buffered_offset = 0;
+        int input_closed = 0;
+        for (;;) {
+            if (buffered_offset == buffered && input_pipe[1] >= 0 && !input_closed) {
+                struct stat info;
+                if (fstat(input_file, &info) != 0) {
+                    close(input_file);
+                    close(input_pipe[1]);
+                    exec_pid = -1;
+                    write_exec_result(directory, id, 125);
+                    return fail("read exec input state");
+                }
+                if (info.st_size > input_offset) {
+                    size_t requested = (size_t)((info.st_size - input_offset) < (off_t)sizeof(input_buffer) ? info.st_size - input_offset : (off_t)sizeof(input_buffer));
+                    ssize_t count = pread(input_file, input_buffer, requested, input_offset);
+                    if (count > 0) {
+                        input_offset += count;
+                        buffered = (size_t)count;
+                        buffered_offset = 0;
+                    } else if (count < 0 && errno != EINTR) {
+                        close(input_file);
+                        close(input_pipe[1]);
+                        exec_pid = -1;
+                        write_exec_result(directory, id, 125);
+                        return fail("read exec input stream");
+                    }
+                } else {
+                    struct stat closed_info;
+                    if (fstatat(directory, input_closed_name, &closed_info, AT_SYMLINK_NOFOLLOW) == 0) {
+                        if (!S_ISREG(closed_info.st_mode)) {
+                            close(input_file);
+                            close(input_pipe[1]);
+                            exec_pid = -1;
+                            write_exec_result(directory, id, 125);
+                            return fail("validate exec input state");
+                        }
+                        input_closed = 1;
+                        close(input_pipe[1]);
+                        input_pipe[1] = -1;
+                    } else if (errno != ENOENT) {
+                        close(input_file);
+                        close(input_pipe[1]);
+                        exec_pid = -1;
+                        write_exec_result(directory, id, 125);
+                        return fail("read exec input state");
+                    }
+                }
+            }
+            if (buffered_offset < buffered && input_pipe[1] >= 0) {
+                ssize_t count = write(input_pipe[1], input_buffer + buffered_offset, buffered - buffered_offset);
+                if (count > 0) buffered_offset += (size_t)count;
+                else if (count < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR && errno != EPIPE) {
+                    close(input_file);
+                    close(input_pipe[1]);
+                    exec_pid = -1;
+                    write_exec_result(directory, id, 125);
+                    return fail("forward exec input");
+                } else if (count < 0 && errno == EPIPE) {
+                    close(input_pipe[1]);
+                    input_pipe[1] = -1;
+                }
+            }
+            pid_t finished = waitpid(process, &status, WNOHANG);
+            if (finished == process) break;
+            if (finished < 0 && errno != EINTR) {
+                close(input_file);
+                if (input_pipe[1] >= 0) close(input_pipe[1]);
+                exec_pid = -1;
+                write_exec_result(directory, id, 125);
+                return fail("wait for exec process");
+            }
+            usleep(10000);
+        }
+        close(input_file);
+        if (input_pipe[1] >= 0) close(input_pipe[1]);
     }
     exec_pid = -1;
     if (write_exec_result(directory, id, decode_status(status)) != 0) return fail("write exec status");

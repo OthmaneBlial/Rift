@@ -32,7 +32,7 @@ fn printHelp(writer: *Io.Writer) Io.Writer.Error!void {
             "  ps                 List detached containers\n" ++
             "  inspect <id>       Show detached container details\n" ++
             "  logs <id>          Show a detached container's output\n" ++
-            "  exec <id> <cmd>    Run a non-interactive command in a running container\n" ++
+            "  exec [-i] <id> <cmd> Run a command in a running container (-i forwards stdin)\n" ++
             "  stop <id>          Stop a detached container\n" ++
             "  kill <id>          Force-kill a detached container\n" ++
             "  rm <id>            Remove a stopped container\n",
@@ -120,8 +120,11 @@ fn dispatch(args: []const []const u8, writer: *Io.Writer, init: ?std.process.Ini
         return 0;
     }
     if (args.len > 0 and std.mem.eql(u8, args[0], "exec")) {
-        if (args.len < 3) return error.InvalidArguments;
-        return containers.exec(init orelse return error.CommandUnavailable, args[1], args[2..], writer);
+        var offset: usize = 1;
+        const interactive = offset < args.len and std.mem.eql(u8, args[offset], "-i");
+        if (interactive) offset += 1;
+        if (args.len < offset + 2) return error.InvalidArguments;
+        return containers.exec(init orelse return error.CommandUnavailable, args[offset], args[offset + 1 ..], writer, interactive);
     }
     if (args.len > 0 and std.mem.eql(u8, args[0], "stop")) {
         if (args.len != 2) return error.InvalidArguments;
@@ -388,7 +391,7 @@ test "help is available without a command" {
     try std.testing.expect(std.mem.startsWith(u8, output.written(), "Rift — Ridiculously lightweight containers for macOS\n"));
     try std.testing.expect(std.mem.indexOf(u8, output.written(), "kill <id>") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.written(), "inspect <id>") != null);
-    try std.testing.expect(std.mem.indexOf(u8, output.written(), "exec <id> <cmd>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output.written(), "exec [-i] <id> <cmd>") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.written(), "--rm (foreground only)") != null);
 }
 

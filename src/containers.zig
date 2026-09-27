@@ -1,11 +1,15 @@
 const builtin = @import("builtin");
 const std = @import("std");
 const Io = std.Io;
+const posix_c = @cImport({
+    @cInclude("poll.h");
+});
 
 const reference = @import("oci/reference.zig");
 const run = @import("run.zig");
 
 const exec_request_header = "RIFTEXEC1\n";
+const interactive_exec_request_header = "RIFTEXEC2\n";
 const max_exec_request_bytes = 64 * 1024;
 
 pub fn spawn(init: std.process.Init, arguments: []const []const u8, writer: *Io.Writer) !void {
@@ -138,11 +142,11 @@ pub fn logs(init: std.process.Init, id: []const u8, writer: *Io.Writer) !void {
     }
 }
 
-pub fn exec(init: std.process.Init, id: []const u8, command: []const []const u8, writer: *Io.Writer) !u8 {
+pub fn exec(init: std.process.Init, id: []const u8, command: []const []const u8, writer: *Io.Writer, interactive: bool) !u8 {
     if (builtin.os.tag != .macos or builtin.cpu.arch != .aarch64) return error.UnsupportedHost;
     if (!validId(id)) return error.InvalidContainerId;
     const allocator = init.arena.allocator();
-    const request = try encodeExecRequest(allocator, command);
+    const request = try encodeExecRequest(allocator, command, interactive);
     if (request.len > max_exec_request_bytes) return error.ExecRequestTooLarge;
 
     var state = try openState(init, id);
@@ -189,12 +193,18 @@ pub fn exec(init: std.process.Init, id: []const u8, command: []const []const u8,
     const request_id = std.fmt.bytesToHex(random, .lower);
     const request_name = try std.fmt.allocPrint(allocator, "exec-{s}.request", .{request_id});
     const output_name = try std.fmt.allocPrint(allocator, "exec-{s}.output", .{request_id});
+    const input_name = try std.fmt.allocPrint(allocator, "exec-{s}.input", .{request_id});
+    const input_closed_name = try std.fmt.allocPrint(allocator, "exec-{s}.input-closed", .{request_id});
     const exit_name = try std.fmt.allocPrint(allocator, "exec-{s}.exit", .{request_id});
     defer {
         active_channel.exec.deleteFile(init.io, request_name) catch {};
         active_channel.exec.deleteFile(init.io, output_name) catch {};
+        active_channel.exec.deleteFile(init.io, input_name) catch {};
+        active_channel.exec.deleteFile(init.io, input_closed_name) catch {};
         active_channel.exec.deleteFile(init.io, exit_name) catch {};
     }
+    const input = if (interactive) try active_channel.exec.createFile(init.io, input_name, .{ .exclusive = true, .permissions = .fromMode(0o600) }) else null;
+    defer if (input) |file| file.close(init.io);
     const output_placeholder = try active_channel.exec.createFile(init.io, output_name, .{ .exclusive = true, .permissions = .fromMode(0o600) });
     output_placeholder.close(init.io);
     const output = try active_channel.exec.openFile(init.io, output_name, .{ .mode = .read_write, .follow_symlinks = false });
@@ -210,6 +220,8 @@ pub fn exec(init: std.process.Init, id: []const u8, command: []const []const u8,
 
     var status_text: ?[]u8 = null;
     defer if (status_text) |contents| allocator.free(contents);
+    var stdin_closed = false;
+    var input_buffer: [32 * 1024]u8 = undefined;
     while (status_text == null) {
         const available = (try output.stat(init.io)).size;
         while (output_offset < available) {
@@ -218,6 +230,25 @@ pub fn exec(init: std.process.Init, id: []const u8, command: []const []const u8,
             try writer.writeAll(chunk[0..count]);
             try writer.flush();
             output_offset += count;
+        }
+        if (interactive and !stdin_closed) {
+            var descriptors = [_]posix_c.struct_pollfd{.{
+                .fd = std.posix.STDIN_FILENO,
+                .events = @intCast(posix_c.POLLIN),
+                .revents = 0,
+            }};
+            const ready = posix_c.poll(&descriptors, 1, 0);
+            if (ready < 0) return error.ExecInputPollFailed;
+            if (ready > 0 and descriptors[0].revents != 0) {
+                const count = try std.posix.read(std.posix.STDIN_FILENO, &input_buffer);
+                if (count == 0) {
+                    const closed = try active_channel.exec.createFile(init.io, input_closed_name, .{ .exclusive = true, .permissions = .fromMode(0o600) });
+                    closed.close(init.io);
+                    stdin_closed = true;
+                } else {
+                    try input.?.writeStreamingAll(init.io, input_buffer[0..count]);
+                }
+            }
         }
         status_text = active_channel.exec.readFileAlloc(init.io, exit_name, allocator, .limited(16)) catch |err| switch (err) {
             error.FileNotFound => null,
@@ -369,11 +400,12 @@ fn shutdownRequested(io: Io, state: Io.Dir, control: Io.Dir) !bool {
         try regularFileExists(io, control, "host-exit");
 }
 
-fn encodeExecRequest(allocator: std.mem.Allocator, command: []const []const u8) ![]u8 {
+fn encodeExecRequest(allocator: std.mem.Allocator, command: []const []const u8, interactive: bool) ![]u8 {
     if (command.len == 0 or command.len > 256 or command[0].len == 0) return error.InvalidArguments;
     var output: Io.Writer.Allocating = .init(allocator);
     defer output.deinit();
-    try output.writer.writeAll(exec_request_header);
+    try output.writer.writeAll(if (interactive) interactive_exec_request_header else exec_request_header);
+    if (interactive) try output.writer.writeAll("1\x00");
     for (command) |argument| {
         if (std.mem.indexOfScalar(u8, argument, 0) != null) return error.InvalidArguments;
         try output.writer.writeAll(argument);
@@ -384,12 +416,15 @@ fn encodeExecRequest(allocator: std.mem.Allocator, command: []const []const u8) 
 }
 
 test "exec request preserves argument boundaries and rejects invalid commands" {
-    const encoded = try encodeExecRequest(std.testing.allocator, &.{ "/bin/echo", "a b", "", "a'b" });
+    const encoded = try encodeExecRequest(std.testing.allocator, &.{ "/bin/echo", "a b", "", "a'b" }, false);
     defer std.testing.allocator.free(encoded);
     try std.testing.expectEqualStrings("RIFTEXEC1\n/bin/echo\x00a b\x00\x00a'b\x00", encoded);
-    try std.testing.expectError(error.InvalidArguments, encodeExecRequest(std.testing.allocator, &.{}));
-    try std.testing.expectError(error.InvalidArguments, encodeExecRequest(std.testing.allocator, &.{""}));
-    try std.testing.expectError(error.InvalidArguments, encodeExecRequest(std.testing.allocator, &.{ "echo", "a\x00b" }));
+    const interactive = try encodeExecRequest(std.testing.allocator, &.{ "/bin/cat", "a b" }, true);
+    defer std.testing.allocator.free(interactive);
+    try std.testing.expectEqualStrings("RIFTEXEC2\n1\x00/bin/cat\x00a b\x00", interactive);
+    try std.testing.expectError(error.InvalidArguments, encodeExecRequest(std.testing.allocator, &.{}, false));
+    try std.testing.expectError(error.InvalidArguments, encodeExecRequest(std.testing.allocator, &.{""}, false));
+    try std.testing.expectError(error.InvalidArguments, encodeExecRequest(std.testing.allocator, &.{ "echo", "a\x00b" }, false));
 }
 
 fn statusText(init: std.process.Init, state: Io.Dir) ![]const u8 {

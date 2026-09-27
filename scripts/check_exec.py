@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check detached exec argument, environment, filesystem, namespace, and exit behavior."""
+"""Check detached exec input/output, arguments, environment, filesystem, namespace, and exit behavior."""
 
 import os
 import re
@@ -108,6 +108,47 @@ def main() -> int:
                 streamed.terminate()
                 streamed.communicate(timeout=5)
 
+        interactive = subprocess.Popen(
+            [
+                rift,
+                "exec",
+                "-i",
+                identifier,
+                "/bin/sh",
+                "-c",
+                "IFS= read -r line; printf 'RIFT_EXEC_INPUT:%s\\n' \"$line\"; sleep 3",
+            ],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        try:
+            interactive.stdin.write(b"RIFT_EXEC_INPUT_LIVE\n")
+            interactive.stdin.flush()
+            ready, _, _ = select.select([interactive.stdout], [], [], 3)
+            if not ready:
+                raise RuntimeError("exec did not forward stdin before stdin reached EOF")
+            early_output = os.read(interactive.stdout.fileno(), 128)
+            if not early_output.startswith(b"RIFT_EXEC_INPUT:RIFT_EXEC_INPUT_LIVE\n") or interactive.poll() is not None:
+                raise RuntimeError(f"exec did not stream stdin while the command was running: {early_output!r}")
+            output, _ = interactive.communicate(timeout=15)
+            if interactive.returncode != 0 or b"RIFT_EXEC_INPUT_LIVE" not in early_output + output:
+                raise RuntimeError(f"interactive exec did not complete: {interactive.returncode}, {output!r}")
+        finally:
+            if interactive.poll() is None:
+                interactive.terminate()
+                interactive.communicate(timeout=5)
+
+        piped = subprocess.run(
+            [rift, "exec", "-i", identifier, "/bin/cat"],
+            input="RIFT_EXEC_INPUT_EOF\n",
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        if piped.returncode != 0 or piped.stdout != "RIFT_EXEC_INPUT_EOF\n":
+            raise RuntimeError(f"exec did not forward stdin data and EOF: {piped!r}")
+
         persisted = call(rift, "exec", identifier, "/bin/cat", "/tmp/rift-exec-file")
         if persisted.returncode != 0 or persisted.stdout != "persistent":
             raise RuntimeError(f"exec did not share the container filesystem: {persisted!r}")
@@ -129,7 +170,7 @@ def main() -> int:
         removed = call(rift, "rm", identifier)
         if removed.returncode != 0:
             raise RuntimeError(f"container removal failed after exec: {removed!r}")
-        print("Rift exec check passed: streaming output, arguments, environment, working directory, PID namespace, filesystem, exit status, lifecycle")
+        print("Rift exec check passed: streaming input/output, arguments, environment, working directory, PID namespace, filesystem, exit status, lifecycle")
         return 0
     except Exception as error:
         print(f"Rift exec check failed: {error}", file=sys.stderr)
