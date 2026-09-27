@@ -12,9 +12,12 @@ pub fn assemble(allocator: std.mem.Allocator, io: Io, root: Io.Dir, store: stora
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
     const image = try manifest.parseManifest(arena.allocator(), body);
+    var directory_modes = std.StringHashMap(u32).init(arena.allocator());
+    defer directory_modes.deinit();
     for (image.layers) |layer| {
         const blob = try store.openVerified(layer.digest, layer.size);
         defer blob.close(io);
-        try layers.apply(allocator, io, root, blob, layer.mediaType);
+        try layers.apply(allocator, io, root, blob, layer.mediaType, &directory_modes);
     }
+    try layers.applyDirectoryModes(io, root, &directory_modes);
 }

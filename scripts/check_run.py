@@ -23,6 +23,8 @@ def main() -> int:
          "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"),
         (["run", "-e", "PATH=/bin", "-e", "RIFT_CHECK=ready", "alpine", "sh", "-c", "printf '%s %s\\n' \"$PATH\" \"$RIFT_CHECK\""], 0,
          "/bin ready"),
+        (["run", "alpine", "sh", "-c", "test \"$(stat -c %a /tmp)\" = 1777 && echo RIFT_TMP_MODE_OK"], 0,
+         "RIFT_TMP_MODE_OK"),
         (["run", "alpine", "echo", "two words", "$(touch /tmp/rift-should-not-exist)"], 0,
          "two words $(touch /tmp/rift-should-not-exist)"),
         (["run", "alpine", "sh", "-c",

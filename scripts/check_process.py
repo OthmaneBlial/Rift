@@ -69,6 +69,12 @@ def main() -> int:
         named = subprocess.run([binary, "run", "alpine", "/bin/busybox", "id", "-u"], env=env, capture_output=True, text=True, timeout=60)
         if named.returncode != 0 or named.stdout.strip() != "65534":
             raise RuntimeError(f"named image user check failed: {named!r}")
+        writable_tmp = subprocess.run(
+            [binary, "run", "alpine", "/bin/busybox", "sh", "-c", "touch /tmp/rift-user-write && test -f /tmp/rift-user-write && echo RIFT_TMP_WRITABLE"],
+            env=env, capture_output=True, text=True, timeout=60,
+        )
+        if writable_tmp.returncode != 0 or writable_tmp.stdout.strip() != "RIFT_TMP_WRITABLE":
+            raise RuntimeError(f"non-root /tmp write check failed: {writable_tmp!r}")
         for invalid in ("missing-user", "4294967295"):
             select_user(invalid)
             rejected = subprocess.run([binary, "run", "alpine", "/bin/busybox", "id", "-u"], env=env, capture_output=True, text=True, timeout=60)
@@ -91,7 +97,7 @@ def main() -> int:
             raise RuntimeError(f"fixture still contains a working shell: {removed_shell!r}")
         if list((data / "runtime").iterdir()):
             raise RuntimeError("process settings run left runtime staging behind")
-    print("Rift process settings check passed: working directory, numeric and named users, shell-free image")
+    print("Rift process settings check passed: working directory, numeric and named users, writable /tmp, shell-free image")
     return 0
 
 

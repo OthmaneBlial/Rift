@@ -5,38 +5,38 @@ const max_layer_bytes = 8 * 1024 * 1024 * 1024;
 
 /// Apply a verified OCI layer to a private, unpublished root directory.
 /// Whiteouts run first so they cannot delete files added by the same layer.
-pub fn apply(allocator: std.mem.Allocator, io: Io, root: Io.Dir, blob: Io.File, media_type: []const u8) !void {
-    try pass(allocator, io, root, blob, media_type, .whiteouts);
-    try pass(allocator, io, root, blob, media_type, .entries);
+pub fn apply(allocator: std.mem.Allocator, io: Io, root: Io.Dir, blob: Io.File, media_type: []const u8, directory_modes: *std.StringHashMap(u32)) !void {
+    try pass(allocator, io, root, blob, media_type, directory_modes, .whiteouts);
+    try pass(allocator, io, root, blob, media_type, directory_modes, .entries);
 }
 
 const Pass = enum { whiteouts, entries };
 
-fn pass(allocator: std.mem.Allocator, io: Io, root: Io.Dir, blob: Io.File, media_type: []const u8, phase: Pass) !void {
+fn pass(allocator: std.mem.Allocator, io: Io, root: Io.Dir, blob: Io.File, media_type: []const u8, directory_modes: *std.StringHashMap(u32), phase: Pass) !void {
     var input_buffer: [32 * 1024]u8 = undefined;
     var input = blob.reader(io, &input_buffer);
     if (std.mem.eql(u8, media_type, "application/vnd.oci.image.layer.v1.tar") or
         std.mem.eql(u8, media_type, "application/vnd.docker.image.rootfs.diff.tar"))
     {
-        return applyTar(allocator, io, root, &input.interface, phase);
+        return applyTar(allocator, io, root, &input.interface, directory_modes, phase);
     }
     if (std.mem.eql(u8, media_type, "application/vnd.oci.image.layer.v1.tar+gzip") or
         std.mem.eql(u8, media_type, "application/vnd.docker.image.rootfs.diff.tar.gzip"))
     {
         var output_buffer: [std.compress.flate.max_window_len]u8 = undefined;
         var decompressor = std.compress.flate.Decompress.init(&input.interface, .gzip, &output_buffer);
-        return applyTar(allocator, io, root, &decompressor.reader, phase);
+        return applyTar(allocator, io, root, &decompressor.reader, directory_modes, phase);
     }
     if (std.mem.eql(u8, media_type, "application/vnd.oci.image.layer.v1.tar+zstd")) {
         const output_buffer = try allocator.alloc(u8, std.compress.zstd.default_window_len + std.compress.zstd.block_size_max);
         defer allocator.free(output_buffer);
         var decompressor = std.compress.zstd.Decompress.init(&input.interface, output_buffer, .{});
-        return applyTar(allocator, io, root, &decompressor.reader, phase);
+        return applyTar(allocator, io, root, &decompressor.reader, directory_modes, phase);
     }
     return error.UnsupportedLayerMediaType;
 }
 
-fn applyTar(allocator: std.mem.Allocator, io: Io, root: Io.Dir, reader: *Io.Reader, phase: Pass) !void {
+fn applyTar(allocator: std.mem.Allocator, io: Io, root: Io.Dir, reader: *Io.Reader, directory_modes: *std.StringHashMap(u32), phase: Pass) !void {
     var name_buffer: [Io.Dir.max_path_bytes]u8 = undefined;
     var link_buffer: [Io.Dir.max_path_bytes]u8 = undefined;
     var clean_buffer: [Io.Dir.max_path_bytes]u8 = undefined;
@@ -80,6 +80,12 @@ fn applyTar(allocator: std.mem.Allocator, io: Io, root: Io.Dir, reader: *Io.Read
         defer parent.close(io);
         switch (entry.kind) {
             .directory => {
+                const mode: u32 = @intCast(entry.mode & 0o7777);
+                if (directory_modes.getPtr(path)) |stored_mode| {
+                    stored_mode.* = mode;
+                } else {
+                    try directory_modes.put(try directory_modes.allocator.dupe(u8, path), mode);
+                }
                 const existing = parent.statFile(io, name, .{ .follow_symlinks = false }) catch |err| switch (err) {
                     error.FileNotFound => null,
                     else => return err,
@@ -110,6 +116,31 @@ fn applyTar(allocator: std.mem.Allocator, io: Io, root: Io.Dir, reader: *Io.Read
             },
         }
     }
+}
+
+pub fn applyDirectoryModes(io: Io, root: Io.Dir, directory_modes: *std.StringHashMap(u32)) !void {
+    var entries = directory_modes.iterator();
+    while (entries.next()) |entry| try applyDirectoryMode(io, root, entry.key_ptr.*, entry.value_ptr.*);
+}
+
+fn applyDirectoryMode(io: Io, root: Io.Dir, path: []const u8, mode: u32) !void {
+    var parent = openParent(io, root, parentPath(path), false) catch |err| switch (err) {
+        error.UnsafeLayerPath => return,
+        else => return err,
+    } orelse return;
+    defer parent.close(io);
+    const name = basename(path);
+    const stat = parent.statFile(io, name, .{ .follow_symlinks = false }) catch |err| switch (err) {
+        error.FileNotFound => return,
+        else => return err,
+    };
+    if (stat.kind != .directory) return;
+    var directory = parent.openDir(io, name, .{ .follow_symlinks = false, .iterate = true }) catch |err| switch (err) {
+        error.FileNotFound, error.NotDir, error.SymLinkLoop => return,
+        else => return err,
+    };
+    defer directory.close(io);
+    try directory.setPermissions(io, .fromMode(@intCast(mode)));
 }
 
 fn applyHardlink(io: Io, root: Io.Dir, it: *std.tar.Iterator, name_buffer: []const u8, link_buffer: []const u8, phase: Pass) !void {
@@ -260,7 +291,7 @@ test "applies whiteouts before current layer entries" {
     const blob = try temp.dir.openFile(io, "layer.tar", .{ .mode = .read_only });
     defer blob.close(io);
 
-    try apply(allocator, io, root, blob, "application/vnd.oci.image.layer.v1.tar");
+    try applyOne(allocator, io, root, blob, "application/vnd.oci.image.layer.v1.tar");
     const old = try root.readFileAlloc(io, "old", allocator, .limited(10));
     defer allocator.free(old);
     try std.testing.expectEqualStrings("new", old);
@@ -268,6 +299,45 @@ test "applies whiteouts before current layer entries" {
     const newer = try root.readFileAlloc(io, "sub/new", allocator, .limited(10));
     defer allocator.free(newer);
     try std.testing.expectEqualStrings("new", newer);
+}
+
+test "applies final directory modes after all layers" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var temp = std.testing.tmpDir(.{});
+    defer temp.cleanup();
+    try temp.dir.createDirPath(io, "root");
+    var root = try temp.dir.openDir(io, "root", .{});
+    defer root.close(io);
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    var directory_modes = std.StringHashMap(u32).init(arena.allocator());
+    defer directory_modes.deinit();
+
+    var first_archive: Io.Writer.Allocating = .init(allocator);
+    defer first_archive.deinit();
+    var first_tar: std.tar.Writer = .{ .underlying_writer = &first_archive.writer };
+    try first_tar.writeDir("tmp", .{ .mode = 0o1777 });
+    try temp.dir.writeFile(io, .{ .sub_path = "first.tar", .data = first_archive.written() });
+    const first_blob = try temp.dir.openFile(io, "first.tar", .{ .mode = .read_only });
+    defer first_blob.close(io);
+    try apply(allocator, io, root, first_blob, "application/vnd.oci.image.layer.v1.tar", &directory_modes);
+
+    var second_archive: Io.Writer.Allocating = .init(allocator);
+    defer second_archive.deinit();
+    var second_tar: std.tar.Writer = .{ .underlying_writer = &second_archive.writer };
+    try second_tar.writeFileBytes("tmp/probe", "ok", .{});
+    try temp.dir.writeFile(io, .{ .sub_path = "second.tar", .data = second_archive.written() });
+    const second_blob = try temp.dir.openFile(io, "second.tar", .{ .mode = .read_only });
+    defer second_blob.close(io);
+    try apply(allocator, io, root, second_blob, "application/vnd.oci.image.layer.v1.tar", &directory_modes);
+
+    try applyDirectoryModes(io, root, &directory_modes);
+    const stat = try root.statFile(io, "tmp", .{ .follow_symlinks = false });
+    try std.testing.expectEqual(@as(u32, 0o1777), @as(u32, @intCast(stat.permissions.toMode() & 0o7777)));
+    const contents = try root.readFileAlloc(io, "tmp/probe", allocator, .limited(4));
+    defer allocator.free(contents);
+    try std.testing.expectEqualStrings("ok", contents);
 }
 
 test "rejects paths through symlink parents" {
@@ -288,7 +358,7 @@ test "rejects paths through symlink parents" {
     try output_blob.writeStreamingAll(io, archive.written());
     const blob = try temp.dir.openFile(io, "layer.tar", .{ .mode = .read_only });
     defer blob.close(io);
-    try std.testing.expectError(error.UnsafeLayerPath, apply(allocator, io, root, blob, "application/vnd.oci.image.layer.v1.tar"));
+    try std.testing.expectError(error.UnsafeLayerPath, applyOne(allocator, io, root, blob, "application/vnd.oci.image.layer.v1.tar"));
     var path_buffer: [64]u8 = undefined;
     try std.testing.expectError(error.UnsafeLayerPath, cleanPath("../host", &path_buffer));
     try std.testing.expectError(error.UnsafeLayerLink, checkLink("bin/tool", "../../host"));
@@ -311,7 +381,7 @@ test "applies hardlinks and rejects targets outside the root" {
     try temp.dir.writeFile(io, .{ .sub_path = "layer.tar", .data = archive.written() });
     const blob = try temp.dir.openFile(io, "layer.tar", .{ .mode = .read_only });
     defer blob.close(io);
-    try apply(allocator, io, root, blob, "application/vnd.oci.image.layer.v1.tar");
+    try applyOne(allocator, io, root, blob, "application/vnd.oci.image.layer.v1.tar");
     const contents = try root.readFileAlloc(io, "linked", allocator, .limited(16));
     defer allocator.free(contents);
     try std.testing.expectEqualStrings("shared", contents);
@@ -328,7 +398,16 @@ test "applies hardlinks and rejects targets outside the root" {
     try temp.dir.writeFile(io, .{ .sub_path = "unsafe.tar", .data = unsafe.written() });
     const unsafe_blob = try temp.dir.openFile(io, "unsafe.tar", .{ .mode = .read_only });
     defer unsafe_blob.close(io);
-    try std.testing.expectError(error.UnsafeLayerPath, apply(allocator, io, root, unsafe_blob, "application/vnd.oci.image.layer.v1.tar"));
+    try std.testing.expectError(error.UnsafeLayerPath, applyOne(allocator, io, root, unsafe_blob, "application/vnd.oci.image.layer.v1.tar"));
+}
+
+fn applyOne(allocator: std.mem.Allocator, io: Io, root: Io.Dir, blob: Io.File, media_type: []const u8) !void {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    var directory_modes = std.StringHashMap(u32).init(arena.allocator());
+    defer directory_modes.deinit();
+    try apply(allocator, io, root, blob, media_type, &directory_modes);
+    try applyDirectoryModes(io, root, &directory_modes);
 }
 
 fn writeTestHardlink(writer: *Io.Writer, name: []const u8, target: []const u8) !void {
