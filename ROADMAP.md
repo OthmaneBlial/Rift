@@ -42,7 +42,8 @@ This roadmap carries the original plan forward from the first project commit. `[
 - [x] Coordinate pulls, runs, and cache pruning with a shared cache lock.
 - [x] Preview cleanup and reclaim unreferenced blobs while preserving valid image records.
 - [x] Cap each pull at 16 GiB of distinct image blobs missing from the verified cache.
-- [ ] Verify compatibility with more public registries and private registry providers.
+- [x] Verify anonymous ARM64 pulls from GHCR, Quay, and Google GCR using public image samples.
+- [ ] Verify private registry providers beyond the local Bearer-auth fixture.
 
 ## 4. Build the everyday container workflow
 

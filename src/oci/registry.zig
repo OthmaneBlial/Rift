@@ -163,16 +163,20 @@ pub const Registry = struct {
                 registry.destroyPending(pending);
                 return error.RegistryRedirectMissingLocation;
             };
-            const uri = std.Uri.parse(location) catch {
+            const resolved = resolveRedirectUrl(registry.allocator, pending.request.uri, location) catch |err| {
                 registry.destroyPending(pending);
-                return error.InvalidRegistryRedirect;
+                return switch (err) {
+                    error.OutOfMemory => error.OutOfMemory,
+                    else => error.InvalidRegistryRedirect,
+                };
             };
+            const uri = resolved.uri;
             if (!std.mem.eql(u8, uri.scheme, "https") or uri.host == null or uri.user != null or uri.password != null or uri.fragment != null) {
                 registry.destroyPending(pending);
                 return error.InsecureRegistryRedirect;
             }
             registry.destroyPending(pending);
-            pending = try registry.openRaw(location, accept, null, null);
+            pending = try registry.openRaw(resolved.url, accept, null, null);
             redirects += 1;
         }
         return pending;
@@ -361,6 +365,26 @@ const BearerChallenge = struct {
 };
 
 const AuthScopeKind = enum { repository, public_ecr };
+
+const ResolvedRedirect = struct { url: []u8, uri: std.Uri };
+
+fn resolveRedirectUrl(allocator: Allocator, base: std.Uri, location: []const u8) !ResolvedRedirect {
+    const base_path_len = switch (base.path) {
+        .raw => |path| path.len,
+        .percent_encoded => |path| path.len,
+    };
+    const buffer = try allocator.alloc(u8, location.len + base_path_len + 1);
+    defer allocator.free(buffer);
+    @memcpy(buffer[0..location.len], location);
+    var redirect_buffer = buffer[0..];
+    const uri = std.Uri.resolveInPlace(base, location.len, &redirect_buffer) catch return error.InvalidRegistryRedirect;
+    var output: Io.Writer.Allocating = .init(allocator);
+    defer output.deinit();
+    try uri.writeToStream(&output.writer, .all);
+    const url = try allocator.dupe(u8, output.written());
+    errdefer allocator.free(url);
+    return .{ .url = url, .uri = try std.Uri.parse(url) };
+}
 
 fn authScopeKind(registry: []const u8, scope: []const u8, expected_scope: []const u8) ?AuthScopeKind {
     if (std.mem.eql(u8, scope, expected_scope)) return .repository;
@@ -610,6 +634,15 @@ test "encodes registry token query values" {
     const url = try buildTokenUrl(std.testing.allocator, "https://auth.example/token", "registry.example", "repository:library/alpine:pull");
     defer std.testing.allocator.free(url);
     try std.testing.expectEqualStrings("https://auth.example/token?service=registry.example&scope=repository%3Alibrary%2Falpine%3Apull", url);
+}
+
+test "resolves root-relative registry redirects against the HTTPS origin" {
+    const allocator = std.testing.allocator;
+    const base = try std.Uri.parse("https://gcr.io/v2/example/image/blobs/sha256:abc");
+    const redirect = try resolveRedirectUrl(allocator, base, "/artifacts-downloads/blob");
+    defer allocator.free(redirect.url);
+    try std.testing.expectEqualStrings("https://gcr.io/artifacts-downloads/blob", redirect.url);
+    try std.testing.expectEqualStrings("https", redirect.uri.scheme);
 }
 
 test "allows plain HTTP only for explicit loopback registries and token realms" {
