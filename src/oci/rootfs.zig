@@ -28,14 +28,13 @@ pub fn assemble(allocator: std.mem.Allocator, io: Io, root: Io.Dir, control: Io.
 
 fn writeOwnershipManifest(allocator: std.mem.Allocator, io: Io, control: Io.Dir, ownership: *std.StringHashMap(layers.Ownership)) !void {
     if (ownership.count() == 0) return;
-    const max_manifest_bytes = 64 * 1024 * 1024;
     var total: usize = "RIFTOWN1".len;
     var paths: std.ArrayList([]const u8) = .empty;
     defer paths.deinit(allocator);
     var entries = ownership.iterator();
     while (entries.next()) |entry| {
         total = std.math.add(usize, total, 12 + entry.key_ptr.*.len) catch return error.OwnershipManifestTooLarge;
-        if (total > max_manifest_bytes) return error.OwnershipManifestTooLarge;
+        if (total > layers.max_owner_manifest_bytes) return error.OwnershipManifestTooLarge;
         try paths.append(allocator, entry.key_ptr.*);
     }
     std.mem.sort([]const u8, paths.items, {}, struct {

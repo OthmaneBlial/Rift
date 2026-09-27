@@ -5,11 +5,15 @@ const max_layer_bytes = 8 * 1024 * 1024 * 1024;
 const max_image_layer_bytes = 32 * 1024 * 1024 * 1024;
 const max_pax_header_bytes = 1024 * 1024;
 const max_owner_records = 1_000_000;
+pub const max_owner_manifest_bytes = 64 * 1024 * 1024;
+const max_owner_index_scan_visits = 10_000_000;
 
 pub const ExpansionBudget = struct {
     // apply decompresses every layer once for whiteouts and again for entries.
     whiteouts: u64 = 0,
     entries: u64 = 0,
+    owner_manifest_bytes: u64 = "RIFTOWN1".len,
+    owner_index_scan_visits: u64 = 0,
 };
 
 pub const DirectoryMetadata = struct {
@@ -34,8 +38,8 @@ pub fn apply(
     ownership: *std.StringHashMap(Ownership),
     budget: *ExpansionBudget,
 ) !void {
-    try pass(allocator, io, root, blob, media_type, directory_metadata, ownership, &budget.whiteouts, .whiteouts);
-    try pass(allocator, io, root, blob, media_type, directory_metadata, ownership, &budget.entries, .entries);
+    try pass(allocator, io, root, blob, media_type, directory_metadata, ownership, budget, .whiteouts);
+    try pass(allocator, io, root, blob, media_type, directory_metadata, ownership, budget, .entries);
 }
 
 const Pass = enum { whiteouts, entries };
@@ -337,34 +341,35 @@ fn parsePaxMtime(value: []const u8) !Io.Timestamp {
     return .fromNanoseconds(nanoseconds);
 }
 
-fn pass(allocator: std.mem.Allocator, io: Io, root: Io.Dir, blob: Io.File, media_type: []const u8, directory_metadata: *std.StringHashMap(DirectoryMetadata), ownership: *std.StringHashMap(Ownership), image_total: *u64, phase: Pass) !void {
+fn pass(allocator: std.mem.Allocator, io: Io, root: Io.Dir, blob: Io.File, media_type: []const u8, directory_metadata: *std.StringHashMap(DirectoryMetadata), ownership: *std.StringHashMap(Ownership), budget: *ExpansionBudget, phase: Pass) !void {
     var input_buffer: [32 * 1024]u8 = undefined;
     var input = blob.reader(io, &input_buffer);
     if (std.mem.eql(u8, media_type, "application/vnd.oci.image.layer.v1.tar") or
         std.mem.eql(u8, media_type, "application/vnd.docker.image.rootfs.diff.tar"))
     {
-        return applyTar(allocator, io, root, &input.interface, directory_metadata, ownership, image_total, phase);
+        return applyTar(allocator, io, root, &input.interface, directory_metadata, ownership, budget, phase);
     }
     if (std.mem.eql(u8, media_type, "application/vnd.oci.image.layer.v1.tar+gzip") or
         std.mem.eql(u8, media_type, "application/vnd.docker.image.rootfs.diff.tar.gzip"))
     {
         var output_buffer: [std.compress.flate.max_window_len]u8 = undefined;
         var decompressor = std.compress.flate.Decompress.init(&input.interface, .gzip, &output_buffer);
-        return applyTar(allocator, io, root, &decompressor.reader, directory_metadata, ownership, image_total, phase);
+        return applyTar(allocator, io, root, &decompressor.reader, directory_metadata, ownership, budget, phase);
     }
     if (std.mem.eql(u8, media_type, "application/vnd.oci.image.layer.v1.tar+zstd")) {
         const output_buffer = try allocator.alloc(u8, std.compress.zstd.default_window_len + std.compress.zstd.block_size_max);
         defer allocator.free(output_buffer);
         var decompressor = std.compress.zstd.Decompress.init(&input.interface, output_buffer, .{});
-        return applyTar(allocator, io, root, &decompressor.reader, directory_metadata, ownership, image_total, phase);
+        return applyTar(allocator, io, root, &decompressor.reader, directory_metadata, ownership, budget, phase);
     }
     return error.UnsupportedLayerMediaType;
 }
 
-fn applyTar(allocator: std.mem.Allocator, io: Io, root: Io.Dir, reader: *Io.Reader, directory_metadata: *std.StringHashMap(DirectoryMetadata), ownership: *std.StringHashMap(Ownership), image_total: *u64, phase: Pass) !void {
+fn applyTar(allocator: std.mem.Allocator, io: Io, root: Io.Dir, reader: *Io.Reader, directory_metadata: *std.StringHashMap(DirectoryMetadata), ownership: *std.StringHashMap(Ownership), budget: *ExpansionBudget, phase: Pass) !void {
     var name_buffer: [Io.Dir.max_path_bytes]u8 = undefined;
     var link_buffer: [Io.Dir.max_path_bytes]u8 = undefined;
     var clean_buffer: [Io.Dir.max_path_bytes]u8 = undefined;
+    const image_total = if (phase == .whiteouts) &budget.whiteouts else &budget.entries;
     var it = LayerTarIterator.init(allocator, reader, image_total, &name_buffer, &link_buffer);
     var total: u64 = 0;
     var count: usize = 0;
@@ -388,12 +393,12 @@ fn applyTar(allocator: std.mem.Allocator, io: Io, root: Io.Dir, reader: *Io.Read
             if (phase == .whiteouts) {
                 try applyWhiteout(allocator, io, root, path, name);
                 if (std.mem.eql(u8, name, ".wh..wh..opq")) {
-                    try removeOwnerDescendants(allocator, ownership, parentPath(path));
+                    try removeOwnerDescendants(allocator, ownership, parentPath(path), budget);
                 } else {
                     const parent_path = parentPath(path);
                     const target = try std.fmt.allocPrint(allocator, "{s}{s}{s}", .{ parent_path, if (parent_path.len == 0) "" else "/", name[4..] });
                     defer allocator.free(target);
-                    try removeOwnerSubtree(allocator, ownership, target);
+                    try removeOwnerSubtree(allocator, ownership, target, budget);
                 }
             }
             continue;
@@ -403,15 +408,15 @@ fn applyTar(allocator: std.mem.Allocator, io: Io, root: Io.Dir, reader: *Io.Read
             continue;
         }
         if (path.len == 0) {
-            if (phase == .entries and entry.kind == .directory) try setOwnership(ownership, path, entry.ownership);
+            if (phase == .entries and entry.kind == .directory) try setOwnership(ownership, path, entry.ownership, budget);
             continue;
         }
         if (phase == .whiteouts) {
-            if (entry.kind == .hard_link) try applyHardlink(allocator, io, root, path, entry.link_name, entry.size, entry.mtime, entry.ownership, ownership, phase);
+            if (entry.kind == .hard_link) try applyHardlink(allocator, io, root, path, entry.link_name, entry.size, entry.mtime, entry.ownership, ownership, budget, phase);
             continue;
         }
         if (entry.kind == .hard_link) {
-            try applyHardlink(allocator, io, root, path, entry.link_name, entry.size, entry.mtime, entry.ownership, ownership, phase);
+            try applyHardlink(allocator, io, root, path, entry.link_name, entry.size, entry.mtime, entry.ownership, ownership, budget, phase);
             continue;
         }
 
@@ -432,18 +437,18 @@ fn applyTar(allocator: std.mem.Allocator, io: Io, root: Io.Dir, reader: *Io.Read
                 };
                 if (existing) |stat| {
                     if (stat.kind == .directory) {
-                        try setOwnership(ownership, path, entry.ownership);
+                        try setOwnership(ownership, path, entry.ownership, budget);
                         continue;
                     }
                     try parent.deleteTree(io, name);
-                    try removeOwnerSubtree(allocator, ownership, path);
+                    try removeOwnerSubtree(allocator, ownership, path, budget);
                 }
                 try parent.createDirPath(io, name);
-                try setOwnership(ownership, path, entry.ownership);
+                try setOwnership(ownership, path, entry.ownership, budget);
             },
             .file => {
                 try parent.deleteTree(io, name);
-                try removeOwnerSubtree(allocator, ownership, path);
+                try removeOwnerSubtree(allocator, ownership, path, budget);
                 var output = try parent.createFile(io, name, .{
                     .exclusive = true,
                     .permissions = .fromMode(@intCast(entry.mode & 0o777)),
@@ -455,18 +460,18 @@ fn applyTar(allocator: std.mem.Allocator, io: Io, root: Io.Dir, reader: *Io.Read
                 try writer.interface.flush();
                 try output.setPermissions(io, .fromMode(@intCast(entry.mode & 0o777)));
                 try output.setTimestamps(io, .{ .modify_timestamp = .init(entry.mtime) });
-                try setOwnership(ownership, path, entry.ownership);
+                try setOwnership(ownership, path, entry.ownership, budget);
             },
             .sym_link => {
                 try checkLink(path, entry.link_name);
                 try parent.deleteTree(io, name);
-                try removeOwnerSubtree(allocator, ownership, path);
+                try removeOwnerSubtree(allocator, ownership, path, budget);
                 try parent.symLink(io, entry.link_name, name, .{});
                 try parent.setTimestamps(io, name, .{
                     .follow_symlinks = false,
                     .modify_timestamp = .init(entry.mtime),
                 });
-                try setOwnership(ownership, path, entry.ownership);
+                try setOwnership(ownership, path, entry.ownership, budget);
             },
             .hard_link => unreachable,
             .device => unreachable,
@@ -511,10 +516,13 @@ fn applyDirectoryMetadataEntry(io: Io, root: Io.Dir, path: []const u8, metadata:
     });
 }
 
-fn setOwnership(ownership: *std.StringHashMap(Ownership), path: []const u8, value: Ownership) !void {
+fn setOwnership(ownership: *std.StringHashMap(Ownership), path: []const u8, value: Ownership, budget: *ExpansionBudget) !void {
     if (value.uid == 0 and value.gid == 0) {
         if (ownership.count() == 0) return;
-        if (ownership.fetchRemove(path)) |removed| ownership.allocator.free(removed.key);
+        if (ownership.fetchRemove(path)) |removed| {
+            budget.owner_manifest_bytes -= @as(u64, 12) + @as(u64, @intCast(removed.key.len));
+            ownership.allocator.free(removed.key);
+        }
         return;
     }
     if (ownership.getPtr(path)) |stored| {
@@ -522,18 +530,20 @@ fn setOwnership(ownership: *std.StringHashMap(Ownership), path: []const u8, valu
         return;
     }
     if (ownership.count() >= max_owner_records) return error.TooManyOwnedImageEntries;
+    try accountOwnerManifestRecord(budget, path.len);
     try ownership.put(try ownership.allocator.dupe(u8, path), value);
 }
 
-fn removeOwnerSubtree(allocator: std.mem.Allocator, ownership: *std.StringHashMap(Ownership), prefix: []const u8) !void {
-    try removeOwnerEntries(allocator, ownership, prefix, true);
+fn removeOwnerSubtree(allocator: std.mem.Allocator, ownership: *std.StringHashMap(Ownership), prefix: []const u8, budget: *ExpansionBudget) !void {
+    try removeOwnerEntries(allocator, ownership, prefix, true, budget);
 }
 
-fn removeOwnerDescendants(allocator: std.mem.Allocator, ownership: *std.StringHashMap(Ownership), prefix: []const u8) !void {
-    try removeOwnerEntries(allocator, ownership, prefix, false);
+fn removeOwnerDescendants(allocator: std.mem.Allocator, ownership: *std.StringHashMap(Ownership), prefix: []const u8, budget: *ExpansionBudget) !void {
+    try removeOwnerEntries(allocator, ownership, prefix, false, budget);
 }
 
-fn removeOwnerEntries(allocator: std.mem.Allocator, ownership: *std.StringHashMap(Ownership), prefix: []const u8, include_self: bool) !void {
+fn removeOwnerEntries(allocator: std.mem.Allocator, ownership: *std.StringHashMap(Ownership), prefix: []const u8, include_self: bool, budget: *ExpansionBudget) !void {
+    try accountOwnerIndexScan(budget, ownership.count());
     var removed_paths: std.ArrayList([]const u8) = .empty;
     defer removed_paths.deinit(allocator);
     var entries = ownership.iterator();
@@ -547,11 +557,14 @@ fn removeOwnerEntries(allocator: std.mem.Allocator, ownership: *std.StringHashMa
         if ((include_self and is_self) or is_descendant) try removed_paths.append(allocator, path);
     }
     for (removed_paths.items) |path| {
-        if (ownership.fetchRemove(path)) |removed| ownership.allocator.free(removed.key);
+        if (ownership.fetchRemove(path)) |removed| {
+            budget.owner_manifest_bytes -= @as(u64, 12) + @as(u64, @intCast(removed.key.len));
+            ownership.allocator.free(removed.key);
+        }
     }
 }
 
-fn applyHardlink(allocator: std.mem.Allocator, io: Io, root: Io.Dir, path: []const u8, raw_target: []const u8, size: u64, mtime: Io.Timestamp, entry_ownership: Ownership, ownership: *std.StringHashMap(Ownership), phase: Pass) !void {
+fn applyHardlink(allocator: std.mem.Allocator, io: Io, root: Io.Dir, path: []const u8, raw_target: []const u8, size: u64, mtime: Io.Timestamp, entry_ownership: Ownership, ownership: *std.StringHashMap(Ownership), budget: *ExpansionBudget, phase: Pass) !void {
     if (size != 0) return error.TarUnsupportedHeader;
     var clean_target_buffer: [Io.Dir.max_path_bytes]u8 = undefined;
     const target = try cleanPath(raw_target, &clean_target_buffer);
@@ -565,13 +578,57 @@ fn applyHardlink(allocator: std.mem.Allocator, io: Io, root: Io.Dir, path: []con
     var parent = (try openParent(io, root, parentPath(path), true)).?;
     defer parent.close(io);
     try parent.deleteTree(io, basename(path));
-    try removeOwnerSubtree(allocator, ownership, path);
+    try removeOwnerSubtree(allocator, ownership, path, budget);
     try source.hardLink(basename(target), parent, basename(path), io, .{ .follow_symlinks = false });
     try parent.setTimestamps(io, basename(path), .{
         .follow_symlinks = false,
         .modify_timestamp = .init(mtime),
     });
-    try setOwnership(ownership, path, target_ownership);
+    try setOwnership(ownership, path, target_ownership, budget);
+}
+
+fn accountOwnerManifestRecord(budget: *ExpansionBudget, path_length: usize) !void {
+    const record_bytes = std.math.add(u64, 12, @intCast(path_length)) catch return error.OwnershipManifestTooLarge;
+    const total = std.math.add(u64, budget.owner_manifest_bytes, record_bytes) catch return error.OwnershipManifestTooLarge;
+    if (total > max_owner_manifest_bytes) return error.OwnershipManifestTooLarge;
+    budget.owner_manifest_bytes = total;
+}
+
+fn accountOwnerIndexScan(budget: *ExpansionBudget, entry_count: usize) !void {
+    const total = std.math.add(u64, budget.owner_index_scan_visits, @intCast(entry_count)) catch return error.LayerOwnershipIndexTooComplex;
+    if (total > max_owner_index_scan_visits) return error.LayerOwnershipIndexTooComplex;
+    budget.owner_index_scan_visits = total;
+}
+
+test "bounds ownership metadata bytes and repeated index scans" {
+    var budget: ExpansionBudget = .{};
+    try accountOwnerManifestRecord(&budget, 4);
+    try std.testing.expectEqual(@as(u64, 24), budget.owner_manifest_bytes);
+    try std.testing.expectError(error.OwnershipManifestTooLarge, accountOwnerManifestRecord(&budget, max_owner_manifest_bytes));
+    try std.testing.expectEqual(@as(u64, 24), budget.owner_manifest_bytes);
+
+    var scan_budget: ExpansionBudget = .{ .owner_index_scan_visits = max_owner_index_scan_visits - 1 };
+    try accountOwnerIndexScan(&scan_budget, 1);
+    try std.testing.expectEqual(@as(u64, max_owner_index_scan_visits), scan_budget.owner_index_scan_visits);
+    try std.testing.expectError(error.LayerOwnershipIndexTooComplex, accountOwnerIndexScan(&scan_budget, 1));
+    try std.testing.expectEqual(@as(u64, max_owner_index_scan_visits), scan_budget.owner_index_scan_visits);
+}
+
+test "ownership removals keep the bounded manifest size in sync" {
+    const allocator = std.testing.allocator;
+    var ownership = std.StringHashMap(Ownership).init(allocator);
+    defer {
+        var entries = ownership.iterator();
+        while (entries.next()) |entry| allocator.free(entry.key_ptr.*);
+        ownership.deinit();
+    }
+    var budget: ExpansionBudget = .{};
+    try setOwnership(&ownership, "owned", .{ .uid = 1000, .gid = 1000 }, &budget);
+    try std.testing.expectEqual(@as(u64, 25), budget.owner_manifest_bytes);
+    try setOwnership(&ownership, "owned", .{ .uid = 2000, .gid = 2000 }, &budget);
+    try std.testing.expectEqual(@as(u64, 25), budget.owner_manifest_bytes);
+    try setOwnership(&ownership, "owned", .{ .uid = 0, .gid = 0 }, &budget);
+    try std.testing.expectEqual(@as(u64, "RIFTOWN1".len), budget.owner_manifest_bytes);
 }
 
 fn tarMtime(header: *const [512]u8) !Io.Timestamp {

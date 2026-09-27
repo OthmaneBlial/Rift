@@ -332,6 +332,8 @@ pub fn main(init: std.process.Init) void {
             error.BlobSizeMismatch => std.debug.print("rift: downloaded blob size did not match its descriptor\n", .{}),
             error.ImageDownloadTooLarge => std.debug.print("rift: image pull exceeds the 16 GiB uncached download limit\n", .{}),
             error.LayerTooLarge => std.debug.print("rift: OCI layer exceeds the 8 GiB decompressed limit\n", .{}),
+            error.LayerOwnershipIndexTooComplex => std.debug.print("rift: OCI layer has too many ownership updates to process safely\n", .{}),
+            error.OwnershipManifestTooLarge => std.debug.print("rift: OCI image ownership metadata exceeds the 64 MiB limit\n", .{}),
             error.UnsupportedDigestAlgorithm => std.debug.print("rift: image uses an unsupported digest algorithm\n", .{}),
             error.InvalidImageMetadata => std.debug.print("rift: local image metadata is corrupt\n", .{}),
             error.CorruptCachedBlob => std.debug.print("rift: cached image blob failed verification\n", .{}),
