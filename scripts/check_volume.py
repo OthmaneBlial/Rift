@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check explicit read-only and writable directory volumes in the Linux guest."""
+"""Check explicit file and directory volumes in the Linux guest."""
 
 from pathlib import Path
 import re
@@ -26,6 +26,8 @@ def main() -> int:
         source.mkdir()
         output.mkdir()
         (source / "message").write_text("FROM_HOST\n")
+        file_source = Path(temporary) / "config with space"
+        file_source.write_text("FILE_FROM_HOST\n")
 
         read = run(binary, "-v", f"{source}:/input", "alpine", "cat", "/input/message")
         if read.returncode != 0 or read.stdout.strip() != "FROM_HOST":
@@ -33,6 +35,18 @@ def main() -> int:
         denied = run(binary, "-v", f"{source}:/input", "alpine", "sh", "-c", "echo changed > /input/message")
         if denied.returncode == 0 or (source / "message").read_text() != "FROM_HOST\n":
             raise RuntimeError(f"read-only volume was writable: {denied!r}")
+        file_read = run(binary, "-v", f"{file_source}:/run/rift-config", "alpine", "cat", "/run/rift-config")
+        if file_read.returncode != 0 or file_read.stdout.strip() != "FILE_FROM_HOST":
+            raise RuntimeError(f"read-only file volume was not readable: {file_read!r}")
+        file_denied = run(binary, "-v", f"{file_source}:/run/rift-config", "alpine", "sh", "-c", "echo changed > /run/rift-config")
+        if file_denied.returncode == 0 or file_source.read_text() != "FILE_FROM_HOST\n":
+            raise RuntimeError(f"read-only file volume was writable: {file_denied!r}")
+        file_written = run(binary, "-v", f"{file_source}:/run/rift-config:rw", "alpine", "sh", "-c", "echo FILE_CHANGED > /run/rift-config")
+        if file_written.returncode != 0 or file_source.read_text() != "FILE_CHANGED\n":
+            raise RuntimeError(f"writable file volume did not update the host file: {file_written!r}")
+        nested_file_target = run(binary, "-v", f"{file_source}:/data", "-v", f"{output}:/data/child", "alpine", "/bin/true")
+        if nested_file_target.returncode != 2 or "file volume target cannot contain another volume target" not in nested_file_target.stderr:
+            raise RuntimeError(f"file volume parent target was accepted: {nested_file_target!r}")
         copied = run(binary, "-v", f"{output}:/data:rw", "-v", f"{source}:/data/input:ro", "alpine", "sh", "-c", "cat /data/input/message > /data/copy")
         if copied.returncode != 0 or (output / "copy").read_text() != "FROM_HOST\n":
             raise RuntimeError(f"nested writable volume failed: {copied!r}")
@@ -50,8 +64,16 @@ def main() -> int:
         source_link = Path(temporary) / "link"
         source_link.symlink_to(source, target_is_directory=True)
         unsafe_source = run(binary, "-v", f"{source_link}:/input", "alpine", "/bin/true")
-        if unsafe_source.returncode != 2 or "volume source must be an existing directory" not in unsafe_source.stderr:
+        if unsafe_source.returncode != 2 or "volume source must be an existing directory or regular file" not in unsafe_source.stderr:
             raise RuntimeError(f"symlink volume source was accepted: {unsafe_source!r}")
+        file_link = Path(temporary) / "file-link"
+        file_link.symlink_to(file_source)
+        unsafe_file_source = run(binary, "-v", f"{file_link}:/input", "alpine", "/bin/true")
+        if unsafe_file_source.returncode != 2 or "volume source must be an existing directory or regular file" not in unsafe_file_source.stderr:
+            raise RuntimeError(f"symlink file volume source was accepted: {unsafe_file_source!r}")
+        unsafe_file_target = run(binary, "-v", f"{file_source}:/bin/sh", "alpine", "/bin/true")
+        if unsafe_file_target.returncode != 125 or "file volume target must be a regular file" not in unsafe_file_target.stdout:
+            raise RuntimeError(f"symlink file volume target was accepted: {unsafe_file_target!r}")
         unsafe_path = run(binary, "-v", f"{source}:/../escape", "alpine", "/bin/true")
         if unsafe_path.returncode != 2 or "volume must use absolute" not in unsafe_path.stderr:
             raise RuntimeError(f"unsafe volume path was accepted: {unsafe_path!r}")
@@ -83,7 +105,7 @@ def main() -> int:
     after = set(runtime.iterdir()) if runtime.exists() else set()
     if after != before:
         raise RuntimeError(f"volume runs left runtime staging behind: {after - before}")
-    print("Rift volume check passed: read-only, writable, nested, detached, 16 shares, and unsafe-target rejection")
+    print("Rift volume check passed: read-only and writable file/directory shares, nested, detached, 16 shares, and unsafe-target rejection")
     return 0
 
 

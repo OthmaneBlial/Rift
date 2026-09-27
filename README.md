@@ -4,7 +4,7 @@
 
 **No Docker, daemon, or Docker Desktop. One binary is the distribution target.**
 
-Rift is an early-stage Zig container runtime for Apple Silicon Macs. It pulls OCI images and runs commands in Linux VMs, including detached servers with one localhost TCP port mapping and explicit directory volumes. On the first `run`, the binary downloads a pinned Alpine ISO, verifies its SHA-256, and installs the guest boot files. Each command now gets private Linux PID and mount namespaces, minimal `/dev` and `/proc` mounts, and reduced capabilities. Complete OCI process settings remain unfinished.
+Rift is an early-stage Zig container runtime for Apple Silicon Macs. It pulls OCI images and runs commands in Linux VMs, including detached servers with one localhost TCP port mapping and explicit file and directory volumes. File-volume sources must share a filesystem with Rift's runtime storage. On the first `run`, the binary downloads a pinned Alpine ISO, verifies its SHA-256, and installs the guest boot files. Each command now gets private Linux PID and mount namespaces, minimal `/dev` and `/proc` mounts, and reduced capabilities. Complete OCI process settings remain unfinished.
 
 ## Current commands
 
@@ -130,9 +130,10 @@ No Docker Engine, Docker CLI, Docker Desktop, or container daemon is part of the
 - [x] One localhost TCP port mapping for foreground commands
 - [x] Detached run, process listing, plain logs, stop, and remove
 - [x] Explicit read-only and writable directory volumes
+- [x] Explicit read-only and writable file volumes
 - [x] Preview and confirmed cleanup of abandoned runtime staging
 - [x] Preview and confirmed pruning of unreferenced image blobs under a cache lock
-- [ ] Structured logs and file volumes
+- [ ] Structured logs
 
 Foreground runs remove their temporary state on normal completion, including runs without `--rm`. Detached runs keep their logs and status until `rift rm`; the VM and temporary root filesystem are removed on stop or exit. Local checks have served the nginx welcome page over a forwarded localhost port, including with `run -d`. An interrupted foreground run can leave staging, which `rift clean` can preview and remove after the process exits. `clean` also reclaims blobs left by interrupted or refreshed pulls when no recorded image uses them. A local release archive is packaged and checked, but no public notarized release exists yet. Do not use Rift as a Docker replacement today.
 

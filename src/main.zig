@@ -325,13 +325,15 @@ pub fn main(init: std.process.Init) void {
             error.InvalidVolumeSpecification => std.debug.print("rift: volume must use absolute HOST:DIR[:ro|rw] paths without . or .. components\n", .{}),
             error.ReservedVolumeTarget => std.debug.print("rift: volume target cannot be /dev or /proc\n", .{}),
             error.DuplicateVolumeTarget => std.debug.print("rift: each volume target must be unique\n", .{}),
-            error.InvalidVolumeSource => std.debug.print("rift: volume source must be an existing directory, not a symlink\n", .{}),
+            error.InvalidVolumeSource => std.debug.print("rift: volume source must be an existing directory or regular file, not a symlink\n", .{}),
+            error.FileVolumeMustShareFilesystem => std.debug.print("rift: file volume must be on the same filesystem as Rift runtime storage\n", .{}),
+            error.FileVolumeCannotContainTarget => std.debug.print("rift: a file volume target cannot contain another volume target\n", .{}),
             error.TooManyVolumes => std.debug.print("rift: at most 16 volumes are supported\n", .{}),
             else => std.debug.print("rift: output failed: {s}\n", .{@errorName(err)}),
         }
         std.process.exit(if (err == error.InvalidArguments or err == error.CommandUnavailable or
             err == error.InvalidVolumeSpecification or err == error.ReservedVolumeTarget or err == error.DuplicateVolumeTarget or
-            err == error.InvalidVolumeSource or err == error.TooManyVolumes) 2 else 1);
+            err == error.InvalidVolumeSource or err == error.FileVolumeMustShareFilesystem or err == error.FileVolumeCannotContainTarget or err == error.TooManyVolumes) 2 else 1);
     };
     stdout.interface.flush() catch |err| {
         std.debug.print("rift: output failed: {s}\n", .{@errorName(err)});

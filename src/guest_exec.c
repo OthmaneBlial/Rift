@@ -78,15 +78,18 @@ static int resolve_user(const char *spec, uid_t *uid, gid_t *gid) {
     return 0;
 }
 
-static int mount_volume(const char *tag, const char *target, const char *mode) {
+static int open_volume_directory(const char *target) {
     size_t target_length = strlen(target);
-    if (target[0] != '/' || target_length < 2 || target_length > 4096 || target[target_length - 1] == '/' ||
-        (strcmp(mode, "ro") != 0 && strcmp(mode, "rw") != 0)) {
-        fputs("rift-exec: invalid volume target or mode\n", stderr);
-        return 125;
+    if (target[0] != '/' || target_length > 4096) {
+        errno = EINVAL;
+        fail("invalid volume target");
+        return -1;
     }
     int directory = open("/", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
-    if (directory < 0) return fail("open volume root");
+    if (directory < 0) {
+        fail("open volume root");
+        return -1;
+    }
     const char *part = target + 1;
     while (*part) {
         const char *slash = strchr(part, '/');
@@ -94,8 +97,9 @@ static int mount_volume(const char *tag, const char *target, const char *mode) {
         if (!length || length > NAME_MAX || (length == 1 && part[0] == '.') ||
             (length == 2 && part[0] == '.' && part[1] == '.')) {
             close(directory);
-            fputs("rift-exec: invalid volume target\n", stderr);
-            return 125;
+            errno = EINVAL;
+            fail("invalid volume target");
+            return -1;
         }
         char component[NAME_MAX + 1];
         memcpy(component, part, length);
@@ -104,23 +108,124 @@ static int mount_volume(const char *tag, const char *target, const char *mode) {
         if (next < 0 && errno == ENOENT) {
             if (mkdirat(directory, component, 0755) != 0 && errno != EEXIST) {
                 close(directory);
-                return fail("create volume target");
+                fail("create volume target");
+                return -1;
             }
             next = openat(directory, component, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
         }
         if (next < 0) {
             close(directory);
-            return fail("open volume target");
+            fail("open volume target");
+            return -1;
         }
         close(directory);
         directory = next;
         if (!slash) break;
         part = slash + 1;
     }
+    return directory;
+}
+
+static int mount_directory_volume(const char *tag, const char *target, const char *mode) {
+    if (target[strlen(target) - 1] == '/') {
+        fputs("rift-exec: invalid volume target\n", stderr);
+        return 125;
+    }
+    int directory = open_volume_directory(target);
+    if (directory < 0) return 125;
     close(directory);
     if (mount(tag, target, "virtiofs", MS_NOSUID | MS_NODEV | (strcmp(mode, "ro") == 0 ? MS_RDONLY : 0), NULL) != 0)
         return fail("mount volume");
     return 0;
+}
+
+static int prepare_file_target(const char *target) {
+    size_t target_length = strlen(target);
+    if (target[0] != '/' || target_length < 2 || target_length > 4096 || target[target_length - 1] == '/') {
+        fputs("rift-exec: invalid file volume target\n", stderr);
+        return 125;
+    }
+    const char *separator = strrchr(target, '/');
+    const char *name = separator + 1;
+    size_t name_length = strlen(name);
+    if (!name_length || name_length > NAME_MAX) {
+        fputs("rift-exec: invalid file volume target\n", stderr);
+        return 125;
+    }
+    char parent[PATH_MAX];
+    size_t parent_length = separator == target ? 1 : (size_t)(separator - target);
+    if (parent_length >= sizeof(parent)) {
+        errno = ENAMETOOLONG;
+        return fail("file volume target");
+    }
+    memcpy(parent, target, parent_length);
+    parent[parent_length] = 0;
+    if (separator == target) strcpy(parent, "/");
+    int directory = open_volume_directory(parent);
+    if (directory < 0) return 125;
+    struct stat info;
+    if (fstatat(directory, name, &info, AT_SYMLINK_NOFOLLOW) != 0) {
+        if (errno != ENOENT) {
+            close(directory);
+            return fail("inspect file volume target");
+        }
+        int file = openat(directory, name, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0644);
+        if (file < 0) {
+            close(directory);
+            return fail("create file volume target");
+        }
+        close(file);
+    } else if (!S_ISREG(info.st_mode)) {
+        close(directory);
+        errno = EINVAL;
+        return fail("file volume target must be a regular file");
+    }
+    close(directory);
+    return 0;
+}
+
+static int mount_file_volume(const char *tag, const char *target, const char *mode) {
+    if (prepare_file_target(target) != 0) return 125;
+    char share_path[] = "/.rift-volume-XXXXXX";
+    if (!mkdtemp(share_path)) return fail("create file volume mountpoint");
+    char source[PATH_MAX];
+    if (snprintf(source, sizeof(source), "%s/source", share_path) >= (int)sizeof(source)) {
+        rmdir(share_path);
+        errno = ENAMETOOLONG;
+        return fail("file volume source");
+    }
+    const int read_only = strcmp(mode, "ro") == 0;
+    const unsigned long flags = MS_NOSUID | MS_NODEV | (read_only ? MS_RDONLY : 0);
+    if (mount(tag, share_path, "virtiofs", flags, NULL) != 0) {
+        int status = fail("mount file volume share");
+        rmdir(share_path);
+        return status;
+    }
+    int bound = 0;
+    int status = 0;
+    if (mount(source, target, NULL, MS_BIND, NULL) != 0) {
+        status = fail("bind file volume");
+    } else {
+        bound = 1;
+        if (mount(NULL, target, NULL, MS_BIND | MS_REMOUNT | MS_NOSUID | MS_NODEV | (read_only ? MS_RDONLY : 0), NULL) != 0)
+            status = fail("set file volume mode");
+    }
+    if (umount2(share_path, 0) != 0 && status == 0) status = fail("unmount file volume share");
+    if (rmdir(share_path) != 0 && status == 0) status = fail("remove file volume mountpoint");
+    if (status != 0 && bound) umount2(target, 0);
+    return status;
+}
+
+static int mount_volume(const char *tag, const char *target, const char *mode, const char *kind) {
+    size_t target_length = strlen(target);
+    if ((strcmp(mode, "ro") != 0 && strcmp(mode, "rw") != 0) ||
+        (strcmp(kind, "directory") != 0 && strcmp(kind, "file") != 0) || target[0] != '/' ||
+        target_length < 2 || target_length > 4096 || target[target_length - 1] == '/') {
+        fputs("rift-exec: invalid volume mode or type\n", stderr);
+        return 125;
+    }
+    if (strcmp(kind, "file") == 0) return mount_file_volume(tag, target, mode);
+    return mount_directory_volume(tag, target, mode);
 }
 
 static int mountpoint(const char *path) {
@@ -196,7 +301,7 @@ static int run_container(char **argv, unsigned long volume_count) {
         return 125;
     }
     for (unsigned long index = 0; index < volume_count; ++index) {
-        int status = mount_volume(argv[5 + index * 3], argv[6 + index * 3], argv[7 + index * 3]);
+        int status = mount_volume(argv[5 + index * 4], argv[6 + index * 4], argv[7 + index * 4], argv[8 + index * 4]);
         if (status != 0) return status;
     }
     if (mount_standard_filesystems() != 0) return 125;
@@ -206,7 +311,7 @@ static int run_container(char **argv, unsigned long volume_count) {
     if (setuid(uid) != 0) return fail("setuid");
     if (chdir(argv[2]) != 0) return fail("chdir working directory");
     if (syscall(SYS_close_range, 3U, ~0U, 0U) != 0) return fail("close inherited descriptors");
-    execvp(argv[5 + volume_count * 3], argv + 5 + volume_count * 3);
+    execvp(argv[5 + volume_count * 4], argv + 5 + volume_count * 4);
     return fail("exec");
 }
 
@@ -218,7 +323,7 @@ int main(int argc, char **argv) {
     char *end;
     errno = 0;
     unsigned long volume_count = strtoul(argv[4], &end, 10);
-    if (errno || *end || volume_count > 16 || argc < 6 + (int)volume_count * 3 || !argv[5 + volume_count * 3][0]) {
+    if (errno || *end || volume_count > 16 || argc < 6 + (int)volume_count * 4 || !argv[5 + volume_count * 4][0]) {
         fputs("rift-exec: invalid volume count or missing command\n", stderr);
         return 125;
     }

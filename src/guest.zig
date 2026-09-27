@@ -66,6 +66,8 @@ fn makeScript(allocator: std.mem.Allocator, command: []const []const u8, environ
         try writer.print(" 'rift-volume-{d}' ", .{index});
         try quote(writer, volume.target);
         try writer.writeAll(if (volume.read_only) " ro" else " rw");
+        try writer.writeAll(if (volume.is_file) " file" else " directory");
+        if (output.written().len > 64 * 1024) return error.CommandTooLong;
     }
     if (command[0].len == 0) return error.InvalidArguments;
     for (command) |argument| {
@@ -117,7 +119,7 @@ test "shell arguments remain quoted" {
     const volumes = [_]vm.Volume{.{ .source = "/host", .target = "/tmp/a'b", .read_only = true }};
     const script = try makeScript(std.testing.allocator, &.{ "/bin/echo", "a'b", "$(touch /tmp/host)" }, &.{"PATH=/bin"}, "/", "1000:1000", &volumes, false, true);
     defer std.testing.allocator.free(script);
-    try std.testing.expect(std.mem.indexOf(u8, script, "env -i 'PATH=/bin' /rift-exec /mnt/root '/' '1000:1000' 1 'rift-volume-0' '/tmp/a'\"'\"'b' ro") != null);
+    try std.testing.expect(std.mem.indexOf(u8, script, "env -i 'PATH=/bin' /rift-exec /mnt/root '/' '1000:1000' 1 'rift-volume-0' '/tmp/a'\"'\"'b' ro directory") != null);
     try std.testing.expect(std.mem.indexOf(u8, script, "'/bin/echo' 'a'\"'\"'b' '$(touch /tmp/host)'") != null);
     try std.testing.expect(std.mem.indexOf(u8, script, "< /dev/null") != null);
     try std.testing.expect(std.mem.indexOf(u8, script, "if [ -s /mnt/control/guest-ip ]; then") != null);

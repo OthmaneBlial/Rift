@@ -83,6 +83,7 @@ pub fn execute(init: std.process.Init, arguments: []const []const u8, stop_path:
     defer runtime.deleteTree(init.io, name) catch {};
     try run_dir.createDir(init.io, "rootfs", .default_dir);
     try run_dir.createDir(init.io, "control", .default_dir);
+    const staged_volumes = try stageFileVolumes(allocator, init.io, run_dir, volumes);
     var image_root = try run_dir.openDir(init.io, "rootfs", .{});
     defer image_root.close(init.io);
     var control = try run_dir.openDir(init.io, "control", .{});
@@ -91,7 +92,7 @@ pub fn execute(init: std.process.Init, arguments: []const []const u8, stop_path:
     store.unlock();
     cache_locked = false;
     const interactive = try Io.File.stdin().isTty(init.io);
-    try guest.writeInitramfs(allocator, init.io, base_initramfs, run_dir, command, environment, working_dir, process.User orelse "", volumes, interactive, port != null);
+    try guest.writeInitramfs(allocator, init.io, base_initramfs, run_dir, command, environment, working_dir, process.User orelse "", staged_volumes, interactive, port != null);
 
     var root_path_buffer: [Io.Dir.max_path_bytes]u8 = undefined;
     var control_path_buffer: [Io.Dir.max_path_bytes]u8 = undefined;
@@ -104,7 +105,7 @@ pub fn execute(init: std.process.Init, arguments: []const []const u8, stop_path:
     const kernel_path = try std.fmt.allocPrint(allocator, "{s}/Image", .{guest_path});
     const initramfs_path = try std.fmt.allocPrint(allocator, "{s}/initramfs", .{run_path});
 
-    try vm.run(allocator, kernel_path, initramfs_path, "console=hvc0 quiet loglevel=0 rdinit=/rift-init", root_path, control_path, stop_path, volumes, true, port, 0, 1);
+    try vm.run(allocator, kernel_path, initramfs_path, "console=hvc0 quiet loglevel=0 rdinit=/rift-init", root_path, control_path, stop_path, staged_volumes, true, port, 0, 1);
     const status_file = control.openFile(init.io, "exit", .{ .mode = .read_only, .allow_directory = false, .follow_symlinks = false }) catch |err| switch (err) {
         error.FileNotFound => return error.GuestStatusMissing,
         else => return err,
@@ -170,14 +171,29 @@ pub fn resolveVolumes(init: std.process.Init, volumes: []const vm.Volume) ![]con
     const allocator = init.arena.allocator();
     const resolved = try allocator.alloc(vm.Volume, volumes.len);
     for (volumes, 0..) |volume, index| {
-        var directory = Io.Dir.openDirAbsolute(init.io, volume.source, .{ .follow_symlinks = false }) catch |err| switch (err) {
-            error.FileNotFound, error.NotDir, error.SymLinkLoop => return error.InvalidVolumeSource,
-            else => return err,
-        };
-        defer directory.close(init.io);
+        const info = Io.Dir.cwd().statFile(init.io, volume.source, .{ .follow_symlinks = false }) catch return error.InvalidVolumeSource;
         var buffer: [Io.Dir.max_path_bytes]u8 = undefined;
-        const length = try directory.realPath(init.io, &buffer);
-        resolved[index] = .{ .source = try allocator.dupe(u8, buffer[0..length]), .target = volume.target, .read_only = volume.read_only };
+        switch (info.kind) {
+            .directory => {
+                var directory = Io.Dir.openDirAbsolute(init.io, volume.source, .{ .follow_symlinks = false }) catch return error.InvalidVolumeSource;
+                defer directory.close(init.io);
+                const length = try directory.realPath(init.io, &buffer);
+                resolved[index] = .{ .source = try allocator.dupe(u8, buffer[0..length]), .target = volume.target, .read_only = volume.read_only };
+            },
+            .file => {
+                var file = Io.Dir.openFileAbsolute(init.io, volume.source, .{ .mode = .read_only, .allow_directory = false, .follow_symlinks = false }) catch return error.InvalidVolumeSource;
+                defer file.close(init.io);
+                const length = try file.realPath(init.io, &buffer);
+                resolved[index] = .{ .source = try allocator.dupe(u8, buffer[0..length]), .target = volume.target, .read_only = volume.read_only, .is_file = true };
+            },
+            else => return error.InvalidVolumeSource,
+        }
+    }
+    for (resolved) |volume| {
+        if (!volume.is_file) continue;
+        for (resolved) |other| {
+            if (other.target.len > volume.target.len and std.mem.startsWith(u8, other.target, volume.target) and other.target[volume.target.len] == '/') return error.FileVolumeCannotContainTarget;
+        }
     }
     std.mem.sort(vm.Volume, resolved, {}, struct {
         fn lessThan(_: void, lhs: vm.Volume, rhs: vm.Volume) bool {
@@ -185,6 +201,37 @@ pub fn resolveVolumes(init: std.process.Init, volumes: []const vm.Volume) ![]con
         }
     }.lessThan);
     return resolved;
+}
+
+fn stageFileVolumes(allocator: std.mem.Allocator, io: Io, run_dir: Io.Dir, volumes: []const vm.Volume) ![]const vm.Volume {
+    const staged = try allocator.dupe(vm.Volume, volumes);
+    var has_file = false;
+    for (volumes) |volume| has_file = has_file or volume.is_file;
+    if (!has_file) return staged;
+
+    try run_dir.createDir(io, "volumes", .fromMode(0o700));
+    var root = try run_dir.openDir(io, "volumes", .{ .follow_symlinks = false });
+    defer root.close(io);
+    for (volumes, 0..) |volume, index| {
+        if (!volume.is_file) continue;
+        const separator = std.mem.lastIndexOfScalar(u8, volume.source, '/') orelse return error.InvalidVolumeSource;
+        const parent_path = if (separator == 0) "/" else volume.source[0..separator];
+        const basename = volume.source[separator + 1 ..];
+        var source_dir = try Io.Dir.openDirAbsolute(io, parent_path, .{ .follow_symlinks = false });
+        defer source_dir.close(io);
+        const stage_name = try std.fmt.allocPrint(allocator, "{d}", .{index});
+        try root.createDir(io, stage_name, .fromMode(0o700));
+        var share = try root.openDir(io, stage_name, .{ .follow_symlinks = false });
+        defer share.close(io);
+        source_dir.hardLink(basename, share, "source", io, .{}) catch |err| switch (err) {
+            error.CrossDevice, error.OperationUnsupported => return error.FileVolumeMustShareFilesystem,
+            else => return err,
+        };
+        var buffer: [Io.Dir.max_path_bytes]u8 = undefined;
+        const length = try share.realPath(io, &buffer);
+        staged[index].source = try allocator.dupe(u8, buffer[0..length]);
+    }
+    return staged;
 }
 
 fn parseVolume(text: []const u8) !vm.Volume {

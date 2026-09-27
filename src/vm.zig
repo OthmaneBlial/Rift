@@ -19,7 +19,7 @@ extern fn rift_vm_run(
 ) c_int;
 
 pub const PortMapping = struct { host: u16, guest: u16 };
-pub const Volume = struct { source: []const u8, target: []const u8, read_only: bool };
+pub const Volume = struct { source: []const u8, target: []const u8, read_only: bool, is_file: bool = false };
 
 pub fn run(
     allocator: std.mem.Allocator,
