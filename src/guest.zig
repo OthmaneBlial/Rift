@@ -25,8 +25,10 @@ fn makeScript(allocator: std.mem.Allocator, command: []const []const u8, environ
     try writer.writeAll(
         "#!/usr/bin/busybox sh\n" ++
             "PATH=/usr/sbin:/usr/bin:/sbin:/bin\n" ++
+            "/usr/bin/busybox mount -t devtmpfs devtmpfs /dev || /usr/bin/busybox poweroff -f\n" ++
             "/usr/sbin/modprobe virtiofs >/dev/null 2>&1\n" ++
             "/usr/sbin/modprobe overlay >/dev/null 2>&1\n" ++
+            "/usr/sbin/modprobe virtio_net >/dev/null 2>&1\n" ++
             "/usr/bin/busybox mkdir -p /mnt/rift /mnt/control /mnt/state /mnt/root\n" ++
             "status=125\n" ++
             "if /usr/bin/busybox mount -t virtiofs -o ro rift-rootfs /mnt/rift &&\n" ++
@@ -34,6 +36,13 @@ fn makeScript(allocator: std.mem.Allocator, command: []const []const u8, environ
             "  if /usr/bin/busybox mount -t tmpfs -o size=256m tmpfs /mnt/state &&\n" ++
             "     /usr/bin/busybox mkdir -p /mnt/state/upper /mnt/state/work &&\n" ++
             "     /usr/bin/busybox mount -t overlay overlay -o lowerdir=/mnt/rift,upperdir=/mnt/state/upper,workdir=/mnt/state/work /mnt/root; then\n" ++
+            "    /usr/bin/busybox --install -s /usr/bin >/dev/null 2>&1\n" ++
+            "    /usr/bin/busybox ip link set eth0 up >/dev/null 2>&1\n" ++
+            "    if /usr/bin/busybox udhcpc -i eth0 -q -n -t 3 -T 1 >/dev/null 2>&1; then\n" ++
+            "      /usr/bin/busybox mkdir -p /mnt/root/etc\n" ++
+            "      /usr/bin/busybox rm -f /mnt/root/etc/resolv.conf\n" ++
+            "      /usr/bin/busybox cp /etc/resolv.conf /mnt/root/etc/resolv.conf\n" ++
+            "    fi\n" ++
             "    /usr/bin/busybox env -i",
     );
     for (environment) |variable| {

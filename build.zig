@@ -44,6 +44,12 @@ pub fn build(b: *std.Build) void {
         check_run.step.dependOn(&sign_exe.step);
         b.step("run-check", "Run Alpine through the signed Rift CLI").dependOn(&check_run.step);
 
+        const check_run_network = b.addSystemCommand(&.{"/usr/bin/python3"});
+        check_run_network.addFileArg(b.path("scripts/check_run.py"));
+        check_run_network.addArgs(&.{ exe_path, "--network" });
+        check_run_network.step.dependOn(&sign_exe.step);
+        b.step("run-network-check", "Resolve DNS from a pulled Alpine container").dependOn(&check_run_network.step);
+
         const probe = b.addExecutable(.{
             .name = "rift-vm-probe",
             .root_module = b.createModule(.{
@@ -94,6 +100,17 @@ pub fn build(b: *std.Build) void {
         });
         check_share.step.dependOn(&sign.step);
         b.step("vm-share-check", "Mount a read-only host directory in Alpine").dependOn(&check_share.step);
+
+        const check_network = b.addSystemCommand(&.{"/usr/bin/python3"});
+        check_network.addFileArg(b.path("scripts/check_vm.py"));
+        check_network.addArgs(&.{
+            probe_path,
+            b.pathFromRoot(".zig-cache/guest/Image"),
+            b.pathFromRoot(".zig-cache/guest/initramfs-virt"),
+            "--network",
+        });
+        check_network.step.dependOn(&sign.step);
+        b.step("vm-network-check", "Acquire an IPv4 address with guest DHCP").dependOn(&check_network.step);
 
         const check_oci = b.addSystemCommand(&.{"/usr/bin/python3"});
         check_oci.addFileArg(b.path("scripts/check_vm.py"));

@@ -7,10 +7,11 @@ import sys
 
 
 def main() -> int:
-    if len(sys.argv) != 2:
-        print("usage: check_run.py <rift>", file=sys.stderr)
+    if len(sys.argv) not in (2, 3) or (len(sys.argv) == 3 and sys.argv[2] != "--network"):
+        print("usage: check_run.py <rift> [--network]", file=sys.stderr)
         return 2
     rift = Path(sys.argv[1])
+    network_only = len(sys.argv) == 3
     runtime = Path.home() / "Library/Application Support/Rift/runtime"
     before = set(runtime.iterdir()) if runtime.exists() else set()
 
@@ -23,9 +24,12 @@ def main() -> int:
         (["run", "alpine", "echo", "two words", "$(touch /tmp/rift-should-not-exist)"], 0,
          "two words $(touch /tmp/rift-should-not-exist)"),
     ]
+    if network_only:
+        cases = [(["run", "alpine", "nslookup", "example.com"], 0, "example.com")]
     for arguments, code, output in cases:
         result = subprocess.run([str(rift), *arguments], capture_output=True, text=True, timeout=45)
-        if result.returncode != code or result.stdout.strip() != output:
+        matches_output = output in result.stdout if network_only else result.stdout.strip() == output
+        if result.returncode != code or not matches_output:
             print(
                 f"Rift run check failed: {arguments}\n"
                 f"exit={result.returncode}, stdout={result.stdout!r}, stderr={result.stderr!r}",
@@ -36,7 +40,10 @@ def main() -> int:
     if after != before or Path("/tmp/rift-should-not-exist").exists():
         print("Rift run check failed: temporary state or injected host file remains", file=sys.stderr)
         return 1
-    print("Rift run check passed: image defaults, environment, output, exit status, quoting, cleanup")
+    if network_only:
+        print("Rift network check passed: container DNS lookup and cleanup")
+    else:
+        print("Rift run check passed: image defaults, environment, output, exit status, quoting, cleanup")
     return 0
 
 

@@ -13,10 +13,11 @@ import time
 
 def main() -> int:
     if len(sys.argv) not in (4, 5, 6) or (len(sys.argv) == 6 and sys.argv[4] != "--oci"):
-        print("usage: check_vm.py <probe> <ARM64 Image> <initramfs> [share | --oci <pulled reference>]", file=sys.stderr)
+        print("usage: check_vm.py <probe> <ARM64 Image> <initramfs> [share | --network | --oci <pulled reference>]", file=sys.stderr)
         return 2
     probe, kernel, initramfs = map(Path, sys.argv[1:4])
-    share = Path(sys.argv[4]) if len(sys.argv) == 5 else None
+    network = len(sys.argv) == 5 and sys.argv[4] == "--network"
+    share = Path(sys.argv[4]) if len(sys.argv) == 5 and not network else None
     oci = len(sys.argv) == 6
     if not kernel.is_file() or not initramfs.is_file():
         print("VM assets missing; run python3 scripts/prepare_guest.py", file=sys.stderr)
@@ -26,6 +27,7 @@ def main() -> int:
     process = subprocess.Popen(
         [str(probe), str(kernel), str(initramfs)]
         + ([str(share)] if share else [])
+        + (["--network"] if network else [])
         + (["--oci", sys.argv[5]] if oci else []),
         stdin=slave,
         stdout=slave,
@@ -70,6 +72,15 @@ def main() -> int:
                                 b"/usr/bin/busybox chroot /mnt/root /bin/echo RIFT_OCI_RUN_OK; "
                                 b"echo RIFT_OCI_EXIT:$?; "
                             )
+                    if network:
+                        command += (
+                            b"/usr/sbin/modprobe virtio_net; "
+                            b"/usr/bin/busybox ip link set eth0 up; "
+                            b"/usr/bin/busybox --install -s /usr/bin; "
+                            b"/usr/bin/busybox udhcpc -i eth0 -q -n -t 5 -T 2 && "
+                            b"/usr/bin/busybox ip -4 addr show eth0 && "
+                            b"/usr/bin/busybox nslookup example.com && echo RIFT_NETWORK_OK; "
+                        )
                     os.write(master, command + b"/usr/bin/busybox poweroff -f\n")
                     sent = True
             if process.poll() is not None and not readable:
@@ -93,10 +104,14 @@ def main() -> int:
     lines = output.decode("utf-8", errors="replace").replace("\r", "").splitlines()
     if result != 0 or "RIFT_VM_SMOKE_OK" not in lines or "aarch64" not in lines or (
         share and "RIFT_SHARE_OK" not in lines
-    ) or (oci and ("RIFT_OCI_RUN_OK" not in lines or "RIFT_OCI_EXIT:0" not in lines)):
+    ) or (oci and ("RIFT_OCI_RUN_OK" not in lines or "RIFT_OCI_EXIT:0" not in lines)) or (
+        network and "RIFT_NETWORK_OK" not in lines
+    ):
         print(f"VM smoke failed (exit={result}):\n" + "\n".join(lines)[-4000:], file=sys.stderr)
         return 1
-    if oci:
+    if network:
+        print("VM network smoke passed: virtio-net, DHCP, IPv4 address, DNS lookup")
+    elif oci:
         print("VM OCI smoke passed: pulled Alpine rootfs, writable overlay, chroot command, shutdown")
     else:
         print("VM smoke passed: Alpine aarch64 boot, " + ("read-only share, " if share else "") + "command, shutdown")

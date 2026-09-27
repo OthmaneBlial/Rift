@@ -4,7 +4,7 @@
 
 **No Docker, daemon, or Docker Desktop. One binary is the distribution target.**
 
-Rift is an early-stage Zig container runtime for Apple Silicon Macs. It can pull public OCI images and run a command in a short-lived Linux VM. The current build needs separately installed, verified guest boot files. Networking, volumes, and detached containers remain unfinished.
+Rift is an early-stage Zig container runtime for Apple Silicon Macs. It can pull public OCI images and run a command in a short-lived Linux VM. The current build needs separately installed, verified guest boot files. Outbound networking works through the VM; port forwarding, volumes, and detached containers remain unfinished.
 
 ## Current commands
 
@@ -30,6 +30,7 @@ zig build
 zig build test
 zig build run -- pull alpine
 zig build run-check
+zig build run-network-check
 zig build run -- system info
 ```
 
@@ -41,10 +42,11 @@ To check the macOS VM bridge on Apple Silicon, prepare the pinned Alpine guest a
 python3 scripts/prepare_guest.py
 zig build vm-check
 zig build vm-share-check
+zig build vm-network-check
 zig build oci-vm-check
 ```
 
-These checks boot Alpine, mount a read-only host directory, and run `/bin/echo` from a pulled Alpine root filesystem inside the VM. Run `rift pull alpine` before `oci-vm-check` or `run-check`.
+These checks boot Alpine, mount a read-only host directory, obtain a guest DHCP lease, and run `/bin/echo` from a pulled Alpine root filesystem inside the VM. Run `rift pull alpine` before `oci-vm-check`, `run-check`, or `run-network-check`. Network checks require external DNS access.
 
 To assemble a pulled Alpine root filesystem locally, use the manifest digest shown by `rift images`:
 
@@ -75,7 +77,8 @@ No Docker Engine, Docker CLI, Docker Desktop, or container daemon is part of the
 - [x] Basic foreground OCI command execution through Rift's public CLI
 - [x] Image entrypoint, command, and environment defaults
 - [ ] Non-root user and non-root working directory support
-- [ ] Detached lifecycle, structured logs, networking, volumes, and broader cleanup
+- [x] Outbound NAT and DNS for foreground commands
+- [ ] Port forwarding, detached lifecycle, structured logs, volumes, and broader cleanup
 
 Each `run` is temporary, including runs without `--rm`. The CLI relays console output and returns the guest command's exit status. There is no release artifact yet. Do not use Rift as a Docker replacement today.
 

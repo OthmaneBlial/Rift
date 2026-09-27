@@ -17,10 +17,11 @@ pub fn main(init: std.process.Init) void {
         return;
     }
     if (args.len != 3 and args.len != 4) {
-        std.debug.print("usage: rift-vm-probe <ARM64 Image> <initramfs> [read-only share | --oci <pulled reference>]\n", .{});
+        std.debug.print("usage: rift-vm-probe <ARM64 Image> <initramfs> [read-only share | --network | --oci <pulled reference>]\n", .{});
         std.process.exit(2);
     }
-    vm.run(allocator, args[1], args[2], "console=hvc0 rdinit=/usr/bin/sh", if (args.len == 4) args[3] else null, null, 0, 1) catch |err| {
+    const network = args.len == 4 and std.mem.eql(u8, args[3], "--network");
+    vm.run(allocator, args[1], args[2], "console=hvc0 rdinit=/usr/bin/sh", if (args.len == 4 and !network) args[3] else null, null, network, 0, 1) catch |err| {
         std.debug.print("rift-vm-probe: {s}\n", .{@errorName(err)});
         std.process.exit(1);
     };
@@ -53,5 +54,5 @@ fn runOci(init: std.process.Init, kernel: []const u8, initramfs: []const u8, ima
 
     var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const path_size = try root.realPath(init.io, &path_buffer);
-    try vm.run(allocator, kernel, initramfs, "console=hvc0 rdinit=/usr/bin/sh", path_buffer[0..path_size], null, 0, 1);
+    try vm.run(allocator, kernel, initramfs, "console=hvc0 rdinit=/usr/bin/sh", path_buffer[0..path_size], null, false, 0, 1);
 }

@@ -21,7 +21,7 @@
 @end
 
 int rift_vm_run(const char *kernel_path, const char *initramfs_path, const char *command_line,
-                const char *share_path, const char *control_path,
+                const char *share_path, const char *control_path, int network_enabled,
                 int input_fd, int output_fd) {
     @autoreleasepool {
         if (![NSThread isMainThread] || ![VZVirtualMachine isSupported]) return 2;
@@ -71,6 +71,11 @@ int rift_vm_run(const char *kernel_path, const char *initramfs_path, const char 
             [shares addObject:filesystem];
         }
         config.directorySharingDevices = shares;
+        if (network_enabled) {
+            VZVirtioNetworkDeviceConfiguration *network = [[VZVirtioNetworkDeviceConfiguration alloc] init];
+            network.attachment = [[VZNATNetworkDeviceAttachment alloc] init];
+            config.networkDevices = @[network];
+        }
         NSError *error = nil;
         if (![config validateWithError:&error]) {
             fprintf(stderr, "rift-vm: invalid configuration: %s\n", error.description.UTF8String);
