@@ -54,7 +54,11 @@ def main() -> int:
             cleaner = blocked_until_unlock(binary, env, lock, ["clean", "--yes"])
             if cleaner.returncode != 0 or "No unreferenced image blobs found." not in cleaner.stdout:
                 raise RuntimeError(f"cache cleanup did not resume after shared lock release: {cleaner!r}")
-    print("Rift cache lock check passed: shared readers, exclusive pull and cleanup, cross-process waiting")
+            fcntl.flock(lock, fcntl.LOCK_SH)
+            remover = blocked_until_unlock(binary, env, lock, ["rmi", "alpine"])
+            if remover.returncode == 0 or "image reference was not found" not in remover.stderr:
+                raise RuntimeError(f"image removal did not resume after shared lock release: {remover!r}")
+    print("Rift cache lock check passed: shared readers, exclusive pull, cleanup, and removal")
     return 0
 
 

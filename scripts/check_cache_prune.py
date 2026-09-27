@@ -57,9 +57,19 @@ def main() -> int:
         if rejected.returncode == 0 or not protected.is_file() or "metadata is corrupt" not in rejected.stderr:
             raise RuntimeError(f"corrupt image metadata did not stop cache pruning: {rejected!r}")
         bad_record.unlink()
+        missing = call(binary, env, "rmi", "rift-does-not-exist")
+        if missing.returncode == 0 or "image reference was not found" not in missing.stderr:
+            raise RuntimeError(f"missing local image removal did not fail: {missing!r}")
+        removed_image = call(binary, env, "rmi", "alpine")
+        images = call(binary, env, "images")
+        if removed_image.returncode != 0 or images.returncode != 0 or "library/alpine:latest" in images.stdout:
+            raise RuntimeError(f"local image removal failed: {removed_image!r} {images!r}")
+        reclaim = call(binary, env, "clean", "--yes")
+        if reclaim.returncode != 0:
+            raise RuntimeError(f"removed image blobs could not be reclaimed: {reclaim!r}")
         if list((data / "runtime").iterdir()):
             raise RuntimeError("cache check left runtime staging behind")
-    print("Rift cache prune check passed: preview, confirmed cleanup, preserved image, corrupt-record safety")
+    print("Rift cache prune check passed: preview, cleanup, preserved image, corrupt-record safety, local image removal")
     return 0
 
 

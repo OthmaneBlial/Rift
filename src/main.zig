@@ -24,6 +24,7 @@ fn printHelp(writer: *Io.Writer) Io.Writer.Error!void {
             "  clean [--yes]      Preview or remove stale staging and unused image blobs\n" ++
             "  images             List locally pulled images\n" ++
             "  pull <image>       Pull an OCI image for this host\n" ++
+            "  rmi <image>        Remove a local image reference\n" ++
             "  run [-d] [--rm] [-p HOST:GUEST] [-w DIR] [-e KEY=VALUE] [-v HOST:DIR[:ro|rw]] <image> [command] [args...] Run an image\n" ++
             "  ps                 List detached containers\n" ++
             "  logs <id>          Show a detached container's output\n" ++
@@ -73,6 +74,12 @@ fn dispatch(args: []const []const u8, writer: *Io.Writer, init: ?std.process.Ini
     if (args.len > 0 and std.mem.eql(u8, args[0], "images")) {
         if (args.len != 1) return error.InvalidArguments;
         try listImages(init orelse return error.CommandUnavailable, writer);
+        return 0;
+    }
+
+    if (args.len > 0 and std.mem.eql(u8, args[0], "rmi")) {
+        if (args.len != 2) return error.InvalidArguments;
+        try removeImage(init orelse return error.CommandUnavailable, args[1], writer);
         return 0;
     }
 
@@ -193,6 +200,19 @@ fn listImages(init: std.process.Init, writer: *Io.Writer) !void {
             record.layer_count,
         });
     }
+}
+
+fn removeImage(init: std.process.Init, image_name: []const u8, writer: *Io.Writer) !void {
+    const allocator = init.arena.allocator();
+    var image = try reference.parse(allocator, image_name);
+    defer image.deinit(allocator);
+    const canonical = try image.formatAlloc(allocator);
+    var store = try openImageStore(init);
+    defer store.deinit();
+    try store.lockExclusive();
+    defer store.unlock();
+    try store.removeImage(allocator, canonical);
+    try writer.print("Removed local image reference {s}. Run 'rift clean' to preview unused blobs.\n", .{canonical});
 }
 
 fn openImageStore(init: std.process.Init) !storage.BlobStore {

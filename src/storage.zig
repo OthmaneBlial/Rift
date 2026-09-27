@@ -70,6 +70,16 @@ pub const BlobStore = struct {
         try atomic.replace(store.io);
     }
 
+    /// Requires the exclusive cache lock. Blobs remain until a confirmed clean.
+    pub fn removeImage(store: BlobStore, allocator: std.mem.Allocator, canonical_reference: []const u8) !void {
+        const filename = try imageFilename(allocator, canonical_reference);
+        defer allocator.free(filename);
+        store.images.deleteFile(store.io, filename) catch |err| switch (err) {
+            error.FileNotFound => return error.ImageNotFound,
+            else => return err,
+        };
+    }
+
     pub fn listImages(store: BlobStore, allocator: std.mem.Allocator) anyerror![]ImageRecord {
         var records: std.ArrayList(ImageRecord) = .empty;
         errdefer {
@@ -494,8 +504,8 @@ test "cache pruning preserves shared and referenced blobs" {
     try store.applyPrune(first);
     try std.testing.expect(!(try store.containsVerified(orphan, 6)));
 
-    const record_a_name = try imageFilename(allocator, reference_a);
-    try store.images.deleteFile(store.io, record_a_name);
+    try store.removeImage(allocator, reference_a);
+    try std.testing.expectError(error.ImageNotFound, store.removeImage(allocator, reference_a));
     const second = try store.planPrune(allocator);
     defer second.deinit(allocator);
     try std.testing.expectEqual(@as(usize, 3), second.candidates.len);

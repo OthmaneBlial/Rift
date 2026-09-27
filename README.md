@@ -27,9 +27,11 @@ rift ps
 rift logs <container-id>
 rift stop <container-id>
 rift rm <container-id>
+rift rmi alpine
+rift clean
 ```
 
-Image pulls use anonymous registry access and save SHA-256-verified OCI blobs and reference metadata under `~/Library/Application Support/Rift`. `run` pulls an uncached image automatically; `pull` fetches or refreshes it explicitly. `system df` reports logical file bytes. `clean` previews abandoned runtime staging and unreferenced image blobs; `clean --yes` removes those candidates. Referenced images, active VMs, guest boot files, and container logs are preserved. If image metadata is corrupt, cache pruning stops without deleting blobs.
+Image pulls use anonymous registry access and save SHA-256-verified OCI blobs and reference metadata under `~/Library/Application Support/Rift`. `run` pulls an uncached image automatically; `pull` fetches or refreshes it explicitly. `rmi <image>` removes a local image reference; `clean` previews its now unused blobs, and `clean --yes` reclaims them. `system df` reports logical file bytes. `clean` also previews abandoned runtime staging. Referenced images, active VMs, guest boot files, and container logs are preserved. If image metadata is corrupt, cache pruning stops without deleting blobs.
 
 `run` uses the image's `Entrypoint`, `Cmd`, `Env`, `User`, and absolute `WorkingDir` defaults, with command, `-e KEY=VALUE`, and `-w` overrides. Environment overrides must include a value; Rift does not copy host variables implicitly. A static guest executor applies the working directory and numeric or named UID/GID from the image, including images without `/bin/sh`.
 
@@ -113,7 +115,7 @@ No Docker Engine, Docker CLI, Docker Desktop, or container daemon is part of the
 - [x] Read-only disk usage report by storage category
 - [x] Local Virtualization.framework bridge and Alpine guest boot check
 - [x] First-run download and verification of pinned guest boot files from the binary
-- [ ] Image removal
+- [x] Local image reference removal with `rmi`; confirmed blob reclamation with `clean --yes`
 - [x] Initial safe extraction of tar, gzip, and zstd layers, including OCI whiteouts and regular-file hardlinks
 - [x] Local root filesystem assembly from verified manifest and layer blobs
 - [x] Local VM smoke that executes pulled Alpine BusyBox through a read-only share
@@ -130,7 +132,7 @@ No Docker Engine, Docker CLI, Docker Desktop, or container daemon is part of the
 - [x] Preview and confirmed pruning of unreferenced image blobs under a cache lock
 - [ ] Structured logs and file volumes
 
-Foreground runs remove their temporary state on normal completion, including runs without `--rm`. Detached runs keep their logs and status until `rift rm`; the VM and temporary root filesystem are removed on stop or exit. Local checks have served the nginx welcome page over a forwarded localhost port, including with `run -d`. An interrupted foreground run can leave staging, which `rift clean` can preview and remove after the process exits. Image removal is not exposed yet; `clean` reclaims blobs left by interrupted or refreshed pulls when no recorded image uses them. A local release archive is packaged and checked, but no public notarized release exists yet. Do not use Rift as a Docker replacement today.
+Foreground runs remove their temporary state on normal completion, including runs without `--rm`. Detached runs keep their logs and status until `rift rm`; the VM and temporary root filesystem are removed on stop or exit. Local checks have served the nginx welcome page over a forwarded localhost port, including with `run -d`. An interrupted foreground run can leave staging, which `rift clean` can preview and remove after the process exits. `clean` also reclaims blobs left by interrupted or refreshed pulls when no recorded image uses them. A local release archive is packaged and checked, but no public notarized release exists yet. Do not use Rift as a Docker replacement today.
 
 ## License
 

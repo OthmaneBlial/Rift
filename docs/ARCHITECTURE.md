@@ -2,7 +2,7 @@
 
 ## Current state
 
-`help`, `version`, `system info`, `system df`, `clean`, public `pull`, `images`, foreground and detached `run`, `ps`, `logs`, `stop`, and `rm` work. `system df` counts logical file bytes in each Rift storage category without changing files. `clean` previews stale runtime staging and unreferenced image blobs; `clean --yes` removes them under process and cache locks. It keeps referenced images, logs, guest boot files, and active VM staging. Pull downloads and verifies OCI metadata and blobs for the host architecture, then records the resolved reference locally. Foreground and detached `run` pull an uncached image automatically on Apple Silicon. A small statically linked Linux guest executor applies the image entrypoint, command, environment, numeric or named user/group, and absolute working directory. `-e KEY=VALUE` overrides image environment variables and `-w` overrides the directory. Outbound NAT, DNS, one localhost TCP port mapping, and explicit directory volumes work; file volumes remain unfinished.
+`help`, `version`, `system info`, `system df`, `clean`, public `pull`, `images`, `rmi`, foreground and detached `run`, `ps`, `logs`, `stop`, and `rm` work. `system df` counts logical file bytes in each Rift storage category without changing files. `rmi` removes one local image reference under the cache lock. `clean` previews stale runtime staging and unreferenced image blobs; `clean --yes` removes them under process and cache locks. It keeps referenced images, logs, guest boot files, and active VM staging. Pull downloads and verifies OCI metadata and blobs for the host architecture, then records the resolved reference locally. Foreground and detached `run` pull an uncached image automatically on Apple Silicon. A small statically linked Linux guest executor applies the image entrypoint, command, environment, numeric or named user/group, and absolute working directory. `-e KEY=VALUE` overrides image environment variables and `-w` overrides the directory. Outbound NAT, DNS, one localhost TCP port mapping, and explicit directory volumes work; file volumes remain unfinished.
 
 Rift's Zig/Objective-C VM bridge boots an Alpine ARM64 kernel and initramfs to a shell, runs a command, and shuts down through the local `zig build vm-check` gate. On first use, `rift run` downloads a pinned, SHA-256-verified Alpine ISO, extracts its boot files with macOS's built-in `tar`, and installs verified copies under the user's Application Support directory. Alpine packages its ARM64 kernel as a compressed EFI zboot image; Rift extracts the uncompressed `Image` needed for direct boot. `scripts/prepare_guest.py` separately prepares the same files for local VM probes.
 
@@ -28,7 +28,7 @@ Each VM is currently configured for 2 virtual CPUs and 256 MiB of guest RAM. Loc
 
 ## Planned execution path
 
-`rift pull alpine` resolves the reference, authenticates anonymously to public registries, selects the host's Linux architecture, fetches each required blob, verifies its digest, and publishes verified data into the content-addressed store. `rift images` lists locally recorded references and their platform manifest digests.
+`rift pull alpine` resolves the reference, authenticates anonymously to public registries, selects the host's Linux architecture, fetches each required blob, verifies its digest, and publishes verified data into the content-addressed store. `rift images` lists locally recorded references and their platform manifest digests. `rift rmi alpine` removes its local reference; `rift clean --yes` later reclaims blobs no other reference uses.
 
 `rift run --rm alpine echo hello` assembles the image root, starts a Linux VM with the pinned Alpine kernel, mounts the read-only image through VirtioFS, starts the command on an ephemeral writable overlay, relays output, returns its exit status, and removes temporary host state. The guest currently uses `chroot` inside a VM; Linux namespace and capability controls still need implementation.
 
@@ -65,7 +65,7 @@ Boot time, memory, binary size, image storage, and cleanup behavior will be meas
 1. **Done:** OCI references, indexes, manifests, and platform selection with tests.
 2. **Done:** Streaming content-addressed SHA-256 storage with atomic publication and verification.
 3. **Done:** Public registry pulls, authentication, and local image metadata.
-4. Initial secure image layer extraction, regular-file hardlinks, and image listing; image removal remains.
+4. Initial secure image layer extraction, regular-file hardlinks, image listing, and reference removal work; full filesystem metadata remains.
 5. A bootable Linux guest and a minimal command result path, proven locally.
 6. Alpine and nginx run through the public CLI; basic detached lifecycle and plain logs work. Full OCI process settings and broader cleanup remain.
 7. Outbound networking, one localhost TCP port mapping, and explicit directory volumes are proven locally; file volumes remain.
