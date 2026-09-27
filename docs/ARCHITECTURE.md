@@ -4,6 +4,8 @@
 
 `help`, `version`, `system info`, public `pull`, and `images` work. Pull downloads and verifies OCI metadata and blobs for the host architecture, then records the resolved reference locally. Rift cannot start a VM or execute a container. The rest of this document records the intended design and work still to prove.
 
+A local Virtualization.framework probe booted an Alpine ARM64 kernel and initramfs to a shell and ran a command. `scripts/prepare_guest.py` reproduces those guest files from a pinned, SHA-256-verified Alpine ISO. Alpine packages its ARM64 kernel as a compressed EFI zboot image; the script extracts the uncompressed `Image` needed for direct boot. The probe is not yet wired into Rift.
+
 ## Runtime shape
 
 Linux containers need a Linux kernel. On macOS, Rift will run workloads inside a small Linux virtual machine managed by Apple's Virtualization.framework. The host CLI will own the VM lifecycle; the Linux guest will own container namespaces and process execution.
