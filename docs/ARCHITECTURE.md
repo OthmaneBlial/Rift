@@ -2,7 +2,7 @@
 
 ## Current state
 
-`help`, `version`, `system info`, `system df`, `clean`, public `pull`, `images`, foreground and detached `run`, `ps`, `logs`, `stop`, and `rm` work. `system df` counts logical file bytes in each Rift storage category without changing files. `clean` previews stale runtime staging and `clean --yes` removes only directories whose process lock is released; it keeps images, logs, and active VM staging. Pull downloads and verifies OCI metadata and blobs for the host architecture, then records the resolved reference locally. Foreground and detached `run` pull an uncached image automatically on Apple Silicon. They apply image entrypoint, command, environment, and absolute working directory defaults; `-w` overrides the directory. Changing directories currently requires `/bin/sh` inside the image. Images requesting a non-root user are rejected. Outbound NAT, DNS, and one localhost TCP port mapping work; volumes remain unfinished.
+`help`, `version`, `system info`, `system df`, `clean`, public `pull`, `images`, foreground and detached `run`, `ps`, `logs`, `stop`, and `rm` work. `system df` counts logical file bytes in each Rift storage category without changing files. `clean` previews stale runtime staging and `clean --yes` removes only directories whose process lock is released; it keeps images, logs, and active VM staging. Pull downloads and verifies OCI metadata and blobs for the host architecture, then records the resolved reference locally. Foreground and detached `run` pull an uncached image automatically on Apple Silicon. A small statically linked Linux guest executor applies the image entrypoint, command, environment, numeric or named user/group, and absolute working directory; `-w` overrides the directory. Outbound NAT, DNS, and one localhost TCP port mapping work; volumes remain unfinished.
 
 Rift's Zig/Objective-C VM bridge boots an Alpine ARM64 kernel and initramfs to a shell, runs a command, and shuts down through the local `zig build vm-check` gate. On first use, `rift run` downloads a pinned, SHA-256-verified Alpine ISO, extracts its boot files with macOS's built-in `tar`, and installs verified copies under the user's Application Support directory. Alpine packages its ARM64 kernel as a compressed EFI zboot image; Rift extracts the uncompressed `Image` needed for direct boot. `scripts/prepare_guest.py` separately prepares the same files for local VM probes.
 
@@ -19,10 +19,10 @@ The intended boundaries are:
 3. **Image store** — content-addressed blobs and image metadata under the user's Application Support directory.
 4. **Layer installer** — safe tar extraction and root filesystem assembly, without following paths outside the image root.
 5. **VM controller** — Linux kernel and initramfs boot, console, guest communication, and shutdown through Virtualization.framework.
-6. **Guest execution** — a generated initramfs script currently mounts the image and starts explicit commands. A guest agent with OCI process settings and stricter isolation remains planned.
+6. **Guest execution** — a generated initramfs script mounts the image and invokes a static helper for chroot, working directory, user/group, and command execution. Stricter OCI process isolation remains planned.
 7. **Networking and mounts** — outbound guest networking and one localhost TCP port mapping work; explicit host directory shares remain planned.
 
-The host-facing implementation stays in Zig. The guest agent is also intended to be Zig. Apple framework calls should remain a narrow macOS-only boundary.
+The host-facing implementation stays in Zig. A small static C helper handles Linux process setup inside the guest and is embedded in the Rift binary; Objective-C remains a narrow macOS framework bridge.
 
 Each VM is currently configured for 2 virtual CPUs and 256 MiB of guest RAM. Local Alpine command and detached nginx HTTP checks pass with this setting. It is a fixed limit for now, not a measurement of total host memory used.
 

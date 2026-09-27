@@ -35,10 +35,8 @@ pub fn execute(init: std.process.Init, arguments: []const []const u8, stop_path:
     } else return error.ImageNotFound;
     const image_config = try config.load(allocator, store, manifest_digest);
     const process = image_config.config orelse config.Process{};
-    if (process.User) |user| {
-        if (user.len != 0 and !std.mem.eql(u8, user, "root") and !std.mem.eql(u8, user, "0")) return error.UnsupportedImageUser;
-    }
-    const working_dir = options.working_dir orelse process.WorkingDir orelse "/";
+    const requested_working_dir = options.working_dir orelse process.WorkingDir orelse "/";
+    const working_dir = if (requested_working_dir.len == 0) "/" else requested_working_dir;
     if (!validWorkingDirectory(working_dir)) return error.UnsupportedWorkingDirectory;
     const command = try config.command(allocator, process, arguments[offset + 1 ..]);
 
@@ -83,7 +81,7 @@ pub fn execute(init: std.process.Init, arguments: []const []const u8, stop_path:
     defer control.close(init.io);
     try rootfs.assemble(allocator, init.io, image_root, store, manifest_digest);
     const interactive = try Io.File.stdin().isTty(init.io);
-    try guest.writeInitramfs(allocator, init.io, base_initramfs, run_dir, command, process.Env orelse &.{}, working_dir, interactive, port != null);
+    try guest.writeInitramfs(allocator, init.io, base_initramfs, run_dir, command, process.Env orelse &.{}, working_dir, process.User orelse "", interactive, port != null);
 
     var root_path_buffer: [Io.Dir.max_path_bytes]u8 = undefined;
     var control_path_buffer: [Io.Dir.max_path_bytes]u8 = undefined;

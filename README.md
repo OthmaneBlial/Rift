@@ -27,7 +27,7 @@ rift stop <container-id>
 rift rm <container-id>
 ```
 
-Image pulls use anonymous registry access and save SHA-256-verified OCI blobs and reference metadata under `~/Library/Application Support/Rift`. `run` pulls an image automatically when it is not cached; `pull` remains available to fetch or refresh it explicitly. `system df` reports logical file bytes by category without modifying storage. `clean` previews abandoned runtime staging; `clean --yes` removes only staging whose Rift process lock has been released. Image cache, active VMs, and container logs are preserved. `run` uses the image's `Entrypoint`, `Cmd`, `Env`, and absolute `WorkingDir` defaults, or your command and `-w` override. A working directory other than `/` currently requires `/bin/sh` inside the image. Each run gets a disposable writable overlay inside its own Linux VM, currently configured with 256 MiB of guest RAM. `-p` accepts one `HOST:GUEST` TCP mapping bound to `127.0.0.1`. `run -d` starts one background Rift process per VM and prints its container ID. `stop` currently forces the VM off; `--rm` is unavailable with `-d`. Images requesting a non-root user are rejected for now. Private registry credentials are not implemented.
+Image pulls use anonymous registry access and save SHA-256-verified OCI blobs and reference metadata under `~/Library/Application Support/Rift`. `run` pulls an image automatically when it is not cached; `pull` remains available to fetch or refresh it explicitly. `system df` reports logical file bytes by category without modifying storage. `clean` previews abandoned runtime staging; `clean --yes` removes only staging whose Rift process lock has been released. Image cache, active VMs, and container logs are preserved. `run` uses the image's `Entrypoint`, `Cmd`, `Env`, `User`, and absolute `WorkingDir` defaults, or your command and `-w` override. A static guest executor applies the working directory and numeric or named UID/GID from the image, including images without `/bin/sh`. Each run gets a disposable writable overlay inside its own Linux VM, currently configured with 256 MiB of guest RAM. `-p` accepts one `HOST:GUEST` TCP mapping bound to `127.0.0.1`. `run -d` starts one background Rift process per VM and prints its container ID. `stop` currently forces the VM off; `--rm` is unavailable with `-d`. Private registry credentials are not implemented.
 
 ## Build
 
@@ -43,7 +43,7 @@ zig build run-network-check
 zig build run-port-check
 zig build run-detached-check
 zig build run-auto-pull-check
-zig build run-workdir-check
+zig build run-process-check
 zig build run -- system info
 ```
 
@@ -71,7 +71,7 @@ zig build vm-network-check
 zig build oci-vm-check
 ```
 
-These checks boot Alpine, mount a read-only host directory, obtain a guest DHCP lease, and run `/bin/echo` from an Alpine root filesystem inside the VM. Run `rift pull alpine` before the direct `oci-vm-check` probe and `run-workdir-check` fixture. Other public CLI run checks pull Alpine automatically if absent; `run-auto-pull-check` uses an empty temporary HOME and requires network access for the registry and the pinned guest ISO. The DNS check also requires external DNS access.
+These checks boot Alpine, mount a read-only host directory, obtain a guest DHCP lease, and run `/bin/echo` from an Alpine root filesystem inside the VM. Run `rift pull alpine` before the direct `oci-vm-check` probe and `run-process-check` fixture. Other public CLI run checks pull Alpine automatically if absent; `run-auto-pull-check` uses an empty temporary HOME and requires network access for the registry and the pinned guest ISO. The DNS check also requires external DNS access.
 
 To assemble a pulled Alpine root filesystem locally, use the manifest digest shown by `rift images`:
 
@@ -81,7 +81,7 @@ zig run src/rootfs_probe.zig -- "$HOME/Library/Application Support/Rift" sha256:
 
 ## Runtime plan
 
-macOS uses a Linux VM to run Linux containers. Rift is being designed around Apple's Virtualization.framework, an OCI image store, and a small Linux guest agent. See [the architecture](docs/ARCHITECTURE.md) for the proposed boundaries, execution path, security constraints, and current status.
+macOS uses a Linux VM to run Linux containers. Rift uses Apple's Virtualization.framework, an OCI image store, and a small embedded Linux process helper. See [the architecture](docs/ARCHITECTURE.md) for the boundaries, execution path, security constraints, and current status.
 
 No Docker Engine, Docker CLI, Docker Desktop, or container daemon is part of the design. Each detached container has one background Rift process that owns its VM; there is no shared always-on manager.
 
@@ -104,8 +104,8 @@ No Docker Engine, Docker CLI, Docker Desktop, or container daemon is part of the
 - [ ] Complete OCI filesystem metadata and special files
 - [x] Basic foreground OCI command execution through Rift's public CLI
 - [x] Image entrypoint, command, and environment defaults
-- [x] Absolute image `WorkingDir` and `-w` override when the image contains `/bin/sh`
-- [ ] Non-root user and shell-free working directory support
+- [x] Absolute image `WorkingDir`, `-w` override, and numeric or named image `User` through a static guest executor
+- [ ] Broader OCI process settings and isolation
 - [x] Outbound NAT and DNS for foreground commands
 - [x] One localhost TCP port mapping for foreground commands
 - [x] Detached run, process listing, plain logs, stop, and remove

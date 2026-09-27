@@ -3,6 +3,20 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    const guest_target = b.resolveTargetQuery(.{ .cpu_arch = .aarch64, .os_tag = .linux, .abi = .musl });
+    const guest_exec = b.addExecutable(.{
+        .name = "rift-guest-exec",
+        .root_module = b.createModule(.{ .target = guest_target, .optimize = .ReleaseSmall, .link_libc = true }),
+        .linkage = .static,
+    });
+    guest_exec.root_module.addCSourceFile(.{ .file = b.path("src/guest_exec.c"), .flags = &.{"-Os"} });
+    const guest_files = b.addWriteFiles();
+    _ = guest_files.addCopyFile(guest_exec.getEmittedBin(), "rift-guest-exec");
+    const guest_module = b.createModule(.{
+        .root_source_file = guest_files.add("guest_binary.zig", "pub const bytes = @embedFile(\"rift-guest-exec\");\n"),
+        .target = target,
+        .optimize = optimize,
+    });
     const exe = b.addExecutable(.{
         .name = "rift",
         .root_module = b.createModule(.{
@@ -11,6 +25,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
+    exe.root_module.addImport("guest_binary", guest_module);
     const install_exe = b.addInstallArtifact(exe, .{});
     b.getInstallStep().dependOn(&install_exe.step);
 
@@ -69,11 +84,11 @@ pub fn build(b: *std.Build) void {
         check_auto_pull.step.dependOn(&sign_exe.step);
         b.step("run-auto-pull-check", "Run Alpine from an empty HOME without a separate pull").dependOn(&check_auto_pull.step);
 
-        const check_workdir = b.addSystemCommand(&.{"/usr/bin/python3"});
-        check_workdir.addFileArg(b.path("scripts/check_workdir.py"));
-        check_workdir.addArg(exe_path);
-        check_workdir.step.dependOn(&sign_exe.step);
-        b.step("run-workdir-check", "Apply an OCI image working directory and CLI override").dependOn(&check_workdir.step);
+        const check_process = b.addSystemCommand(&.{"/usr/bin/python3"});
+        check_process.addFileArg(b.path("scripts/check_process.py"));
+        check_process.addArg(exe_path);
+        check_process.step.dependOn(&sign_exe.step);
+        b.step("run-process-check", "Apply OCI working directory and user settings").dependOn(&check_process.step);
 
         const benchmark = b.addSystemCommand(&.{"/usr/bin/python3"});
         benchmark.addFileArg(b.path("scripts/benchmark.py"));
