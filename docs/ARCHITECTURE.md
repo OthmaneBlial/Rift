@@ -20,7 +20,7 @@ The intended boundaries are:
 4. **Layer installer** — safe tar extraction and root filesystem assembly, without following paths outside the image root.
 5. **VM controller** — Linux kernel and initramfs boot, console, guest communication, and shutdown through Virtualization.framework.
 6. **Guest execution** — a generated initramfs script mounts the image and invokes a static helper for private PID/mount namespaces, basic devices and `/proc`, chroot, working directory, user/group, limited capabilities, and command execution. Configurable OCI capabilities, seccomp, and resource controls remain planned.
-7. **Networking and mounts** — outbound guest networking, one localhost TCP port mapping, and explicit host directory shares work; file mounts remain planned.
+7. **Networking and mounts** — outbound guest networking, one localhost TCP port mapping, and explicit file and directory shares work; file sources must share a filesystem with runtime storage.
 
 The host-facing implementation stays in Zig. A small static C helper handles Linux process setup inside the guest and is embedded in the Rift binary; Objective-C remains a narrow macOS framework bridge.
 
