@@ -25,7 +25,10 @@ fn printHelp(writer: *Io.Writer) Io.Writer.Error!void {
             "  images             List locally pulled images\n" ++
             "  pull <image>       Pull an OCI image for this host\n" ++
             "  rmi <image>        Remove a local image reference\n" ++
-            "  run [-d] [--rm] [-p HOST:GUEST] [-w DIR] [-e KEY=VALUE] [-v HOST:TARGET[:ro|rw]] <image> [command] [args...] Run an image\n" ++
+            "  run [options] <image> [command] [args...] Run in the foreground\n" ++
+            "  run -d [options] <image> [command] [args...] Run detached\n" ++
+            "    Options: --rm (foreground only), -p HOST:GUEST, -w DIR,\n" ++
+            "             -e KEY=VALUE, -v HOST:TARGET[:ro|rw]\n" ++
             "  ps                 List detached containers\n" ++
             "  inspect <id>       Show detached container details\n" ++
             "  logs <id>          Show a detached container's output\n" ++
@@ -49,17 +52,20 @@ fn dispatch(args: []const []const u8, writer: *Io.Writer, init: ?std.process.Ini
         return 0;
     }
 
-    if (args.len == 2 and std.mem.eql(u8, args[0], "system") and std.mem.eql(u8, args[1], "info")) {
-        try writer.print(
-            "Rift {s}\nHost OS: {s}\nHost architecture: {s}\n",
-            .{ version, @tagName(builtin.os.tag), @tagName(builtin.cpu.arch) },
-        );
-        return 0;
-    }
-
-    if (args.len == 2 and std.mem.eql(u8, args[0], "system") and std.mem.eql(u8, args[1], "df")) {
-        try reportDisk(init orelse return error.CommandUnavailable, writer);
-        return 0;
+    if (args.len > 0 and std.mem.eql(u8, args[0], "system")) {
+        if (args.len != 2) return error.InvalidArguments;
+        if (std.mem.eql(u8, args[1], "info")) {
+            try writer.print(
+                "Rift {s}\nHost OS: {s}\nHost architecture: {s}\n",
+                .{ version, @tagName(builtin.os.tag), @tagName(builtin.cpu.arch) },
+            );
+            return 0;
+        }
+        if (std.mem.eql(u8, args[1], "df")) {
+            try reportDisk(init orelse return error.CommandUnavailable, writer);
+            return 0;
+        }
+        return error.InvalidArguments;
     }
 
     if (args.len > 0 and std.mem.eql(u8, args[0], "clean")) {
@@ -98,7 +104,8 @@ fn dispatch(args: []const []const u8, writer: *Io.Writer, init: ?std.process.Ini
         return runtime.execute(process, run_args, null, null, null);
     }
 
-    if (args.len == 1 and std.mem.eql(u8, args[0], "ps")) {
+    if (args.len > 0 and std.mem.eql(u8, args[0], "ps")) {
+        if (args.len != 1) return error.InvalidArguments;
         try containers.list(init orelse return error.CommandUnavailable, writer);
         return 0;
     }
@@ -107,7 +114,8 @@ fn dispatch(args: []const []const u8, writer: *Io.Writer, init: ?std.process.Ini
         try containers.inspect(init orelse return error.CommandUnavailable, args[1], writer);
         return 0;
     }
-    if (args.len == 2 and std.mem.eql(u8, args[0], "logs")) {
+    if (args.len > 0 and std.mem.eql(u8, args[0], "logs")) {
+        if (args.len != 2) return error.InvalidArguments;
         try containers.logs(init orelse return error.CommandUnavailable, args[1], writer);
         return 0;
     }
@@ -115,23 +123,27 @@ fn dispatch(args: []const []const u8, writer: *Io.Writer, init: ?std.process.Ini
         if (args.len < 3) return error.InvalidArguments;
         return containers.exec(init orelse return error.CommandUnavailable, args[1], args[2..], writer);
     }
-    if (args.len == 2 and std.mem.eql(u8, args[0], "stop")) {
+    if (args.len > 0 and std.mem.eql(u8, args[0], "stop")) {
+        if (args.len != 2) return error.InvalidArguments;
         try containers.stop(init orelse return error.CommandUnavailable, args[1], writer);
         return 0;
     }
-    if (args.len == 2 and std.mem.eql(u8, args[0], "kill")) {
+    if (args.len > 0 and std.mem.eql(u8, args[0], "kill")) {
+        if (args.len != 2) return error.InvalidArguments;
         try containers.kill(init orelse return error.CommandUnavailable, args[1], writer);
         return 0;
     }
-    if (args.len == 2 and std.mem.eql(u8, args[0], "rm")) {
+    if (args.len > 0 and std.mem.eql(u8, args[0], "rm")) {
+        if (args.len != 2) return error.InvalidArguments;
         try containers.remove(init orelse return error.CommandUnavailable, args[1], writer);
         return 0;
     }
-    if (args.len >= 2 and std.mem.eql(u8, args[0], "_worker")) {
+    if (args.len > 0 and std.mem.eql(u8, args[0], "_worker")) {
+        if (args.len < 2) return error.InvalidArguments;
         return containers.worker(init orelse return error.CommandUnavailable, args[1], args[2..]);
     }
 
-    return error.CommandUnavailable;
+    return error.UnknownCommand;
 }
 
 fn pullImage(init: std.process.Init, image_name: []const u8, writer: *Io.Writer) !void {
@@ -301,7 +313,8 @@ pub fn main(init: std.process.Init) void {
         stdout.interface.flush() catch {};
         switch (err) {
             error.InvalidArguments => std.debug.print("rift: invalid arguments; run 'rift --help'\n", .{}),
-            error.CommandUnavailable => std.debug.print("rift: command '{s}' is not available yet; run 'rift --help'\n", .{if (args.len == 0) "" else args[0]}),
+            error.CommandUnavailable => std.debug.print("rift: command '{s}' is not available in this context\n", .{if (args.len == 0) "" else args[0]}),
+            error.UnknownCommand => std.debug.print("rift: unknown command '{s}'; run 'rift --help'\n", .{args[0]}),
             error.UnsupportedHost => std.debug.print("rift: this command requires a supported Mac\n", .{}),
             error.UnsupportedHostArchitecture => std.debug.print("rift: OCI pulls currently support Apple Silicon and Intel Macs\n", .{}),
             error.HomeDirectoryUnavailable => std.debug.print("rift: HOME is not set\n", .{}),
@@ -355,7 +368,7 @@ pub fn main(init: std.process.Init) void {
             error.TooManyVolumes => std.debug.print("rift: at most 16 volumes are supported\n", .{}),
             else => std.debug.print("rift: output failed: {s}\n", .{@errorName(err)}),
         }
-        std.process.exit(if (err == error.InvalidArguments or err == error.CommandUnavailable or
+        std.process.exit(if (err == error.InvalidArguments or err == error.CommandUnavailable or err == error.UnknownCommand or
             err == error.InvalidVolumeSpecification or err == error.ReservedVolumeTarget or err == error.DuplicateVolumeTarget or
             err == error.InvalidVolumeSource or err == error.FileVolumeMustShareFilesystem or err == error.FileVolumeCannotContainTarget or err == error.TooManyVolumes or err == error.ExecRequestTooLarge) 2 else 1);
     };
@@ -374,6 +387,7 @@ test "help is available without a command" {
     try std.testing.expect(std.mem.indexOf(u8, output.written(), "kill <id>") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.written(), "inspect <id>") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.written(), "exec <id> <cmd>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output.written(), "--rm (foreground only)") != null);
 }
 
 test "version prints the package version" {
@@ -395,6 +409,24 @@ test "unfinished commands are not advertised as available" {
     var output: Io.Writer.Allocating = .init(std.testing.allocator);
     defer output.deinit();
     try std.testing.expectError(error.CommandUnavailable, dispatch(&.{"run"}, &output.writer, null));
+}
+
+test "unknown commands are distinguished from invalid arguments" {
+    var output: Io.Writer.Allocating = .init(std.testing.allocator);
+    defer output.deinit();
+    try std.testing.expectError(error.UnknownCommand, dispatch(&.{"staart"}, &output.writer, null));
+}
+
+test "known commands reject malformed argument counts" {
+    var output: Io.Writer.Allocating = .init(std.testing.allocator);
+    defer output.deinit();
+    try std.testing.expectError(error.InvalidArguments, dispatch(&.{"system"}, &output.writer, null));
+    try std.testing.expectError(error.InvalidArguments, dispatch(&.{ "system", "version" }, &output.writer, null));
+    try std.testing.expectError(error.InvalidArguments, dispatch(&.{ "ps", "extra" }, &output.writer, null));
+    try std.testing.expectError(error.InvalidArguments, dispatch(&.{ "logs", "id", "extra" }, &output.writer, null));
+    try std.testing.expectError(error.InvalidArguments, dispatch(&.{ "stop", "id", "extra" }, &output.writer, null));
+    try std.testing.expectError(error.InvalidArguments, dispatch(&.{"kill"}, &output.writer, null));
+    try std.testing.expectError(error.InvalidArguments, dispatch(&.{ "rm", "id", "extra" }, &output.writer, null));
 }
 
 test "inspect requires a container ID" {

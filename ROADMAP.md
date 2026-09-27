@@ -56,7 +56,7 @@ This roadmap carries the original plan forward from the first project commit. `[
 - [ ] Add interactive `exec` with stdin, TTY allocation, and signal cancellation.
 - [ ] Add image building with `rift build`.
 - [ ] Implement broader OCI process and resource settings.
-- [ ] Review help and error messages across supported commands for clear, predictable use.
+- [x] Review help and error messages across supported commands for clear, predictable use.
 - [ ] Add structured log output.
 
 ## 5. Complete image filesystem and host integration
