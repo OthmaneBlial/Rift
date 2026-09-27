@@ -5,6 +5,7 @@ import hashlib
 import os
 from pathlib import Path
 import platform
+import re
 import stat
 import subprocess
 import tempfile
@@ -22,6 +23,9 @@ def main() -> None:
     if not version_output.startswith("Rift "):
         raise SystemExit(f"Unexpected version output: {version_output!r}")
     version = version_output.removeprefix("Rift ")
+    package_version = re.search(r'^\s*\.version\s*=\s*"([^"]+)"', (ROOT / "build.zig.zon").read_text(), re.MULTILINE)
+    if package_version is None or version != package_version.group(1):
+        raise SystemExit(f"CLI version {version!r} does not match build.zig.zon version")
     name = f"rift-{version}-macos-arm64"
     dist = ROOT / "dist"
     dist.mkdir(exist_ok=True)

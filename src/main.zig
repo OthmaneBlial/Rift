@@ -2,7 +2,7 @@ const builtin = @import("builtin");
 const std = @import("std");
 
 const Io = std.Io;
-const version = "0.1.0";
+const version = "0.1.1";
 
 const manifest = @import("oci/manifest.zig");
 const reference = @import("oci/reference.zig");
@@ -380,7 +380,7 @@ test "version prints the package version" {
     var output: Io.Writer.Allocating = .init(std.testing.allocator);
     defer output.deinit();
     _ = try dispatch(&.{"version"}, &output.writer, null);
-    try std.testing.expectEqualStrings("Rift 0.1.0\n", output.written());
+    try std.testing.expectEqualStrings("Rift 0.1.1\n", output.written());
 }
 
 test "system info reports the compiled host target" {

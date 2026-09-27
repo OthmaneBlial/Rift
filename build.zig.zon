@@ -1,6 +1,6 @@
 .{
     .name = .rift,
-    .version = "0.1.0",
+    .version = "0.1.1",
     .fingerprint = 0xc3bb3ea0bf1ebc9c,
     .minimum_zig_version = "0.16.0",
     .dependencies = .{},

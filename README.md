@@ -10,22 +10,19 @@
   </p>
 </div>
 
-Rift is an experimental OCI container runtime for Apple Silicon Macs. It runs Linux workloads in Apple's Virtualization.framework and builds with Zig. The current [v0.1.0 release](https://github.com/OthmaneBlial/Rift/releases/tag/v0.1.0) is a source preview; public notarized binaries are not available yet.
+Rift is an experimental OCI container runtime for Apple Silicon Macs. It runs Linux workloads in Apple's Virtualization.framework and builds with Zig. The current [v0.1.1 release](https://github.com/OthmaneBlial/Rift/releases/tag/v0.1.1) is a source preview; public notarized binaries are not available yet.
 
 ## Quick start
 
-Install Zig 0.16 or newer, then build Rift:
+Install Rift with Homebrew:
 
 ```sh
-brew install zig
-git clone https://github.com/OthmaneBlial/Rift.git
-cd Rift
-zig build -Doptimize=ReleaseSafe
-mkdir -p "$HOME/.local/bin"
-install -m 755 zig-out/bin/rift "$HOME/.local/bin/rift"
+brew install OthmaneBlial/rift/rift
 ```
 
-Add `~/.local/bin` to your `PATH`, then run a container:
+Homebrew builds Rift from source and installs Zig as a build dependency. Zig is not needed to run Rift.
+
+Run a container:
 
 ```sh
 rift pull alpine
@@ -73,7 +70,7 @@ Host environment variables are not copied into containers. Volumes are read-only
 ## Requirements and limits
 
 - macOS 12 or newer on Apple Silicon.
-- Zig 0.16 or newer to build from source.
+- Zig 0.16 or newer for manual source builds; Homebrew installs the build dependency automatically.
 - One lightweight Linux VM per run; the current guest limit is 2 CPUs and 256 MiB RAM.
 - One TCP port mapping per run; up to 16 explicit file or directory volumes.
 - Each pull is capped at 16 GiB of distinct image blobs not already verified in the local cache.
@@ -97,6 +94,15 @@ It checks Zig formatting, unit tests, a `ReleaseSafe` build, Python check script
 ## Project status
 
 Rift is an early source preview. The command examples above are implemented and checked locally, with the limits listed here. See the [architecture notes](docs/ARCHITECTURE.md) for implementation details.
+
+## Build from source
+
+```sh
+brew install zig
+git clone https://github.com/OthmaneBlial/Rift.git
+cd Rift
+zig build -Doptimize=ReleaseSafe
+```
 
 ## Roadmap
 
