@@ -193,6 +193,8 @@ fn parseVolume(text: []const u8) !vm.Volume {
     const target = parts.next() orelse return error.InvalidVolumeSpecification;
     const mode = parts.next() orelse "ro";
     if (parts.next() != null or !validVolumePath(source) or !validVolumePath(target)) return error.InvalidVolumeSpecification;
+    if (std.mem.eql(u8, target, "/dev") or std.mem.startsWith(u8, target, "/dev/") or
+        std.mem.eql(u8, target, "/proc") or std.mem.startsWith(u8, target, "/proc/")) return error.ReservedVolumeTarget;
     if (!std.mem.eql(u8, mode, "ro") and !std.mem.eql(u8, mode, "rw")) return error.InvalidVolumeSpecification;
     return .{ .source = source, .target = target, .read_only = std.mem.eql(u8, mode, "ro") };
 }
@@ -266,6 +268,9 @@ test "volume paths and modes are explicit" {
     try std.testing.expect(!writable.read_only);
     for ([_][]const u8{ "relative:/data", "/host:relative", "/:/data", "/host:/", "/host:/a/../b", "/host:/a//b", "/host:/data:other", "/host:/data:rw:extra" }) |invalid| {
         try std.testing.expectError(error.InvalidVolumeSpecification, parseVolume(invalid));
+    }
+    for ([_][]const u8{ "/host:/dev", "/host:/dev/pts", "/host:/proc", "/host:/proc/1" }) |reserved| {
+        try std.testing.expectError(error.ReservedVolumeTarget, parseVolume(reserved));
     }
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();

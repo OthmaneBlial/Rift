@@ -55,6 +55,10 @@ def main() -> int:
         unsafe_path = run(binary, "-v", f"{source}:/../escape", "alpine", "/bin/true")
         if unsafe_path.returncode != 2 or "volume must use absolute" not in unsafe_path.stderr:
             raise RuntimeError(f"unsafe volume path was accepted: {unsafe_path!r}")
+        for target in ("/dev", "/dev/pts", "/proc", "/proc/1"):
+            reserved = run(binary, "-v", f"{source}:{target}", "alpine", "/bin/true")
+            if reserved.returncode != 2 or "volume target cannot be /dev or /proc" not in reserved.stderr:
+                raise RuntimeError(f"reserved volume target was accepted: {reserved!r}")
 
         started = run(binary, "-d", "-v", f"{output}:/out:rw", "alpine", "sh", "-c", "echo DETACHED > /out/worker; sleep 30")
         identifier = started.stdout.strip()
@@ -79,7 +83,7 @@ def main() -> int:
     after = set(runtime.iterdir()) if runtime.exists() else set()
     if after != before:
         raise RuntimeError(f"volume runs left runtime staging behind: {after - before}")
-    print("Rift volume check passed: read-only, writable, nested, detached, 16 shares, and symlink rejection")
+    print("Rift volume check passed: read-only, writable, nested, detached, 16 shares, and unsafe-target rejection")
     return 0
 
 

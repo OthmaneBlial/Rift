@@ -4,7 +4,7 @@
 
 **No Docker, daemon, or Docker Desktop. One binary is the distribution target.**
 
-Rift is an early-stage Zig container runtime for Apple Silicon Macs. It pulls public OCI images and runs commands in Linux VMs, including detached servers with one localhost TCP port mapping and explicit directory volumes. On the first `run`, the binary downloads a pinned Alpine ISO, verifies its SHA-256, and installs the guest boot files. Complete OCI process isolation remains unfinished.
+Rift is an early-stage Zig container runtime for Apple Silicon Macs. It pulls public OCI images and runs commands in Linux VMs, including detached servers with one localhost TCP port mapping and explicit directory volumes. On the first `run`, the binary downloads a pinned Alpine ISO, verifies its SHA-256, and installs the guest boot files. Each command now gets private Linux PID and mount namespaces, minimal `/dev` and `/proc` mounts, and reduced capabilities. Complete OCI process settings remain unfinished.
 
 ## Current commands
 
@@ -35,7 +35,7 @@ Image pulls use anonymous registry access and save SHA-256-verified OCI blobs an
 
 `run` uses the image's `Entrypoint`, `Cmd`, `Env`, `User`, and absolute `WorkingDir` defaults, with command, `-e KEY=VALUE`, and `-w` overrides. Environment overrides must include a value; Rift does not copy host variables implicitly. A static guest executor applies the working directory and numeric or named UID/GID from the image, including images without `/bin/sh`.
 
-Each run gets a disposable writable overlay inside its own Linux VM, currently configured with 256 MiB of guest RAM. `-v HOST:DIR[:ro|rw]` shares an existing host directory with the guest. It is read-only by default; `:rw` allows the container to change host files. Both paths must be absolute, the host source cannot itself be a symlink, and the guest target must be a directory without symlink components. Up to 16 directories can be shared. `-p` accepts one `HOST:GUEST` TCP mapping bound to `127.0.0.1`. `run -d` starts one background Rift process per VM and prints its container ID. `stop` currently forces the VM off; `--rm` is unavailable with `-d`. Private registry credentials are not implemented.
+Each run gets a disposable writable overlay inside its own Linux VM, currently configured with 256 MiB of guest RAM. `-v HOST:DIR[:ro|rw]` shares an existing host directory with the guest. It is read-only by default; `:rw` allows the container to change host files. Both paths must be absolute, the host source cannot itself be a symlink, and the guest target must be a directory without symlink components. `/dev` and `/proc` are reserved for the guest. Up to 16 directories can be shared. `-p` accepts one `HOST:GUEST` TCP mapping bound to `127.0.0.1`. `run -d` starts one background Rift process per VM and prints its container ID. `stop` currently forces the VM off; `--rm` is unavailable with `-d`. Private registry credentials are not implemented.
 
 For a persistent writable directory:
 
@@ -123,6 +123,7 @@ No Docker Engine, Docker CLI, Docker Desktop, or container daemon is part of the
 - [x] Basic foreground OCI command execution through Rift's public CLI
 - [x] Image entrypoint, command, environment defaults, and `-e` overrides
 - [x] Absolute image `WorkingDir`, `-w` override, and numeric or named image `User` through a static guest executor
+- [x] Private PID and mount namespaces, basic `/dev` and `/proc`, reduced capabilities, and no privilege escalation
 - [ ] Broader OCI process settings and isolation
 - [x] Outbound NAT and DNS for foreground commands
 - [x] One localhost TCP port mapping for foreground commands

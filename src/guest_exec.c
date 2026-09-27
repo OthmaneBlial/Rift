@@ -3,14 +3,20 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <grp.h>
+#include <linux/capability.h>
 #include <limits.h>
 #include <pwd.h>
+#include <sched.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mount.h>
+#include <sys/prctl.h>
 #include <sys/stat.h>
+#include <sys/syscall.h>
+#include <sys/sysmacros.h>
 #include <sys/types.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 static int fail(const char *operation) {
@@ -117,18 +123,69 @@ static int mount_volume(const char *tag, const char *target, const char *mode) {
     return 0;
 }
 
-int main(int argc, char **argv) {
-    if (argc < 6) {
-        fputs("rift-exec: missing command\n", stderr);
-        return 125;
+static int mountpoint(const char *path) {
+    if (mkdir(path, 0755) != 0 && errno != EEXIST) return fail("create mountpoint");
+    int directory = open(path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (directory < 0) return fail("open mountpoint");
+    close(directory);
+    return 0;
+}
+
+static int device(const char *path, unsigned int major_number, unsigned int minor_number) {
+    if (mknod(path, S_IFCHR | 0600, makedev(major_number, minor_number)) != 0 || chmod(path, 0666) != 0)
+        return fail("create device");
+    return 0;
+}
+
+static int mount_standard_filesystems(void) {
+    if (mountpoint("/dev") != 0) return 125;
+    if (mount("tmpfs", "/dev", "tmpfs", MS_NOSUID | MS_NOEXEC, "mode=755,size=4m") != 0) return fail("mount /dev");
+    if (device("/dev/null", 1, 3) != 0 || device("/dev/zero", 1, 5) != 0 ||
+        device("/dev/random", 1, 8) != 0 || device("/dev/urandom", 1, 9) != 0 ||
+        device("/dev/tty", 5, 0) != 0) return 125;
+    if (mountpoint("/proc") != 0) return 125;
+    if (mount("proc", "/proc", "proc", MS_RDONLY | MS_NOSUID | MS_NODEV | MS_NOEXEC, NULL) != 0) return fail("mount /proc");
+    return 0;
+}
+
+static int allowed_capability(int capability) {
+    switch (capability) {
+        case CAP_CHOWN:
+        case CAP_DAC_OVERRIDE:
+        case CAP_FOWNER:
+        case CAP_FSETID:
+        case CAP_KILL:
+        case CAP_SETGID:
+        case CAP_SETUID:
+        case CAP_NET_BIND_SERVICE:
+            return 1;
+        default:
+            return 0;
     }
-    char *end;
+}
+
+static int restrict_capabilities(void) {
+    struct __user_cap_header_struct header = {.version = _LINUX_CAPABILITY_VERSION_3, .pid = 0};
+    struct __user_cap_data_struct data[2] = {{0}, {0}};
+    for (int capability = 0; capability < 64; ++capability) {
+        if (allowed_capability(capability)) {
+            data[capability / 32].effective |= 1U << (capability % 32);
+            data[capability / 32].permitted |= 1U << (capability % 32);
+        } else if (prctl(PR_CAPBSET_DROP, capability, 0, 0, 0) != 0 && errno != EINVAL) {
+            return fail("drop capability bound");
+        }
+    }
     errno = 0;
-    unsigned long volume_count = strtoul(argv[4], &end, 10);
-    if (errno || *end || volume_count > 16 || argc < 6 + (int)volume_count * 3 || !argv[5 + volume_count * 3][0]) {
-        fputs("rift-exec: invalid volume count or missing command\n", stderr);
+    if (prctl(PR_CAPBSET_READ, 64, 0, 0, 0) != -1 || errno != EINVAL) {
+        fputs("rift-exec: unsupported capability range\n", stderr);
         return 125;
     }
+    if (syscall(SYS_capset, &header, data) != 0) return fail("restrict capabilities");
+    if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0) return fail("disable privilege escalation");
+    return 0;
+}
+
+static int run_container(char **argv, unsigned long volume_count) {
     if (chroot(argv[1]) != 0) return fail("chroot");
     if (chdir("/") != 0) return fail("chdir root");
 
@@ -142,10 +199,40 @@ int main(int argc, char **argv) {
         int status = mount_volume(argv[5 + index * 3], argv[6 + index * 3], argv[7 + index * 3]);
         if (status != 0) return status;
     }
+    if (mount_standard_filesystems() != 0) return 125;
+    if (restrict_capabilities() != 0) return 125;
     if (setgroups(0, NULL) != 0) return fail("clear supplementary groups");
     if (setgid(gid) != 0) return fail("setgid");
     if (setuid(uid) != 0) return fail("setuid");
     if (chdir(argv[2]) != 0) return fail("chdir working directory");
+    if (syscall(SYS_close_range, 3U, ~0U, 0U) != 0) return fail("close inherited descriptors");
     execvp(argv[5 + volume_count * 3], argv + 5 + volume_count * 3);
     return fail("exec");
+}
+
+int main(int argc, char **argv) {
+    if (argc < 6) {
+        fputs("rift-exec: missing command\n", stderr);
+        return 125;
+    }
+    char *end;
+    errno = 0;
+    unsigned long volume_count = strtoul(argv[4], &end, 10);
+    if (errno || *end || volume_count > 16 || argc < 6 + (int)volume_count * 3 || !argv[5 + volume_count * 3][0]) {
+        fputs("rift-exec: invalid volume count or missing command\n", stderr);
+        return 125;
+    }
+    if (unshare(CLONE_NEWNS | CLONE_NEWPID) != 0) return fail("create container namespaces");
+    if (mount(NULL, "/", NULL, MS_REC | MS_PRIVATE, NULL) != 0) return fail("make mounts private");
+    pid_t child = fork();
+    if (child < 0) return fail("fork container process");
+    if (child == 0) return run_container(argv, volume_count);
+
+    int status;
+    while (waitpid(child, &status, 0) < 0) {
+        if (errno != EINTR) return fail("wait for container process");
+    }
+    if (WIFEXITED(status)) return WEXITSTATUS(status);
+    if (WIFSIGNALED(status)) return 128 + WTERMSIG(status);
+    return 125;
 }

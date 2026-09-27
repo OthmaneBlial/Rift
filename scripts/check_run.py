@@ -25,6 +25,15 @@ def main() -> int:
          "/bin ready"),
         (["run", "alpine", "echo", "two words", "$(touch /tmp/rift-should-not-exist)"], 0,
          "two words $(touch /tmp/rift-should-not-exist)"),
+        (["run", "alpine", "sh", "-c",
+          "test \"$$\" -eq 1 && test -c /dev/null && printf x >/dev/null && "
+          "test -c /dev/urandom && dd if=/dev/urandom of=/dev/null bs=1 count=1 >/dev/null 2>&1 && "
+          "test -d /proc/self && grep -q 'proc /proc proc ro,' /proc/mounts && "
+          "grep -q '^NoNewPrivs:[[:space:]]*1$' /proc/self/status && "
+          "echo RIFT_ISOLATION_OK"], 0, "RIFT_ISOLATION_OK"),
+        (["run", "alpine", "sh", "-c",
+          "mount -t tmpfs tmpfs /tmp >/dev/null 2>&1; test $? -ne 0 && echo MOUNT_DENIED"], 0,
+         "MOUNT_DENIED"),
     ]
     if network_only:
         cases = [(["run", "alpine", "nslookup", "example.com"], 0, "example.com")]
@@ -45,7 +54,7 @@ def main() -> int:
     if network_only:
         print("Rift network check passed: container DNS lookup and cleanup")
     else:
-        print("Rift run check passed: image defaults, environment, output, exit status, quoting, cleanup")
+        print("Rift run check passed: defaults, environment, exit status, quoting, namespaces, devices, cleanup")
     return 0
 
 
