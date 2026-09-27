@@ -94,7 +94,9 @@ This roadmap carries the original plan forward from the first project commit. `[
 - [x] Verify a UID 0 workload inherits `no_new_privs` and cannot mount a new filesystem.
 - [x] Verify file and directory volume targets reject paths beneath image symlinks.
 - [ ] Complete an adversarial review of host/guest isolation assumptions; ownership-index work is now bounded, while volume races, mount layouts, workload behavior, network exposure, and VM-boundary review remain.
-- [ ] Measure isolated guest boot time, installation footprint, and total system-wide host-plus-VM memory.
+- [x] Measure VM-start-to-guest-control-ready latency on Apple M2; record timer endpoints and host polling resolution.
+- [ ] Measure installation footprint.
+- [ ] Measure total system-wide host-plus-VM memory.
 - [ ] Repeat performance measurements across more Macs.
 - [ ] Run the full runtime workflow on macOS 12 to verify the oldest declared host version.
 - [ ] Verify the full install-to-clean workflow on a clean Apple Silicon Mac without Docker.

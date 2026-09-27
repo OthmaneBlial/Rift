@@ -13,13 +13,35 @@ zig-out/bin/rift run --rm alpine /bin/true
 zig build -Doptimize=ReleaseSafe benchmark
 ```
 
-The benchmark copies the local image blobs, image records, and guest boot files into a temporary HOME. Setup and copying are outside the timed region. It measures one Alpine `/bin/true` launch, five subsequent launches, five `rift version` calls, and the time from starting a detached Alpine run to observing its guest-ready marker through `rift logs`. That latency includes rootfs setup, VM startup, and log polling; it is not an isolated VM boot time. Each launch starts a new VM. Memory output includes Rift worker RSS, Virtualization.framework VM-service RSS, and macOS process footprints for the worker and VM service, when the VM process can be identified unambiguously. The script stops and removes its container, checks that logical storage usage returns to its starting value, and deletes the temporary HOME. Output is JSON so individual samples remain visible. It also records logical CPU count and 1/5/15-minute host load averages before and after timing; load average is not CPU utilization.
+The benchmark copies the local image blobs, image records, and guest boot files into a temporary HOME. Setup and copying are outside the timed region. It measures one Alpine `/bin/true` launch, five subsequent launches, five `rift version` calls, VM-start-to-guest-control-ready latency, and detached-run-to-workload-ready latency. The VM timer starts immediately before `startWithCompletionHandler` and stops when the host observes an initramfs marker written after the guest mounts the rootfs and control VirtioFS shares, before overlay setup, DHCP, or workload execution. Host polling checks for the marker about every 10 ms. This includes Virtualization.framework startup and guest boot through share mounting; it excludes host rootfs assembly and is not a kernel-only measurement. The detached latency includes host rootfs setup, VM startup, workload execution, and log polling. Each launch starts a new VM. Memory output includes Rift worker RSS, Virtualization.framework VM-service RSS, and macOS process footprints for the worker and VM service, when the VM process can be identified unambiguously. The script stops and removes its container, checks that logical storage usage returns to its starting value, and deletes the temporary HOME. Output is JSON so individual samples remain visible. It also records logical CPU count and 1/5/15-minute host load averages before and after timing; load average is not CPU utilization.
 
 The first launch already has the image and guest files cached. It is **not** a fresh installation or an uncached macOS filesystem measurement. `worker_and_vm_process_footprint_bytes` is the macOS footprint total for those two processes, with shared mappings de-duplicated by `footprint`; it excludes kernel and other system memory, so it is not total host memory. VM-service RSS can include shared mappings and should not be added to worker RSS as a unique-memory total. If the VM process or footprint report is ambiguous or unavailable, the footprint fields are null and `memory_measurement_note` explains why. Each VM is configured with 256 MiB of guest RAM. The store size is the logical size of all copied cache files, including any other images present, and excludes the binary.
 
 `binary_bytes` records the local executable size. Local builds are ad-hoc signed for execution on macOS; this is not Developer ID signing or notarization.
 
 ## Latest cached benchmark
+
+Apple M2, macOS 26.6, Zig 0.16.0, `ReleaseSafe`, runtime commit `c5c3dd6`, 2026-09-27 20:36:44 UTC. One run with the cached store:
+
+| Metric | Result |
+| --- | ---: |
+| Local executable size | 1,730,064 bytes |
+| First Alpine launch with cached assets | 1,167.3 ms |
+| Subsequent Alpine launches, median of 5 | 1,157.5 ms |
+| Subsequent Alpine launch samples | 1,157.5, 1,189.8, 1,174.0, 1,137.6, 1,134.2 ms |
+| VM start to guest control ready | 437.35 ms |
+| Detached run to guest-ready marker | 1,733.7 ms |
+| `rift version`, median of 5 | 7.1 ms |
+| Detached Rift worker RSS | 10,848 KiB |
+| Virtualization.framework VM-service RSS | 202,304 KiB |
+| VM-service process footprint | 156,910,360 bytes (149.6 MiB) |
+| Worker and VM-service combined process footprint | 159,712,504 bytes (152.3 MiB) |
+| Copied store, logical file bytes | 151,145,470 bytes |
+| Host load average, 1/5/15 minute, before and after | 4.46 / 4.35 / 4.41 |
+
+This is one local sample. The new VM-start metric ends at guest control-share readiness and does not measure the later overlay setup or workload startup.
+
+## Previous cached benchmark
 
 Apple M2, macOS 26.6, Zig 0.16.0, `ReleaseSafe`, runtime commit `3ea8402`, 2026-09-27 20:25:08 UTC. One run with the cached store:
 
@@ -39,7 +61,7 @@ Apple M2, macOS 26.6, Zig 0.16.0, `ReleaseSafe`, runtime commit `3ea8402`, 2026-
 | Host load average, 1/5/15 minute, before | 2.98 / 4.58 / 4.86 |
 | Host load average, 1/5/15 minute, after | 3.00 / 4.53 / 4.84 |
 
-## Previous cached benchmark
+## Earlier cached benchmark
 
 Apple M2, macOS 26.6, Zig 0.16.0, `ReleaseSafe`, runtime commit `9f95df9`, 2026-09-27 19:57:42 UTC. One earlier run with the cached store:
 
@@ -58,7 +80,7 @@ Apple M2, macOS 26.6, Zig 0.16.0, `ReleaseSafe`, runtime commit `9f95df9`, 2026-
 | Host load average, 1/5/15 minute, before | 5.44 / 4.47 / 4.64 |
 | Host load average, 1/5/15 minute, after | 4.91 / 4.39 / 4.61 |
 
-The memory sample is a process-attributed idle snapshot after the guest reports ready, not peak usage or total host memory. The detached-ready latency is not isolated boot time. Broader memory work still needs install-footprint coverage and system-wide memory scope.
+The memory sample is a process-attributed idle snapshot after the guest reports ready, not peak usage or total host memory. The detached-ready latency is not isolated boot time; the separate VM-start timer ends at guest control-share readiness. Broader measurement work still needs install-footprint coverage and system-wide memory scope.
 
 Apple M2, macOS 26.6, Zig 0.16.0, `ReleaseSafe`, runtime commit `60000c7`, 2026-09-27 17:59:58 UTC. Earlier run with the cached store:
 
