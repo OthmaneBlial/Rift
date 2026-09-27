@@ -14,7 +14,17 @@ const initramfs_sha256 = "5b9de8ff7b4f3055f6cf940e1ff869790415cf81b7ea1e399ee604
 
 pub fn execute(init: std.process.Init, arguments: []const []const u8) !u8 {
     if (builtin.os.tag != .macos or builtin.cpu.arch != .aarch64) return error.UnsupportedHost;
-    const offset: usize = if (arguments.len > 0 and std.mem.eql(u8, arguments[0], "--rm")) 1 else 0;
+    var offset: usize = 0;
+    var port: ?vm.PortMapping = null;
+    while (offset < arguments.len) {
+        if (std.mem.eql(u8, arguments[offset], "--rm")) {
+            offset += 1;
+        } else if (std.mem.eql(u8, arguments[offset], "-p")) {
+            if (port != null or offset + 1 >= arguments.len) return error.InvalidArguments;
+            port = try parsePort(arguments[offset + 1]);
+            offset += 2;
+        } else break;
+    }
     if (arguments.len < offset + 1) return error.InvalidArguments;
     const allocator = init.arena.allocator();
     var image = try reference.parse(allocator, arguments[offset]);
@@ -81,7 +91,7 @@ pub fn execute(init: std.process.Init, arguments: []const []const u8) !u8 {
     defer control.close(init.io);
     try rootfs.assemble(allocator, init.io, image_root, store, manifest_digest);
     const interactive = try Io.File.stdin().isTty(init.io);
-    try guest.writeInitramfs(allocator, init.io, base_initramfs, run_dir, command, process.Env orelse &.{}, interactive);
+    try guest.writeInitramfs(allocator, init.io, base_initramfs, run_dir, command, process.Env orelse &.{}, interactive, port != null);
 
     var root_path_buffer: [Io.Dir.max_path_bytes]u8 = undefined;
     var control_path_buffer: [Io.Dir.max_path_bytes]u8 = undefined;
@@ -94,7 +104,7 @@ pub fn execute(init: std.process.Init, arguments: []const []const u8) !u8 {
     const kernel_path = try std.fmt.allocPrint(allocator, "{s}/Image", .{guest_path});
     const initramfs_path = try std.fmt.allocPrint(allocator, "{s}/initramfs", .{run_path});
 
-    try vm.run(allocator, kernel_path, initramfs_path, "console=hvc0 quiet loglevel=0 rdinit=/rift-init", root_path, control_path, true, 0, 1);
+    try vm.run(allocator, kernel_path, initramfs_path, "console=hvc0 quiet loglevel=0 rdinit=/rift-init", root_path, control_path, true, port, 0, 1);
     const status_file = control.openFile(init.io, "exit", .{ .mode = .read_only, .allow_directory = false, .follow_symlinks = false }) catch |err| switch (err) {
         error.FileNotFound => return error.GuestStatusMissing,
         else => return err,
@@ -109,6 +119,25 @@ pub fn execute(init: std.process.Init, arguments: []const []const u8) !u8 {
     const code = std.fmt.parseInt(u16, std.mem.trim(u8, status_buffer[0..@intCast(status_size)], "\r\n"), 10) catch return error.GuestStatusInvalid;
     if (code > 255) return error.GuestStatusInvalid;
     return @intCast(code);
+}
+
+fn parsePort(text: []const u8) !vm.PortMapping {
+    const separator = std.mem.indexOfScalar(u8, text, ':') orelse return error.InvalidArguments;
+    if (separator == 0 or separator + 1 == text.len or std.mem.indexOfScalar(u8, text[separator + 1 ..], ':') != null) return error.InvalidArguments;
+    const host = std.fmt.parseInt(u16, text[0..separator], 10) catch return error.InvalidArguments;
+    const guest_port = std.fmt.parseInt(u16, text[separator + 1 ..], 10) catch return error.InvalidArguments;
+    if (host == 0 or guest_port == 0) return error.InvalidArguments;
+    return .{ .host = host, .guest = guest_port };
+}
+
+test "port mappings require two valid TCP ports" {
+    const mapping = try parsePort("8080:80");
+    try std.testing.expectEqual(@as(u16, 8080), mapping.host);
+    try std.testing.expectEqual(@as(u16, 80), mapping.guest);
+    const invalid_ports = [_][]const u8{ "0:80", "8080:0", "8080", "8080:80:90", "65536:80", ":80" };
+    for (&invalid_ports) |invalid| {
+        try std.testing.expectError(error.InvalidArguments, parsePort(invalid));
+    }
 }
 
 fn matchesSha256(io: Io, file: Io.File, expected: []const u8) !bool {

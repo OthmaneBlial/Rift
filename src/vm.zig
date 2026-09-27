@@ -7,9 +7,13 @@ extern fn rift_vm_run(
     share_path: ?[*:0]const u8,
     control_path: ?[*:0]const u8,
     network_enabled: c_int,
+    host_port: c_int,
+    guest_port: c_int,
     input_fd: c_int,
     output_fd: c_int,
 ) c_int;
+
+pub const PortMapping = struct { host: u16, guest: u16 };
 
 pub fn run(
     allocator: std.mem.Allocator,
@@ -19,6 +23,7 @@ pub fn run(
     share_path: ?[]const u8,
     control_path: ?[]const u8,
     network_enabled: bool,
+    port: ?PortMapping,
     input_fd: c_int,
     output_fd: c_int,
 ) !void {
@@ -33,9 +38,10 @@ pub fn run(
     const control_path_z = if (control_path) |path| try allocator.dupeZ(u8, path) else null;
     defer if (control_path_z) |path| allocator.free(path);
 
-    return switch (rift_vm_run(kernel_z.ptr, initramfs_z.ptr, command_line_z.ptr, if (share_path_z) |path| path.ptr else null, if (control_path_z) |path| path.ptr else null, @intFromBool(network_enabled), input_fd, output_fd)) {
+    return switch (rift_vm_run(kernel_z.ptr, initramfs_z.ptr, command_line_z.ptr, if (share_path_z) |path| path.ptr else null, if (control_path_z) |path| path.ptr else null, @intFromBool(network_enabled), if (port) |mapping| mapping.host else 0, if (port) |mapping| mapping.guest else 0, input_fd, output_fd)) {
         0 => {},
         2 => error.VirtualizationUnavailable,
+        3 => error.HostPortUnavailable,
         else => error.VirtualMachineFailed,
     };
 }

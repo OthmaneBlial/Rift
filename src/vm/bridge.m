@@ -1,6 +1,11 @@
 #import <Foundation/Foundation.h>
 #import <Virtualization/Virtualization.h>
 #include <stdio.h>
+#include <stdint.h>
+
+typedef struct RiftForwarder RiftForwarder;
+extern RiftForwarder *rift_forward_start(const char *control_path, uint16_t host_port, uint16_t guest_port);
+extern void rift_forward_stop(RiftForwarder *forwarder);
 
 @interface RiftVMDelegate : NSObject <VZVirtualMachineDelegate>
 @property(nonatomic) BOOL finished;
@@ -22,10 +27,11 @@
 
 int rift_vm_run(const char *kernel_path, const char *initramfs_path, const char *command_line,
                 const char *share_path, const char *control_path, int network_enabled,
-                int input_fd, int output_fd) {
+                int host_port, int guest_port, int input_fd, int output_fd) {
     @autoreleasepool {
         if (![NSThread isMainThread] || ![VZVirtualMachine isSupported]) return 2;
         if (!kernel_path || !initramfs_path || !command_line || input_fd < 0 || output_fd < 0) return 1;
+        if ((host_port != 0 || guest_port != 0) && (!network_enabled || !control_path || host_port < 1 || host_port > 65535 || guest_port < 1 || guest_port > 65535)) return 1;
 
         NSString *kernel = [NSString stringWithUTF8String:kernel_path];
         NSString *initramfs = [NSString stringWithUTF8String:initramfs_path];
@@ -82,6 +88,12 @@ int rift_vm_run(const char *kernel_path, const char *initramfs_path, const char 
             return 1;
         }
 
+        RiftForwarder *forwarder = NULL;
+        if (host_port) {
+            forwarder = rift_forward_start(control_path, (uint16_t)host_port, (uint16_t)guest_port);
+            if (!forwarder) return 3;
+        }
+
         VZVirtualMachine *machine = [[VZVirtualMachine alloc] initWithConfiguration:config];
         RiftVMDelegate *delegate = [[RiftVMDelegate alloc] init];
         machine.delegate = delegate;
@@ -97,6 +109,7 @@ int rift_vm_run(const char *kernel_path, const char *initramfs_path, const char 
                                  beforeDate:[NSDate dateWithTimeIntervalSinceNow:0.1]];
         }
         machine.delegate = nil;
+        rift_forward_stop(forwarder);
         return delegate.result;
     }
 }

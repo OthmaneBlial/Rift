@@ -24,6 +24,7 @@ pub fn build(b: *std.Build) void {
             .language = .objective_c,
             .flags = &.{ "-fobjc-arc", "-fblocks" },
         });
+        exe.root_module.addCSourceFile(.{ .file = b.path("src/vm/forward.c") });
         exe.root_module.linkFramework("Foundation", .{});
         exe.root_module.linkFramework("Virtualization", .{});
         exe.root_module.linkSystemLibrary("objc", .{});
@@ -50,6 +51,12 @@ pub fn build(b: *std.Build) void {
         check_run_network.step.dependOn(&sign_exe.step);
         b.step("run-network-check", "Resolve DNS from a pulled Alpine container").dependOn(&check_run_network.step);
 
+        const check_port = b.addSystemCommand(&.{"/usr/bin/python3"});
+        check_port.addFileArg(b.path("scripts/check_port.py"));
+        check_port.addArg(exe_path);
+        check_port.step.dependOn(&sign_exe.step);
+        b.step("run-port-check", "Forward a localhost port to a pulled Alpine container").dependOn(&check_port.step);
+
         const probe = b.addExecutable(.{
             .name = "rift-vm-probe",
             .root_module = b.createModule(.{
@@ -64,6 +71,7 @@ pub fn build(b: *std.Build) void {
             .language = .objective_c,
             .flags = &.{ "-fobjc-arc", "-fblocks" },
         });
+        probe.root_module.addCSourceFile(.{ .file = b.path("src/vm/forward.c") });
         probe.root_module.linkFramework("Foundation", .{});
         probe.root_module.linkFramework("Virtualization", .{});
         probe.root_module.linkSystemLibrary("objc", .{});

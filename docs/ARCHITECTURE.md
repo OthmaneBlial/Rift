@@ -2,11 +2,11 @@
 
 ## Current state
 
-`help`, `version`, `system info`, public `pull`, `images`, and a basic foreground `run` work. Pull downloads and verifies OCI metadata and blobs for the host architecture, then records the resolved reference locally. `run` currently requires a previously pulled image on Apple Silicon. It applies image entrypoint, command, and environment defaults. Images requesting a non-root user or working directory other than `/` are rejected until those settings can be honored. Outbound NAT and DNS work; port forwarding, volumes, and detached containers remain unfinished.
+`help`, `version`, `system info`, public `pull`, `images`, and a basic foreground `run` work. Pull downloads and verifies OCI metadata and blobs for the host architecture, then records the resolved reference locally. `run` currently requires a previously pulled image on Apple Silicon. It applies image entrypoint, command, and environment defaults. Images requesting a non-root user or working directory other than `/` are rejected until those settings can be honored. Outbound NAT, DNS, and one localhost TCP port mapping work; volumes and detached containers remain unfinished.
 
 Rift's Zig/Objective-C VM bridge boots an Alpine ARM64 kernel and initramfs to a shell, runs a command, and shuts down through the local `zig build vm-check` gate. `scripts/prepare_guest.py` reproduces those guest files from a pinned, SHA-256-verified Alpine ISO. Alpine packages its ARM64 kernel as a compressed EFI zboot image; the script extracts the uncompressed `Image` needed for direct boot. `rift run` uses verified copies installed under the user's Application Support directory.
 
-The layer installer handles OCI tar, gzip, and zstd layers, including regular-file hardlinks. It applies whiteouts before entries from the same layer and refuses archive paths or parent symlinks that could redirect host writes. Root filesystem assembly reads a verified platform manifest, checks each cached layer digest and size again, and applies layers to a private staging directory. Rift exposes that directory read-only through VirtioFS. The guest mounts a writable tmpfs overlay above it, obtains a DHCP lease on a Virtualization.framework NAT adapter, copies DNS settings into the overlay, executes the command with `chroot`, writes an exit status to a separate disposable control share, and powers off. The CLI relays console output and returns that status. Local checks have proved output, exit code 37, shell argument quoting, temporary directory cleanup, a DNS lookup from the pulled Alpine image, and `nginx -v` from the pulled nginx image. Complete OCI ownership, directory modes, timestamps, extended attributes, and special files remain unfinished.
+The layer installer handles OCI tar, gzip, and zstd layers, including regular-file hardlinks. It applies whiteouts before entries from the same layer and refuses archive paths or parent symlinks that could redirect host writes. Root filesystem assembly reads a verified platform manifest, checks each cached layer digest and size again, and applies layers to a private staging directory. Rift exposes that directory read-only through VirtioFS. The guest mounts a writable tmpfs overlay above it, obtains a DHCP lease on a Virtualization.framework NAT adapter, copies DNS settings into the overlay, executes the command with `chroot`, writes an exit status to a separate disposable control share, and powers off. The CLI relays console output and returns that status. For `-p`, a host TCP listener on `127.0.0.1` forwards one port to the DHCP address reported by the guest. Local checks have proved output, exit code 37, shell argument quoting, normal temporary directory cleanup, a DNS lookup from pulled Alpine, and an HTTP 200 nginx welcome page through the forwarded port. Complete OCI ownership, directory modes, timestamps, extended attributes, and special files remain unfinished.
 
 ## Runtime shape
 
@@ -20,7 +20,7 @@ The intended boundaries are:
 4. **Layer installer** — safe tar extraction and root filesystem assembly, without following paths outside the image root.
 5. **VM controller** — Linux kernel and initramfs boot, console, guest communication, and shutdown through Virtualization.framework.
 6. **Guest execution** — a generated initramfs script currently mounts the image and starts explicit commands. A guest agent with OCI process settings and stricter isolation remains planned.
-7. **Networking and mounts** — outbound guest networking, requested port forwarding, and explicit host directory shares.
+7. **Networking and mounts** — outbound guest networking and one localhost TCP port mapping work; explicit host directory shares remain planned.
 
 The host-facing implementation stays in Zig. The guest agent is also intended to be Zig. Apple framework calls should remain a narrow macOS-only boundary.
 
@@ -64,5 +64,5 @@ Boot time, memory, binary size, image storage, and cleanup behavior will be meas
 4. Initial secure image layer extraction, regular-file hardlinks, and image listing; image removal remains.
 5. A bootable Linux guest and a minimal command result path, proven locally.
 6. One real Alpine command through the public CLI, followed by full OCI process settings, lifecycle, logs, and cleanup.
-7. Outbound networking is proven locally; port forwarding and explicit volumes remain.
+7. Outbound networking and one localhost TCP port mapping are proven locally; explicit volumes remain.
 8. Reproducible runtime benchmarks and signed release distribution.

@@ -1,8 +1,8 @@
 const std = @import("std");
 const Io = std.Io;
 
-pub fn writeInitramfs(allocator: std.mem.Allocator, io: Io, base: Io.File, output_dir: Io.Dir, command: []const []const u8, environment: []const []const u8, interactive: bool) !void {
-    const script = try makeScript(allocator, command, environment, interactive);
+pub fn writeInitramfs(allocator: std.mem.Allocator, io: Io, base: Io.File, output_dir: Io.Dir, command: []const []const u8, environment: []const []const u8, interactive: bool, require_network: bool) !void {
+    const script = try makeScript(allocator, command, environment, interactive, require_network);
     defer allocator.free(script);
     var output = try output_dir.createFile(io, "initramfs", .{ .exclusive = true });
     defer output.close(io);
@@ -17,7 +17,7 @@ pub fn writeInitramfs(allocator: std.mem.Allocator, io: Io, base: Io.File, outpu
     try writer.interface.flush();
 }
 
-fn makeScript(allocator: std.mem.Allocator, command: []const []const u8, environment: []const []const u8, interactive: bool) ![]u8 {
+fn makeScript(allocator: std.mem.Allocator, command: []const []const u8, environment: []const []const u8, interactive: bool, require_network: bool) ![]u8 {
     if (command.len == 0 or command.len > 256) return error.InvalidArguments;
     var output: Io.Writer.Allocating = .init(allocator);
     defer output.deinit();
@@ -42,9 +42,12 @@ fn makeScript(allocator: std.mem.Allocator, command: []const []const u8, environ
             "      /usr/bin/busybox mkdir -p /mnt/root/etc\n" ++
             "      /usr/bin/busybox rm -f /mnt/root/etc/resolv.conf\n" ++
             "      /usr/bin/busybox cp /etc/resolv.conf /mnt/root/etc/resolv.conf\n" ++
-            "    fi\n" ++
-            "    /usr/bin/busybox env -i",
+            "      guest_ip=$(/usr/bin/busybox ip -4 -o addr show eth0 | /usr/bin/busybox awk '$3 == \"inet\" {print $4}' | /usr/bin/busybox cut -d/ -f1)\n" ++
+            "      if [ -n \"$guest_ip\" ]; then printf '%s\\n' \"$guest_ip\" > /mnt/control/guest-ip; fi\n" ++
+            "    fi\n",
     );
+    if (require_network) try writer.writeAll("    if [ -s /mnt/control/guest-ip ]; then\n");
+    try writer.writeAll("    /usr/bin/busybox env -i");
     for (environment) |variable| {
         if (std.mem.indexOfScalar(u8, variable, 0) != null) return error.InvalidArguments;
         try writer.writeByte(' ');
@@ -61,9 +64,10 @@ fn makeScript(allocator: std.mem.Allocator, command: []const []const u8, environ
         if (output.written().len > 64 * 1024) return error.CommandTooLong;
     }
     if (!interactive) try writer.writeAll(" < /dev/null");
+    try writer.writeAll("\n    status=$?\n");
+    if (require_network) try writer.writeAll("    fi\n");
     try writer.writeAll(
-        "\n    status=$?\n" ++
-            "  fi\n" ++
+        "  fi\n" ++
             "  printf '%s\\n' \"$status\" > /mnt/control/exit\n" ++
             "  /usr/bin/busybox sync\n" ++
             "fi\n" ++
@@ -99,12 +103,13 @@ fn writeNewc(writer: *Io.Writer, name: []const u8, mode: u32, data: []const u8) 
 }
 
 test "shell arguments remain quoted" {
-    const script = try makeScript(std.testing.allocator, &.{ "/bin/echo", "a'b", "$(touch /tmp/host)" }, &.{"PATH=/bin"}, false);
+    const script = try makeScript(std.testing.allocator, &.{ "/bin/echo", "a'b", "$(touch /tmp/host)" }, &.{"PATH=/bin"}, false, true);
     defer std.testing.allocator.free(script);
     try std.testing.expect(std.mem.indexOf(u8, script, "env -i 'PATH=/bin' /usr/bin/busybox chroot") != null);
     try std.testing.expect(std.mem.indexOf(u8, script, "'/bin/echo' 'a'\"'\"'b' '$(touch /tmp/host)'") != null);
     try std.testing.expect(std.mem.indexOf(u8, script, "< /dev/null") != null);
-    const bare = try makeScript(std.testing.allocator, &.{ "echo", "hello" }, &.{}, true);
+    try std.testing.expect(std.mem.indexOf(u8, script, "if [ -s /mnt/control/guest-ip ]; then") != null);
+    const bare = try makeScript(std.testing.allocator, &.{ "echo", "hello" }, &.{}, true, false);
     defer std.testing.allocator.free(bare);
     try std.testing.expect(std.mem.indexOf(u8, bare, "/bin/sh -c 'exec \"$@\"' rift-sh 'echo' 'hello'") != null);
 }
