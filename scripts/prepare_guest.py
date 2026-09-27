@@ -61,10 +61,23 @@ def uncompress_kernel(zboot: bytes) -> bytes:
     return image
 
 
+def write_atomic(path: Path, data: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(dir=path.parent, prefix=f".{path.name}-", delete=False) as target:
+        temporary = Path(target.name)
+        try:
+            target.write(data)
+        except BaseException:
+            temporary.unlink(missing_ok=True)
+            raise
+    temporary.replace(path)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--iso", type=Path, help="reuse a local copy of the pinned Alpine ISO")
     parser.add_argument("--out", type=Path, default=Path(".zig-cache/guest"))
+    parser.add_argument("--install", action="store_true", help="install verified boot files for rift run")
     args = parser.parse_args()
 
     args.out.mkdir(parents=True, exist_ok=True)
@@ -78,8 +91,13 @@ def main() -> int:
     initramfs = extract(iso, "boot/initramfs-virt")
     if not initramfs.startswith(b"\x1f\x8b"):
         raise ValueError("Alpine initramfs is not gzip-compressed")
-    (args.out / "Image").write_bytes(kernel)
-    (args.out / "initramfs-virt").write_bytes(initramfs)
+    write_atomic(args.out / "Image", kernel)
+    write_atomic(args.out / "initramfs-virt", initramfs)
+    if args.install:
+        installed = Path.home() / "Library/Application Support/Rift/guest"
+        write_atomic(installed / "Image", kernel)
+        write_atomic(installed / "initramfs-virt", initramfs)
+        print(f"Installed guest assets in {installed}")
     print(f"Prepared Alpine 3.24.2 ARM64 guest in {args.out}")
     print(f"Image sha256: {hashlib.sha256(kernel).hexdigest()}")
     print(f"initramfs sha256: {hashlib.sha256(initramfs).hexdigest()}")

@@ -2,9 +2,9 @@
 
 **Ridiculously lightweight containers for macOS.**
 
-**No Docker. No daemon. No Docker Desktop. Just one binary.**
+**No Docker, daemon, or Docker Desktop. One binary is the distribution target.**
 
-Rift is an early-stage Zig project for running Linux containers on macOS. Those lines describe the intended product. The CLI can pull public OCI images for the Mac's architecture. It cannot start a Linux VM or run containers yet.
+Rift is an early-stage Zig container runtime for Apple Silicon Macs. It can pull public OCI images and run an explicit command in a short-lived Linux VM. The current build needs separately installed, verified guest boot files. Image defaults, networking, volumes, and detached containers remain unfinished.
 
 ## Current commands
 
@@ -14,9 +14,10 @@ rift version
 rift system info
 rift pull alpine
 rift images
+rift run --rm alpine echo hello
 ```
 
-Image pulls use anonymous registry access and save SHA-256-verified OCI blobs and reference metadata under `~/Library/Application Support/Rift`. Private registry credentials and container execution are not implemented.
+Image pulls use anonymous registry access and save SHA-256-verified OCI blobs and reference metadata under `~/Library/Application Support/Rift`. `run` requires an image pulled earlier and an explicit command. Each run gets a disposable writable overlay inside its own Linux VM. Private registry credentials are not implemented.
 
 ## Build
 
@@ -24,8 +25,11 @@ Requires Zig 0.16.0 or newer.
 
 ```sh
 brew install zig
+python3 scripts/prepare_guest.py --install
 zig build
 zig build test
+zig build run -- pull alpine
+zig build run-check
 zig build run -- system info
 ```
 
@@ -40,7 +44,7 @@ zig build vm-share-check
 zig build oci-vm-check
 ```
 
-These checks boot Alpine, mount a read-only host directory, and run `/bin/echo` from a pulled Alpine root filesystem inside the VM. Run `rift pull alpine` before `oci-vm-check`. The public `rift` CLI still has no `run` command.
+These checks boot Alpine, mount a read-only host directory, and run `/bin/echo` from a pulled Alpine root filesystem inside the VM. Run `rift pull alpine` before `oci-vm-check` or `run-check`.
 
 To assemble a pulled Alpine root filesystem locally, use the manifest digest shown by `rift images`:
 
@@ -68,10 +72,11 @@ No Docker Engine, Docker CLI, Docker Desktop, or container daemon is part of the
 - [x] Local root filesystem assembly from verified manifest and layer blobs
 - [x] Local VM smoke that executes pulled Alpine BusyBox through a read-only share
 - [ ] Hardlinks and complete OCI filesystem metadata
-- [ ] OCI command execution through Rift's public CLI
-- [ ] Container lifecycle, logs, networking, and cleanup
+- [x] Basic foreground OCI command execution through Rift's public CLI
+- [ ] Image default commands, environment, working directory, and user mapping
+- [ ] Detached lifecycle, structured logs, networking, volumes, and broader cleanup
 
-There is no container execution workflow or release artifact yet. Do not use Rift as a Docker replacement today.
+Each `run` is temporary, including runs without `--rm`. The CLI relays console output and returns the guest command's exit status. There is no release artifact yet. Do not use Rift as a Docker replacement today.
 
 ## License
 

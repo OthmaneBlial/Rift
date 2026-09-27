@@ -2,11 +2,11 @@
 
 ## Current state
 
-`help`, `version`, `system info`, public `pull`, and `images` work. Pull downloads and verifies OCI metadata and blobs for the host architecture, then records the resolved reference locally. Rift cannot start a VM or execute a container. The rest of this document records the intended design and work still to prove.
+`help`, `version`, `system info`, public `pull`, `images`, and a basic foreground `run` work. Pull downloads and verifies OCI metadata and blobs for the host architecture, then records the resolved reference locally. `run` currently requires a previously pulled image and an explicit command on Apple Silicon. It does not yet apply image defaults or support networking, volumes, or detached containers.
 
-Rift's Zig/Objective-C VM bridge boots an Alpine ARM64 kernel and initramfs to a shell, runs a command, and shuts down through the local `zig build vm-check` gate. `scripts/prepare_guest.py` reproduces those guest files from a pinned, SHA-256-verified Alpine ISO. Alpine packages its ARM64 kernel as a compressed EFI zboot image; the script extracts the uncompressed `Image` needed for direct boot. The public CLI has no container execution command yet.
+Rift's Zig/Objective-C VM bridge boots an Alpine ARM64 kernel and initramfs to a shell, runs a command, and shuts down through the local `zig build vm-check` gate. `scripts/prepare_guest.py` reproduces those guest files from a pinned, SHA-256-verified Alpine ISO. Alpine packages its ARM64 kernel as a compressed EFI zboot image; the script extracts the uncompressed `Image` needed for direct boot. `rift run` uses verified copies installed under the user's Application Support directory.
 
-The layer installer now handles OCI tar, gzip, and zstd layers. It applies whiteouts before entries from the same layer and refuses archive paths or parent symlinks that could redirect host writes. Root filesystem assembly reads a verified platform manifest, checks each cached layer digest and size again, and applies layers to a caller-owned staging directory. A local smoke check assembled the pulled Alpine ARM64 image and found BusyBox and its links. The VM bridge can expose that staging directory read-only through VirtioFS. `zig build oci-vm-check` boots Alpine, mounts the share, and executes `/bin/echo` from the pulled image with `chroot`. Hardlink entries and complete OCI ownership, directory modes, timestamps, and extended attributes still need implementation. The public CLI has no `run` command yet.
+The layer installer handles OCI tar, gzip, and zstd layers. It applies whiteouts before entries from the same layer and refuses archive paths or parent symlinks that could redirect host writes. Root filesystem assembly reads a verified platform manifest, checks each cached layer digest and size again, and applies layers to a private staging directory. Rift exposes that directory read-only through VirtioFS. The guest mounts a writable tmpfs overlay above it, executes the command with `chroot`, writes an exit status to a separate disposable control share, and powers off. The CLI relays console output and returns that status. `zig build run-check` has locally proved output, exit code 37, shell argument quoting, and temporary directory cleanup. Hardlinks and complete OCI ownership, directory modes, timestamps, and extended attributes remain unfinished.
 
 ## Runtime shape
 
@@ -19,7 +19,7 @@ The intended boundaries are:
 3. **Image store** — content-addressed blobs and image metadata under the user's Application Support directory.
 4. **Layer installer** — safe tar extraction and root filesystem assembly, without following paths outside the image root.
 5. **VM controller** — Linux kernel and initramfs boot, console, guest communication, and shutdown through Virtualization.framework.
-6. **Guest agent** — a small Linux-side binary that mounts an image root, creates container isolation, starts commands, and reports exit status and logs.
+6. **Guest execution** — a generated initramfs script currently mounts the image and starts explicit commands. A guest agent with OCI process settings and stricter isolation remains planned.
 7. **Networking and mounts** — outbound guest networking, requested port forwarding, and explicit host directory shares.
 
 The host-facing implementation stays in Zig. The guest agent is also intended to be Zig. Apple framework calls should remain a narrow macOS-only boundary.
@@ -28,9 +28,9 @@ The host-facing implementation stays in Zig. The guest agent is also intended to
 
 `rift pull alpine` resolves the reference, authenticates anonymously to public registries, selects the host's Linux architecture, fetches each required blob, verifies its digest, and publishes verified data into the content-addressed store. `rift images` lists locally recorded references and their platform manifest digests.
 
-`rift run --rm alpine echo hello` should assemble the image root, start a Linux VM with the matching kernel and guest agent, ask the guest to launch the command with container isolation, relay output and exit status, then stop the VM and remove only the temporary container state.
+`rift run --rm alpine echo hello` assembles the image root, starts a Linux VM with the pinned Alpine kernel, mounts the read-only image through VirtioFS, starts the command on an ephemeral writable overlay, relays output, returns its exit status, and removes temporary host state. The guest currently uses `chroot` inside a VM; Linux namespace and capability controls still need implementation.
 
-Image downloads and guest execution are separate milestones. A successful image pull must not be described as a runnable container.
+Image downloads and guest execution are separate steps. A pull alone does not prove that an arbitrary image can execute with full OCI process semantics.
 
 ## Process model
 
@@ -61,8 +61,8 @@ Boot time, memory, binary size, image storage, and cleanup behavior will be meas
 1. **Done:** OCI references, indexes, manifests, and platform selection with tests.
 2. **Done:** Streaming content-addressed SHA-256 storage with atomic publication and verification.
 3. **Done:** Public registry pulls, authentication, and local image metadata.
-4. Secure image layer extraction and image listing/removal.
-5. A bootable Linux guest and a minimal guest command protocol.
-6. One real Alpine command, followed by lifecycle, logs, and cleanup.
+4. Initial secure image layer extraction and image listing; hardlinks and removal remain.
+5. A bootable Linux guest and a minimal command result path, proven locally.
+6. One real Alpine command through the public CLI, followed by full OCI process settings, lifecycle, logs, and cleanup.
 7. Outbound networking, port forwarding, and explicit volumes.
 8. Reproducible runtime benchmarks and signed release distribution.

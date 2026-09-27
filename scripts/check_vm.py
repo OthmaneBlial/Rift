@@ -61,7 +61,13 @@ def main() -> int:
                             command += b"/usr/bin/busybox test -s /mnt/rift/Image && echo RIFT_SHARE_OK; "
                         else:
                             command += (
-                                b"/usr/bin/busybox chroot /mnt/rift /bin/echo RIFT_OCI_RUN_OK; "
+                                b"/usr/sbin/modprobe overlay; "
+                                b"/usr/bin/busybox mkdir -p /mnt/state /mnt/root; "
+                                b"/usr/bin/busybox mount -t tmpfs -o size=256m tmpfs /mnt/state && "
+                                b"/usr/bin/busybox mkdir -p /mnt/state/upper /mnt/state/work && "
+                                b"/usr/bin/busybox mount -t overlay overlay "
+                                b"-o lowerdir=/mnt/rift,upperdir=/mnt/state/upper,workdir=/mnt/state/work /mnt/root && "
+                                b"/usr/bin/busybox chroot /mnt/root /bin/echo RIFT_OCI_RUN_OK; "
                                 b"echo RIFT_OCI_EXIT:$?; "
                             )
                     os.write(master, command + b"/usr/bin/busybox poweroff -f\n")
@@ -91,7 +97,7 @@ def main() -> int:
         print(f"VM smoke failed (exit={result}):\n" + "\n".join(lines)[-4000:], file=sys.stderr)
         return 1
     if oci:
-        print("VM OCI smoke passed: pulled Alpine rootfs, read-only share, chroot command, shutdown")
+        print("VM OCI smoke passed: pulled Alpine rootfs, writable overlay, chroot command, shutdown")
     else:
         print("VM smoke passed: Alpine aarch64 boot, " + ("read-only share, " if share else "") + "command, shutdown")
     return 0

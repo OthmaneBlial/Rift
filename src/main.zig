@@ -8,6 +8,7 @@ const manifest = @import("oci/manifest.zig");
 const reference = @import("oci/reference.zig");
 const storage = @import("storage.zig");
 const registry = @import("oci/registry.zig");
+const runtime = @import("run.zig");
 
 fn printHelp(writer: *Io.Writer) Io.Writer.Error!void {
     try writer.writeAll(
@@ -18,36 +19,46 @@ fn printHelp(writer: *Io.Writer) Io.Writer.Error!void {
             "  version, --version Show version\n" ++
             "  system info        Show host information\n" ++
             "  images             List locally pulled images\n" ++
-            "  pull <image>       Pull an OCI image for this host\n",
+            "  pull <image>       Pull an OCI image for this host\n" ++
+            "  run [--rm] <image> <command> [args...] Run a pulled image\n",
     );
 }
 
-fn dispatch(args: []const []const u8, writer: *Io.Writer, init: ?std.process.Init) !void {
+fn dispatch(args: []const []const u8, writer: *Io.Writer, init: ?std.process.Init) !u8 {
     if (args.len == 0 or std.mem.eql(u8, args[0], "help") or std.mem.eql(u8, args[0], "--help")) {
         if (args.len > 1) return error.InvalidArguments;
-        return printHelp(writer);
+        try printHelp(writer);
+        return 0;
     }
 
     if (std.mem.eql(u8, args[0], "version") or std.mem.eql(u8, args[0], "--version")) {
         if (args.len != 1) return error.InvalidArguments;
-        return writer.print("Rift {s}\n", .{version});
+        try writer.print("Rift {s}\n", .{version});
+        return 0;
     }
 
     if (args.len == 2 and std.mem.eql(u8, args[0], "system") and std.mem.eql(u8, args[1], "info")) {
-        return writer.print(
+        try writer.print(
             "Rift {s}\nHost OS: {s}\nHost architecture: {s}\n",
             .{ version, @tagName(builtin.os.tag), @tagName(builtin.cpu.arch) },
         );
+        return 0;
     }
 
     if (args.len > 0 and std.mem.eql(u8, args[0], "pull")) {
         if (args.len != 2) return error.InvalidArguments;
-        return pullImage(init orelse return error.CommandUnavailable, args[1], writer);
+        try pullImage(init orelse return error.CommandUnavailable, args[1], writer);
+        return 0;
     }
 
     if (args.len > 0 and std.mem.eql(u8, args[0], "images")) {
         if (args.len != 1) return error.InvalidArguments;
-        return listImages(init orelse return error.CommandUnavailable, writer);
+        try listImages(init orelse return error.CommandUnavailable, writer);
+        return 0;
+    }
+
+    if (args.len > 0 and std.mem.eql(u8, args[0], "run")) {
+        return runtime.execute(init orelse return error.CommandUnavailable, args[1..]);
     }
 
     return error.CommandUnavailable;
@@ -122,12 +133,12 @@ pub fn main(init: std.process.Init) void {
 
     var buffer: [512]u8 = undefined;
     var stdout: Io.File.Writer = .init(.stdout(), init.io, &buffer);
-    dispatch(args, &stdout.interface, init) catch |err| {
+    const exit_code = dispatch(args, &stdout.interface, init) catch |err| {
         stdout.interface.flush() catch {};
         switch (err) {
             error.InvalidArguments => std.debug.print("rift: invalid arguments; run 'rift --help'\n", .{}),
             error.CommandUnavailable => std.debug.print("rift: command '{s}' is not available yet; run 'rift --help'\n", .{if (args.len == 0) "" else args[0]}),
-            error.UnsupportedHost => std.debug.print("rift: OCI pulls currently require macOS\n", .{}),
+            error.UnsupportedHost => std.debug.print("rift: this command requires a supported Mac\n", .{}),
             error.UnsupportedHostArchitecture => std.debug.print("rift: OCI pulls currently support Apple Silicon and Intel Macs\n", .{}),
             error.HomeDirectoryUnavailable => std.debug.print("rift: HOME is not set\n", .{}),
             error.InvalidReference => std.debug.print("rift: invalid OCI image reference\n", .{}),
@@ -142,6 +153,10 @@ pub fn main(init: std.process.Init) void {
             error.BlobSizeMismatch => std.debug.print("rift: downloaded blob size did not match its descriptor\n", .{}),
             error.UnsupportedDigestAlgorithm => std.debug.print("rift: image uses an unsupported digest algorithm\n", .{}),
             error.InvalidImageMetadata => std.debug.print("rift: local image metadata is corrupt\n", .{}),
+            error.CorruptCachedBlob => std.debug.print("rift: cached image blob failed verification\n", .{}),
+            error.GuestAssetsMissing => std.debug.print("rift: guest assets missing; run 'python3 scripts/prepare_guest.py --install'\n", .{}),
+            error.GuestAssetsCorrupt => std.debug.print("rift: guest assets failed SHA-256 verification\n", .{}),
+            error.GuestStatusMissing, error.GuestStatusInvalid => std.debug.print("rift: guest did not report a valid exit status\n", .{}),
             else => std.debug.print("rift: output failed: {s}\n", .{@errorName(err)}),
         }
         std.process.exit(if (err == error.InvalidArguments or err == error.CommandUnavailable) 2 else 1);
@@ -150,26 +165,27 @@ pub fn main(init: std.process.Init) void {
         std.debug.print("rift: output failed: {s}\n", .{@errorName(err)});
         std.process.exit(1);
     };
+    if (exit_code != 0) std.process.exit(exit_code);
 }
 
 test "help is available without a command" {
     var output: Io.Writer.Allocating = .init(std.testing.allocator);
     defer output.deinit();
-    try dispatch(&.{}, &output.writer, null);
+    _ = try dispatch(&.{}, &output.writer, null);
     try std.testing.expect(std.mem.startsWith(u8, output.written(), "Rift — Ridiculously lightweight containers for macOS\n"));
 }
 
 test "version prints the package version" {
     var output: Io.Writer.Allocating = .init(std.testing.allocator);
     defer output.deinit();
-    try dispatch(&.{"version"}, &output.writer, null);
+    _ = try dispatch(&.{"version"}, &output.writer, null);
     try std.testing.expectEqualStrings("Rift 0.1.0\n", output.written());
 }
 
 test "system info reports the compiled host target" {
     var output: Io.Writer.Allocating = .init(std.testing.allocator);
     defer output.deinit();
-    try dispatch(&.{ "system", "info" }, &output.writer, null);
+    _ = try dispatch(&.{ "system", "info" }, &output.writer, null);
     try std.testing.expect(std.mem.indexOf(u8, output.written(), @tagName(builtin.os.tag)) != null);
     try std.testing.expect(std.mem.indexOf(u8, output.written(), @tagName(builtin.cpu.arch)) != null);
 }
@@ -186,5 +202,6 @@ test {
     _ = @import("oci/registry.zig");
     _ = @import("oci/layers.zig");
     _ = @import("oci/rootfs.zig");
+    _ = @import("guest.zig");
     _ = @import("storage.zig");
 }

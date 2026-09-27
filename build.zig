@@ -11,16 +11,39 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
-    b.installArtifact(exe);
-
-    const run = b.addRunArtifact(exe);
-    if (b.args) |args| run.addArgs(args);
-    b.step("run", "Run Rift").dependOn(&run.step);
+    const install_exe = b.addInstallArtifact(exe, .{});
+    b.getInstallStep().dependOn(&install_exe.step);
 
     const tests = b.addTest(.{ .root_module = exe.root_module });
     b.step("test", "Run tests").dependOn(&b.addRunArtifact(tests).step);
 
     if (target.result.os.tag == .macos and target.result.cpu.arch == .aarch64) {
+        exe.root_module.link_libc = true;
+        exe.root_module.addCSourceFile(.{
+            .file = b.path("src/vm/bridge.m"),
+            .language = .objective_c,
+            .flags = &.{ "-fobjc-arc", "-fblocks" },
+        });
+        exe.root_module.linkFramework("Foundation", .{});
+        exe.root_module.linkFramework("Virtualization", .{});
+        exe.root_module.linkSystemLibrary("objc", .{});
+        const exe_path = b.getInstallPath(.bin, "rift");
+        const sign_exe = b.addSystemCommand(&.{ "/usr/bin/codesign", "--force", "--sign", "-", "--entitlements" });
+        sign_exe.addFileArg(b.path("src/vm/entitlements.plist"));
+        sign_exe.addArg(exe_path);
+        sign_exe.step.dependOn(&install_exe.step);
+        b.getInstallStep().dependOn(&sign_exe.step);
+        const run = b.addSystemCommand(&.{exe_path});
+        run.step.dependOn(&sign_exe.step);
+        if (b.args) |args| run.addArgs(args);
+        b.step("run", "Run Rift").dependOn(&run.step);
+
+        const check_run = b.addSystemCommand(&.{"/usr/bin/python3"});
+        check_run.addFileArg(b.path("scripts/check_run.py"));
+        check_run.addArg(exe_path);
+        check_run.step.dependOn(&sign_exe.step);
+        b.step("run-check", "Run Alpine through the signed Rift CLI").dependOn(&check_run.step);
+
         const probe = b.addExecutable(.{
             .name = "rift-vm-probe",
             .root_module = b.createModule(.{
@@ -83,5 +106,9 @@ pub fn build(b: *std.Build) void {
         });
         check_oci.step.dependOn(&sign.step);
         b.step("oci-vm-check", "Run pulled Alpine BusyBox inside a VM").dependOn(&check_oci.step);
+    } else {
+        const run = b.addRunArtifact(exe);
+        if (b.args) |args| run.addArgs(args);
+        b.step("run", "Run Rift").dependOn(&run.step);
     }
 }
