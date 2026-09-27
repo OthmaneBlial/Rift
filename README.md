@@ -6,6 +6,8 @@
 
 Project site: [othmaneblial.github.io/Rift](https://othmaneblial.github.io/Rift/)
 
+Source preview: [v0.1.0](https://github.com/OthmaneBlial/Rift/releases/tag/v0.1.0)
+
 Rift is an early-stage Zig container runtime for Apple Silicon Macs. It pulls OCI images and runs commands in Linux VMs, including detached servers with one localhost TCP port mapping and explicit file and directory volumes. File-volume sources must share a filesystem with Rift's runtime storage. On the first `run`, the binary downloads a pinned Alpine ISO, verifies its SHA-256, and installs the guest boot files. Each command now gets private Linux PID and mount namespaces, minimal `/dev` and `/proc` mounts, and reduced capabilities. Complete OCI process settings remain unfinished.
 
 ## Current commands
