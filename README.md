@@ -4,7 +4,7 @@
 
 **No Docker, daemon, or Docker Desktop. One binary is the distribution target.**
 
-Rift is an early-stage Zig container runtime for Apple Silicon Macs. It can pull public OCI images and run an explicit command in a short-lived Linux VM. The current build needs separately installed, verified guest boot files. Image defaults, networking, volumes, and detached containers remain unfinished.
+Rift is an early-stage Zig container runtime for Apple Silicon Macs. It can pull public OCI images and run a command in a short-lived Linux VM. The current build needs separately installed, verified guest boot files. Networking, volumes, and detached containers remain unfinished.
 
 ## Current commands
 
@@ -17,7 +17,7 @@ rift images
 rift run --rm alpine echo hello
 ```
 
-Image pulls use anonymous registry access and save SHA-256-verified OCI blobs and reference metadata under `~/Library/Application Support/Rift`. `run` requires an image pulled earlier and an explicit command. Each run gets a disposable writable overlay inside its own Linux VM. Private registry credentials are not implemented.
+Image pulls use anonymous registry access and save SHA-256-verified OCI blobs and reference metadata under `~/Library/Application Support/Rift`. `run` requires an image pulled earlier. It uses the image's `Entrypoint`, `Cmd`, and `Env` defaults, or your command arguments. Each run gets a disposable writable overlay inside its own Linux VM. Images requesting a non-root user or working directory other than `/` are rejected for now. Private registry credentials are not implemented.
 
 ## Build
 
@@ -73,7 +73,8 @@ No Docker Engine, Docker CLI, Docker Desktop, or container daemon is part of the
 - [x] Local VM smoke that executes pulled Alpine BusyBox through a read-only share
 - [ ] Hardlinks and complete OCI filesystem metadata
 - [x] Basic foreground OCI command execution through Rift's public CLI
-- [ ] Image default commands, environment, working directory, and user mapping
+- [x] Image entrypoint, command, and environment defaults
+- [ ] Non-root user and non-root working directory support
 - [ ] Detached lifecycle, structured logs, networking, volumes, and broader cleanup
 
 Each `run` is temporary, including runs without `--rm`. The CLI relays console output and returns the guest command's exit status. There is no release artifact yet. Do not use Rift as a Docker replacement today.

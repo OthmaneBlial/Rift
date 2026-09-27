@@ -3,6 +3,7 @@ const std = @import("std");
 const Io = std.Io;
 
 const guest = @import("guest.zig");
+const config = @import("oci/config.zig");
 const reference = @import("oci/reference.zig");
 const rootfs = @import("oci/rootfs.zig");
 const storage = @import("storage.zig");
@@ -14,7 +15,7 @@ const initramfs_sha256 = "5b9de8ff7b4f3055f6cf940e1ff869790415cf81b7ea1e399ee604
 pub fn execute(init: std.process.Init, arguments: []const []const u8) !u8 {
     if (builtin.os.tag != .macos or builtin.cpu.arch != .aarch64) return error.UnsupportedHost;
     const offset: usize = if (arguments.len > 0 and std.mem.eql(u8, arguments[0], "--rm")) 1 else 0;
-    if (arguments.len < offset + 2) return error.InvalidArguments;
+    if (arguments.len < offset + 1) return error.InvalidArguments;
     const allocator = init.arena.allocator();
     var image = try reference.parse(allocator, arguments[offset]);
     defer image.deinit(allocator);
@@ -33,6 +34,15 @@ pub fn execute(init: std.process.Init, arguments: []const []const u8) !u8 {
     const manifest_digest = for (records) |record| {
         if (std.mem.eql(u8, record.reference, canonical)) break record.digest;
     } else return error.ImageNotFound;
+    const image_config = try config.load(allocator, store, manifest_digest);
+    const process = image_config.config orelse config.Process{};
+    if (process.User) |user| {
+        if (user.len != 0 and !std.mem.eql(u8, user, "root") and !std.mem.eql(u8, user, "0")) return error.UnsupportedImageUser;
+    }
+    if (process.WorkingDir) |directory| {
+        if (directory.len != 0 and !std.mem.eql(u8, directory, "/")) return error.UnsupportedWorkingDirectory;
+    }
+    const command = try config.command(allocator, process, arguments[offset + 1 ..]);
 
     var guest_dir = data_dir.openDir(init.io, "guest", .{ .follow_symlinks = false }) catch |err| switch (err) {
         error.FileNotFound => return error.GuestAssetsMissing,
@@ -70,7 +80,8 @@ pub fn execute(init: std.process.Init, arguments: []const []const u8) !u8 {
     var control = try run_dir.openDir(init.io, "control", .{});
     defer control.close(init.io);
     try rootfs.assemble(allocator, init.io, image_root, store, manifest_digest);
-    try guest.writeInitramfs(allocator, init.io, base_initramfs, run_dir, arguments[offset + 1 ..]);
+    const interactive = try Io.File.stdin().isTty(init.io);
+    try guest.writeInitramfs(allocator, init.io, base_initramfs, run_dir, command, process.Env orelse &.{}, interactive);
 
     var root_path_buffer: [Io.Dir.max_path_bytes]u8 = undefined;
     var control_path_buffer: [Io.Dir.max_path_bytes]u8 = undefined;

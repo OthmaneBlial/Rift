@@ -15,8 +15,11 @@ def main() -> int:
     before = set(runtime.iterdir()) if runtime.exists() else set()
 
     cases = [
+        (["run", "alpine"], 0, ""),
         (["run", "--rm", "alpine", "/bin/echo", "RIFT_RUN_OK"], 0, "RIFT_RUN_OK"),
         (["run", "alpine", "/bin/sh", "-c", "exit 37"], 37, ""),
+        (["run", "alpine", "/bin/sh", "-c", "printf '%s\\n' \"$PATH\""], 0,
+         "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"),
         (["run", "alpine", "echo", "two words", "$(touch /tmp/rift-should-not-exist)"], 0,
          "two words $(touch /tmp/rift-should-not-exist)"),
     ]
@@ -33,7 +36,7 @@ def main() -> int:
     if after != before or Path("/tmp/rift-should-not-exist").exists():
         print("Rift run check failed: temporary state or injected host file remains", file=sys.stderr)
         return 1
-    print("Rift run check passed: output, exit status, quoting, cleanup")
+    print("Rift run check passed: image defaults, environment, output, exit status, quoting, cleanup")
     return 0
 
 

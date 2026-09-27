@@ -2,7 +2,7 @@
 
 ## Current state
 
-`help`, `version`, `system info`, public `pull`, `images`, and a basic foreground `run` work. Pull downloads and verifies OCI metadata and blobs for the host architecture, then records the resolved reference locally. `run` currently requires a previously pulled image and an explicit command on Apple Silicon. It does not yet apply image defaults or support networking, volumes, or detached containers.
+`help`, `version`, `system info`, public `pull`, `images`, and a basic foreground `run` work. Pull downloads and verifies OCI metadata and blobs for the host architecture, then records the resolved reference locally. `run` currently requires a previously pulled image on Apple Silicon. It applies image entrypoint, command, and environment defaults. Images requesting a non-root user or working directory other than `/` are rejected until those settings can be honored. Networking, volumes, and detached containers remain unfinished.
 
 Rift's Zig/Objective-C VM bridge boots an Alpine ARM64 kernel and initramfs to a shell, runs a command, and shuts down through the local `zig build vm-check` gate. `scripts/prepare_guest.py` reproduces those guest files from a pinned, SHA-256-verified Alpine ISO. Alpine packages its ARM64 kernel as a compressed EFI zboot image; the script extracts the uncompressed `Image` needed for direct boot. `rift run` uses verified copies installed under the user's Application Support directory.
 

@@ -20,7 +20,7 @@ fn printHelp(writer: *Io.Writer) Io.Writer.Error!void {
             "  system info        Show host information\n" ++
             "  images             List locally pulled images\n" ++
             "  pull <image>       Pull an OCI image for this host\n" ++
-            "  run [--rm] <image> <command> [args...] Run a pulled image\n",
+            "  run [--rm] <image> [command] [args...] Run a pulled image\n",
     );
 }
 
@@ -157,6 +157,10 @@ pub fn main(init: std.process.Init) void {
             error.GuestAssetsMissing => std.debug.print("rift: guest assets missing; run 'python3 scripts/prepare_guest.py --install'\n", .{}),
             error.GuestAssetsCorrupt => std.debug.print("rift: guest assets failed SHA-256 verification\n", .{}),
             error.GuestStatusMissing, error.GuestStatusInvalid => std.debug.print("rift: guest did not report a valid exit status\n", .{}),
+            error.InvalidImageConfig => std.debug.print("rift: image configuration is invalid or mismatches its layers\n", .{}),
+            error.ImageHasNoCommand => std.debug.print("rift: image has no default command; specify one after the image\n", .{}),
+            error.UnsupportedImageUser => std.debug.print("rift: this image requests a non-root user, which is not supported yet\n", .{}),
+            error.UnsupportedWorkingDirectory => std.debug.print("rift: this image requests a working directory other than '/', which is not supported yet\n", .{}),
             else => std.debug.print("rift: output failed: {s}\n", .{@errorName(err)}),
         }
         std.process.exit(if (err == error.InvalidArguments or err == error.CommandUnavailable) 2 else 1);
@@ -202,6 +206,7 @@ test {
     _ = @import("oci/registry.zig");
     _ = @import("oci/layers.zig");
     _ = @import("oci/rootfs.zig");
+    _ = @import("oci/config.zig");
     _ = @import("guest.zig");
     _ = @import("storage.zig");
 }

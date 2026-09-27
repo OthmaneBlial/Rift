@@ -1,8 +1,8 @@
 const std = @import("std");
 const Io = std.Io;
 
-pub fn writeInitramfs(allocator: std.mem.Allocator, io: Io, base: Io.File, output_dir: Io.Dir, command: []const []const u8) !void {
-    const script = try makeScript(allocator, command);
+pub fn writeInitramfs(allocator: std.mem.Allocator, io: Io, base: Io.File, output_dir: Io.Dir, command: []const []const u8, environment: []const []const u8, interactive: bool) !void {
+    const script = try makeScript(allocator, command, environment, interactive);
     defer allocator.free(script);
     var output = try output_dir.createFile(io, "initramfs", .{ .exclusive = true });
     defer output.close(io);
@@ -17,7 +17,7 @@ pub fn writeInitramfs(allocator: std.mem.Allocator, io: Io, base: Io.File, outpu
     try writer.interface.flush();
 }
 
-fn makeScript(allocator: std.mem.Allocator, command: []const []const u8) ![]u8 {
+fn makeScript(allocator: std.mem.Allocator, command: []const []const u8, environment: []const []const u8, interactive: bool) ![]u8 {
     if (command.len == 0 or command.len > 256) return error.InvalidArguments;
     var output: Io.Writer.Allocating = .init(allocator);
     defer output.deinit();
@@ -34,8 +34,15 @@ fn makeScript(allocator: std.mem.Allocator, command: []const []const u8) ![]u8 {
             "  if /usr/bin/busybox mount -t tmpfs -o size=256m tmpfs /mnt/state &&\n" ++
             "     /usr/bin/busybox mkdir -p /mnt/state/upper /mnt/state/work &&\n" ++
             "     /usr/bin/busybox mount -t overlay overlay -o lowerdir=/mnt/rift,upperdir=/mnt/state/upper,workdir=/mnt/state/work /mnt/root; then\n" ++
-            "    /usr/bin/busybox chroot /mnt/root",
+            "    /usr/bin/busybox env -i",
     );
+    for (environment) |variable| {
+        if (std.mem.indexOfScalar(u8, variable, 0) != null) return error.InvalidArguments;
+        try writer.writeByte(' ');
+        try quote(writer, variable);
+        if (output.written().len > 64 * 1024) return error.CommandTooLong;
+    }
+    try writer.writeAll(" /usr/bin/busybox chroot /mnt/root");
     if (command[0].len == 0) return error.InvalidArguments;
     if (command[0][0] != '/') try writer.writeAll(" /bin/sh -c 'exec \"$@\"' rift-sh");
     for (command) |argument| {
@@ -44,6 +51,7 @@ fn makeScript(allocator: std.mem.Allocator, command: []const []const u8) ![]u8 {
         try quote(writer, argument);
         if (output.written().len > 64 * 1024) return error.CommandTooLong;
     }
+    if (!interactive) try writer.writeAll(" < /dev/null");
     try writer.writeAll(
         "\n    status=$?\n" ++
             "  fi\n" ++
@@ -82,10 +90,12 @@ fn writeNewc(writer: *Io.Writer, name: []const u8, mode: u32, data: []const u8) 
 }
 
 test "shell arguments remain quoted" {
-    const script = try makeScript(std.testing.allocator, &.{ "/bin/echo", "a'b", "$(touch /tmp/host)" });
+    const script = try makeScript(std.testing.allocator, &.{ "/bin/echo", "a'b", "$(touch /tmp/host)" }, &.{"PATH=/bin"}, false);
     defer std.testing.allocator.free(script);
+    try std.testing.expect(std.mem.indexOf(u8, script, "env -i 'PATH=/bin' /usr/bin/busybox chroot") != null);
     try std.testing.expect(std.mem.indexOf(u8, script, "'/bin/echo' 'a'\"'\"'b' '$(touch /tmp/host)'") != null);
-    const bare = try makeScript(std.testing.allocator, &.{ "echo", "hello" });
+    try std.testing.expect(std.mem.indexOf(u8, script, "< /dev/null") != null);
+    const bare = try makeScript(std.testing.allocator, &.{ "echo", "hello" }, &.{}, true);
     defer std.testing.allocator.free(bare);
     try std.testing.expect(std.mem.indexOf(u8, bare, "/bin/sh -c 'exec \"$@\"' rift-sh 'echo' 'hello'") != null);
 }
