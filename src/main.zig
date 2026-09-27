@@ -88,7 +88,9 @@ fn pullImage(init: std.process.Init, image_name: []const u8, writer: *Io.Writer)
 fn listImages(init: std.process.Init, writer: *Io.Writer) !void {
     var store = try openImageStore(init);
     defer store.deinit();
-    const records = try store.listImages(init.arena.allocator());
+    const allocator = init.arena.allocator();
+    const records = try store.listImages(allocator);
+    defer storage.deinitImageRecords(allocator, records);
     if (records.len == 0) return writer.writeAll("No images pulled yet.\n");
     for (records) |record| {
         try writer.print("{s}  {s}  {s} ({d} layers)\n", .{
@@ -139,6 +141,7 @@ pub fn main(init: std.process.Init) void {
             error.BlobDigestMismatch => std.debug.print("rift: downloaded blob failed SHA-256 verification\n", .{}),
             error.BlobSizeMismatch => std.debug.print("rift: downloaded blob size did not match its descriptor\n", .{}),
             error.UnsupportedDigestAlgorithm => std.debug.print("rift: image uses an unsupported digest algorithm\n", .{}),
+            error.InvalidImageMetadata => std.debug.print("rift: local image metadata is corrupt\n", .{}),
             else => std.debug.print("rift: output failed: {s}\n", .{@errorName(err)}),
         }
         std.process.exit(if (err == error.InvalidArguments or err == error.CommandUnavailable) 2 else 1);
