@@ -49,6 +49,7 @@ This checklist follows the goals in the original project brief. `[x]` marks work
 - [x] Apply regular-file hardlinks and reject unsafe targets.
 - [x] Reject archive traversal, unsafe links, and writes redirected outside the image root.
 - [x] Preserve directory modes and standard tar modification times.
+- [x] Apply final directory metadata deepest-first so restrictive parents cannot block their children.
 - [x] Smoke-test pulled Alpine BusyBox inside the VM through a read-only share.
 - [x] Keep image files read-only and use a disposable writable overlay for container changes.
 - [ ] Preserve OCI file ownership and groups during layer extraction.

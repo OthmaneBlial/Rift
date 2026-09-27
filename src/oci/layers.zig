@@ -131,8 +131,16 @@ fn applyTar(allocator: std.mem.Allocator, io: Io, root: Io.Dir, reader: *Io.Read
 }
 
 pub fn applyDirectoryMetadata(io: Io, root: Io.Dir, directory_metadata: *std.StringHashMap(DirectoryMetadata)) !void {
+    var paths: std.ArrayList([]const u8) = .empty;
+    defer paths.deinit(directory_metadata.allocator);
     var entries = directory_metadata.iterator();
-    while (entries.next()) |entry| try applyDirectoryMetadataEntry(io, root, entry.key_ptr.*, entry.value_ptr.*);
+    while (entries.next()) |entry| try paths.append(directory_metadata.allocator, entry.key_ptr.*);
+    std.mem.sort([]const u8, paths.items, {}, struct {
+        fn lessThan(_: void, lhs: []const u8, rhs: []const u8) bool {
+            return lhs.len > rhs.len;
+        }
+    }.lessThan);
+    for (paths.items) |path| try applyDirectoryMetadataEntry(io, root, path, directory_metadata.get(path).?);
 }
 
 fn applyDirectoryMetadataEntry(io: Io, root: Io.Dir, path: []const u8, metadata: DirectoryMetadata) !void {
@@ -380,6 +388,56 @@ test "applies final directory modes after all layers" {
     const contents = try root.readFileAlloc(io, "tmp/probe", allocator, .limited(4));
     defer allocator.free(contents);
     try std.testing.expectEqualStrings("ok", contents);
+}
+
+test "applies restrictive parent directory metadata after children" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var temp = std.testing.tmpDir(.{});
+    defer temp.cleanup();
+    try temp.dir.createDirPath(io, "root");
+    var root = try temp.dir.openDir(io, "root", .{});
+    defer root.close(io);
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const arena_allocator = arena.allocator();
+    var directory_metadata = std.StringHashMap(DirectoryMetadata).init(arena_allocator);
+    defer directory_metadata.deinit();
+
+    var parent_path: []const u8 = undefined;
+    var child_path: []const u8 = undefined;
+    var found_parent_first = false;
+    for (0..512) |candidate| {
+        parent_path = try std.fmt.allocPrint(arena_allocator, "locked-{d}", .{candidate});
+        child_path = try std.fmt.allocPrint(arena_allocator, "{s}/child", .{parent_path});
+        try directory_metadata.put(parent_path, .{ .mode = 0, .mtime = .fromNanoseconds(11 * std.time.ns_per_s) });
+        try directory_metadata.put(child_path, .{ .mode = 0o700, .mtime = .fromNanoseconds(22 * std.time.ns_per_s) });
+
+        var entries = directory_metadata.iterator();
+        const first = entries.next().?.key_ptr.*;
+        if (std.mem.eql(u8, first, parent_path)) {
+            found_parent_first = true;
+            break;
+        }
+        directory_metadata.clearRetainingCapacity();
+    }
+    try std.testing.expect(found_parent_first);
+
+    try root.createDirPath(io, child_path);
+    var parent = try root.openDir(io, parent_path, .{});
+    defer parent.close(io);
+    defer parent.setPermissions(io, .fromMode(0o700)) catch {};
+
+    try applyDirectoryMetadata(io, root, &directory_metadata);
+    const parent_stat = try root.statFile(io, parent_path, .{ .follow_symlinks = false });
+    try std.testing.expectEqual(@as(u32, 0), @as(u32, @intCast(parent_stat.permissions.toMode() & 0o7777)));
+    try std.testing.expectEqual(@as(i64, 11), parent_stat.mtime.toSeconds());
+
+    try parent.setPermissions(io, .fromMode(0o700));
+    const child_stat = try root.statFile(io, child_path, .{ .follow_symlinks = false });
+    try std.testing.expectEqual(@as(u32, 0o700), @as(u32, @intCast(child_stat.permissions.toMode() & 0o7777)));
+    try std.testing.expectEqual(@as(i64, 22), child_stat.mtime.toSeconds());
 }
 
 test "honors local PAX path and size overrides and rejects unsafe overrides" {
