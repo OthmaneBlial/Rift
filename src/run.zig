@@ -3,14 +3,12 @@ const std = @import("std");
 const Io = std.Io;
 
 const guest = @import("guest.zig");
+const boot_assets = @import("boot_assets.zig");
 const config = @import("oci/config.zig");
 const reference = @import("oci/reference.zig");
 const rootfs = @import("oci/rootfs.zig");
 const storage = @import("storage.zig");
 const vm = @import("vm.zig");
-
-const kernel_sha256 = "e698a107e4d04117db1a7b0daee99bdae5f0647fba2af50f3cd020a666950ab9";
-const initramfs_sha256 = "5b9de8ff7b4f3055f6cf940e1ff869790415cf81b7ea1e399ee60448bc1a2c4d";
 
 pub fn execute(init: std.process.Init, arguments: []const []const u8, stop_path: ?[]const u8) !u8 {
     if (builtin.os.tag != .macos or builtin.cpu.arch != .aarch64) return error.UnsupportedHost;
@@ -45,6 +43,7 @@ pub fn execute(init: std.process.Init, arguments: []const []const u8, stop_path:
     }
     const command = try config.command(allocator, process, arguments[offset + 1 ..]);
 
+    try boot_assets.ensure(allocator, init.io, data_dir);
     var guest_dir = data_dir.openDir(init.io, "guest", .{ .follow_symlinks = false }) catch |err| switch (err) {
         error.FileNotFound => return error.GuestAssetsMissing,
         else => return err,
@@ -60,8 +59,8 @@ pub fn execute(init: std.process.Init, arguments: []const []const u8, stop_path:
         else => return err,
     };
     defer base_initramfs.close(init.io);
-    if (!(try matchesSha256(init.io, kernel, kernel_sha256)) or
-        !(try matchesSha256(init.io, base_initramfs, initramfs_sha256))) return error.GuestAssetsCorrupt;
+    if (!(try boot_assets.matchesSha256(init.io, kernel, boot_assets.kernel_sha256)) or
+        !(try boot_assets.matchesSha256(init.io, base_initramfs, boot_assets.initramfs_sha256))) return error.GuestAssetsCorrupt;
 
     try data_dir.createDirPath(init.io, "runtime");
     var runtime = try data_dir.openDir(init.io, "runtime", .{});
@@ -150,18 +149,4 @@ test "port mappings require two valid TCP ports" {
     for (&invalid_ports) |invalid| {
         try std.testing.expectError(error.InvalidArguments, parsePort(invalid));
     }
-}
-
-fn matchesSha256(io: Io, file: Io.File, expected: []const u8) !bool {
-    var input_buffer: [32 * 1024]u8 = undefined;
-    var chunk: [32 * 1024]u8 = undefined;
-    var reader = file.reader(io, &input_buffer);
-    var hash = std.crypto.hash.sha2.Sha256.init(.{});
-    while (true) {
-        const count = try reader.interface.readSliceShort(&chunk);
-        if (count == 0) break;
-        hash.update(chunk[0..count]);
-    }
-    const actual = std.fmt.bytesToHex(hash.finalResult(), .lower);
-    return std.mem.eql(u8, &actual, expected);
 }

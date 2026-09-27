@@ -183,8 +183,13 @@ pub fn main(init: std.process.Init) void {
             error.UnsupportedDigestAlgorithm => std.debug.print("rift: image uses an unsupported digest algorithm\n", .{}),
             error.InvalidImageMetadata => std.debug.print("rift: local image metadata is corrupt\n", .{}),
             error.CorruptCachedBlob => std.debug.print("rift: cached image blob failed verification\n", .{}),
-            error.GuestAssetsMissing => std.debug.print("rift: guest assets missing; run 'python3 scripts/prepare_guest.py --install'\n", .{}),
+            error.GuestAssetsMissing => std.debug.print("rift: guest boot files are missing\n", .{}),
             error.GuestAssetsCorrupt => std.debug.print("rift: guest assets failed SHA-256 verification\n", .{}),
+            error.GuestDownloadFailed => std.debug.print("rift: could not download the pinned Alpine guest ISO\n", .{}),
+            error.GuestArchiveTooLarge => std.debug.print("rift: Alpine guest ISO exceeded the download limit\n", .{}),
+            error.InsecureGuestRedirect => std.debug.print("rift: Alpine guest ISO redirect was not HTTPS\n", .{}),
+            error.GuestArchiveDigestMismatch => std.debug.print("rift: Alpine guest ISO failed SHA-256 verification\n", .{}),
+            error.GuestArchiveInvalid, error.UnsupportedGuestKernel => std.debug.print("rift: Alpine guest ISO has unsupported boot files\n", .{}),
             error.GuestStatusMissing, error.GuestStatusInvalid => std.debug.print("rift: guest did not report a valid exit status\n", .{}),
             error.HostPortUnavailable => std.debug.print("rift: requested localhost port is unavailable\n", .{}),
             error.InvalidContainerId => std.debug.print("rift: invalid container ID\n", .{}),
@@ -244,6 +249,7 @@ test {
     _ = @import("oci/rootfs.zig");
     _ = @import("oci/config.zig");
     _ = @import("guest.zig");
+    _ = @import("boot_assets.zig");
     _ = @import("containers.zig");
     _ = @import("storage.zig");
 }

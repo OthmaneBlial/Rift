@@ -4,7 +4,7 @@
 
 **No Docker, daemon, or Docker Desktop. One binary is the distribution target.**
 
-Rift is an early-stage Zig container runtime for Apple Silicon Macs. It pulls public OCI images and runs commands in Linux VMs, including detached servers with one localhost TCP port mapping. The current build needs separately installed, verified guest boot files. Volumes and complete OCI process isolation remain unfinished.
+Rift is an early-stage Zig container runtime for Apple Silicon Macs. It pulls public OCI images and runs commands in Linux VMs, including detached servers with one localhost TCP port mapping. On the first `run`, the binary downloads a pinned Alpine ISO, verifies its SHA-256, and installs the guest boot files. Volumes and complete OCI process isolation remain unfinished.
 
 ## Current commands
 
@@ -31,7 +31,6 @@ Requires Zig 0.16.0 or newer.
 
 ```sh
 brew install zig
-python3 scripts/prepare_guest.py --install
 zig build
 zig build test
 zig build run -- pull alpine
@@ -42,7 +41,7 @@ zig build run-detached-check
 zig build run -- system info
 ```
 
-GitHub Actions is disabled; run these checks locally.
+GitHub Actions is disabled; run these checks locally. `zig-out/bin/rift` needs no Zig or Python at runtime. A fresh installation needs network access on the first `run` to fetch the verified Alpine guest boot files.
 
 To check the macOS VM bridge on Apple Silicon, prepare the pinned Alpine guest and run the local integration check:
 
@@ -77,6 +76,7 @@ No Docker Engine, Docker CLI, Docker Desktop, or container daemon is part of the
 - [x] Public OCI pulls with Bearer token auth, platform selection, and verified blob downloads
 - [x] Local image metadata and listing
 - [x] Local Virtualization.framework bridge and Alpine guest boot check
+- [x] First-run download and verification of pinned guest boot files from the binary
 - [ ] Image removal
 - [x] Initial safe extraction of tar, gzip, and zstd layers, including OCI whiteouts and regular-file hardlinks
 - [x] Local root filesystem assembly from verified manifest and layer blobs
