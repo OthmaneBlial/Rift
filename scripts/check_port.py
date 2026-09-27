@@ -53,12 +53,54 @@ def main() -> int:
                 file=sys.stderr,
             )
             return 1
-        print("Rift port check passed: localhost TCP forwarding and cleanup")
-        return 0
     finally:
         if process.poll() is None:
             process.terminate()
             process.communicate(timeout=5)
+
+    with socket.socket() as reservation:
+        reservation.bind(("127.0.0.1", 0))
+        idle_port = reservation.getsockname()[1]
+    idle_process = subprocess.Popen(
+        [
+            sys.argv[1],
+            "run",
+            "-p",
+            f"{idle_port}:8080",
+            "alpine",
+            "/bin/sh",
+            "-c",
+            "busybox timeout 2 nc -l -p 8080; true",
+        ],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    idle_client = None
+    try:
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline and idle_process.poll() is None:
+            try:
+                idle_client = socket.create_connection(("127.0.0.1", idle_port), timeout=1)
+                break
+            except (ConnectionRefusedError, TimeoutError, OSError):
+                time.sleep(0.2)
+        if idle_client is None:
+            raise RuntimeError("could not open an idle forwarded TCP connection")
+        idle_code = idle_process.wait(timeout=20)
+        stdout, stderr = idle_process.communicate(timeout=5)
+        after = set(runtime.iterdir()) if runtime.exists() else set()
+        if idle_code != 0 or after != before:
+            raise RuntimeError(f"idle forwarded connection blocked VM cleanup: exit={idle_code}, stdout={stdout!r}, stderr={stderr!r}")
+    finally:
+        if idle_client is not None:
+            idle_client.close()
+        if idle_process.poll() is None:
+            idle_process.terminate()
+            idle_process.communicate(timeout=5)
+
+    print("Rift port check passed: localhost forwarding, idle-client shutdown, cleanup")
+    return 0
 
 
 if __name__ == "__main__":
