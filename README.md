@@ -4,7 +4,7 @@
 
 **No Docker, daemon, or Docker Desktop. One binary is the distribution target.**
 
-Rift is an early-stage Zig container runtime for Apple Silicon Macs. It pulls public OCI images and runs commands in Linux VMs, including detached servers with one localhost TCP port mapping and explicit directory volumes. On the first `run`, the binary downloads a pinned Alpine ISO, verifies its SHA-256, and installs the guest boot files. Each command now gets private Linux PID and mount namespaces, minimal `/dev` and `/proc` mounts, and reduced capabilities. Complete OCI process settings remain unfinished.
+Rift is an early-stage Zig container runtime for Apple Silicon Macs. It pulls OCI images and runs commands in Linux VMs, including detached servers with one localhost TCP port mapping and explicit directory volumes. On the first `run`, the binary downloads a pinned Alpine ISO, verifies its SHA-256, and installs the guest boot files. Each command now gets private Linux PID and mount namespaces, minimal `/dev` and `/proc` mounts, and reduced capabilities. Complete OCI process settings remain unfinished.
 
 ## Current commands
 
@@ -31,11 +31,11 @@ rift rmi alpine
 rift clean
 ```
 
-Image pulls use anonymous registry access and save SHA-256-verified OCI blobs and reference metadata under `~/Library/Application Support/Rift`. `run` pulls an uncached image automatically; `pull` fetches or refreshes it explicitly. `rmi <image>` removes a local image reference; `clean` previews its now unused blobs, and `clean --yes` reclaims them. `system df` reports logical file bytes. `clean` also previews abandoned runtime staging. Referenced images, active VMs, guest boot files, and container logs are preserved. If image metadata is corrupt, cache pruning stops without deleting blobs.
+Image pulls support public registries and optional credentials for private Bearer-token challenges. Set both `RIFT_REGISTRY_USERNAME` and `RIFT_REGISTRY_PASSWORD` in the environment before pulling a private image. Rift sends them as HTTP Basic credentials only to the HTTPS token realm in the registry challenge; authorization headers are stripped on redirects. Rift does not persist credentials; use these variables only with a registry you trust. Credential validation and Basic-header generation have unit coverage, but no private registry provider has been integration-tested. Pulls save SHA-256-verified OCI blobs and reference metadata under `~/Library/Application Support/Rift`. `run` pulls an uncached image automatically; `pull` fetches or refreshes it explicitly. `rmi <image>` removes a local image reference; `clean` previews its now unused blobs, and `clean --yes` reclaims them. `system df` reports logical file bytes. `clean` also previews abandoned runtime staging. Referenced images, active VMs, guest boot files, and container logs are preserved. If image metadata is corrupt, cache pruning stops without deleting blobs.
 
 `run` uses the image's `Entrypoint`, `Cmd`, `Env`, `User`, and absolute `WorkingDir` defaults, with command, `-e KEY=VALUE`, and `-w` overrides. Environment overrides must include a value; Rift does not copy host variables implicitly. A static guest executor applies the working directory and numeric or named UID/GID from the image, including images without `/bin/sh`.
 
-Each run gets a disposable writable overlay inside its own Linux VM, currently configured with 256 MiB of guest RAM. `-v HOST:DIR[:ro|rw]` shares an existing host directory with the guest. It is read-only by default; `:rw` allows the container to change host files. Both paths must be absolute, the host source cannot itself be a symlink, and the guest target must be a directory without symlink components. `/dev` and `/proc` are reserved for the guest. Up to 16 directories can be shared. `-p` accepts one `HOST:GUEST` TCP mapping bound to `127.0.0.1`. `run -d` starts one background Rift process per VM and prints its container ID. `stop` currently forces the VM off; `--rm` is unavailable with `-d`. Private registry credentials are not implemented.
+Each run gets a disposable writable overlay inside its own Linux VM, currently configured with 256 MiB of guest RAM. `-v HOST:DIR[:ro|rw]` shares an existing host directory with the guest. It is read-only by default; `:rw` allows the container to change host files. Both paths must be absolute, the host source cannot itself be a symlink, and the guest target must be a directory without symlink components. `/dev` and `/proc` are reserved for the guest. Up to 16 directories can be shared. `-p` accepts one `HOST:GUEST` TCP mapping bound to `127.0.0.1`. `run -d` starts one background Rift process per VM and prints its container ID. `stop` currently forces the VM off; `--rm` is unavailable with `-d`.
 
 For a persistent writable directory:
 
@@ -110,6 +110,7 @@ No Docker Engine, Docker CLI, Docker Desktop, or container daemon is part of the
 - [x] OCI references, indexes, manifests, and `linux/arm64` selection with tests
 - [x] Streaming content-addressed blob storage with SHA-256 and size verification
 - [x] Public OCI pulls with Bearer token auth, platform selection, and verified blob downloads
+- [x] Optional environment credentials for private Bearer-token challenges (unit-tested; no private-provider integration test yet)
 - [x] Foreground and detached runs automatically pull uncached public images
 - [x] Local image metadata and listing
 - [x] Read-only disk usage report by storage category

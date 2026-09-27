@@ -131,7 +131,14 @@ fn pullImage(init: std.process.Init, image_name: []const u8, writer: *Io.Writer)
     defer store.unlock();
     var image = try reference.parse(init.arena.allocator(), image_name);
     defer image.deinit(init.arena.allocator());
-    var client = registry.Registry.init(init.arena.allocator(), init.io, image.registry, image.repository);
+    var client = registry.Registry.init(
+        init.arena.allocator(),
+        init.io,
+        image.registry,
+        image.repository,
+        init.environ_map.get("RIFT_REGISTRY_USERNAME"),
+        init.environ_map.get("RIFT_REGISTRY_PASSWORD"),
+    );
     defer client.deinit();
 
     const result = try client.pull(image, store, target);
@@ -284,10 +291,12 @@ pub fn main(init: std.process.Init) void {
             error.HomeDirectoryUnavailable => std.debug.print("rift: HOME is not set\n", .{}),
             error.InvalidReference => std.debug.print("rift: invalid OCI image reference\n", .{}),
             error.ImageNotFound => std.debug.print("rift: image reference was not found\n", .{}),
-            error.RegistryUnauthorized, error.RegistryForbidden => std.debug.print("rift: registry denied anonymous pull access\n", .{}),
+            error.RegistryUnauthorized, error.RegistryForbidden => std.debug.print("rift: registry rejected credentials or denied pull access\n", .{}),
             error.NoMatchingPlatform => std.debug.print("rift: image has no manifest for this Mac's Linux architecture\n", .{}),
             error.UnsupportedRegistryAuth => std.debug.print("rift: registry uses an unsupported authentication challenge\n", .{}),
             error.TokenRequestFailed, error.InvalidTokenResponse => std.debug.print("rift: registry authentication failed\n", .{}),
+            error.IncompleteRegistryCredentials => std.debug.print("rift: set both RIFT_REGISTRY_USERNAME and RIFT_REGISTRY_PASSWORD\n", .{}),
+            error.InvalidRegistryCredentials => std.debug.print("rift: registry credentials are malformed\n", .{}),
             error.InsecureTokenRealm, error.InsecureRegistryRedirect => std.debug.print("rift: registry requested an insecure URL\n", .{}),
             error.InvalidManifest, error.MissingManifestMediaType, error.UnsupportedManifestMediaType => std.debug.print("rift: registry returned an invalid or unsupported image manifest\n", .{}),
             error.BlobDigestMismatch => std.debug.print("rift: downloaded blob failed SHA-256 verification\n", .{}),

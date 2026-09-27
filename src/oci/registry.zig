@@ -17,17 +17,25 @@ pub const Registry = struct {
     token: ?[]const u8 = null,
     registry: []const u8,
     repository: []const u8,
+    username: ?[]const u8,
+    password: ?[]const u8,
 
-    pub fn init(allocator: Allocator, io: Io, registry: []const u8, repository: []const u8) Registry {
+    pub fn init(allocator: Allocator, io: Io, registry: []const u8, repository: []const u8, username: ?[]const u8, password: ?[]const u8) Registry {
         return .{
             .allocator = allocator,
             .client = .{ .allocator = allocator, .io = io },
             .registry = registry,
             .repository = repository,
+            .username = username,
+            .password = password,
         };
     }
 
     pub fn deinit(registry: *Registry) void {
+        if (registry.token) |token| {
+            wipeSecret(token);
+            registry.allocator.free(token);
+        }
         registry.client.deinit();
         registry.* = undefined;
     }
@@ -38,6 +46,7 @@ pub const Registry = struct {
         store: storage.BlobStore,
         target: manifest.Target,
     ) anyerror!PullResult {
+        try validateCredentials(registry.username, registry.password);
         const selector = image.digest orelse image.tag.?;
         const root_url = try std.fmt.allocPrint(
             registry.allocator,
@@ -117,15 +126,19 @@ pub const Registry = struct {
     }
 
     fn openAuthenticated(registry: *Registry, url: []const u8, accept: []const u8) anyerror!*Pending {
-        var pending = try registry.openRaw(url, accept, registry.token);
+        var pending = try registry.openRaw(url, accept, registry.token, null);
         if (pending.response.head.status == .unauthorized) {
             const challenge = try registry.headerCopy(pending, "www-authenticate") orelse {
                 registry.destroyPending(pending);
                 return error.UnsupportedRegistryAuth;
             };
             registry.destroyPending(pending);
+            if (registry.token) |token| {
+                wipeSecret(token);
+                registry.allocator.free(token);
+            }
             registry.token = try registry.obtainToken(challenge);
-            pending = try registry.openRaw(url, accept, registry.token);
+            pending = try registry.openRaw(url, accept, registry.token, null);
         }
 
         pending = try registry.followRedirects(pending, accept);
@@ -157,20 +170,29 @@ pub const Registry = struct {
                 return error.InsecureRegistryRedirect;
             }
             registry.destroyPending(pending);
-            pending = try registry.openRaw(location, accept, null);
+            pending = try registry.openRaw(location, accept, null, null);
             redirects += 1;
         }
         return pending;
     }
 
-    fn openRaw(registry: *Registry, url: []const u8, accept: []const u8, token: ?[]const u8) anyerror!*Pending {
+    fn openRaw(registry: *Registry, url: []const u8, accept: []const u8, token: ?[]const u8, basic_authorization: ?[]const u8) anyerror!*Pending {
         const pending = try registry.allocator.create(Pending);
         errdefer registry.allocator.destroy(pending);
         pending.* = undefined;
+        pending.authorization = null;
 
         pending.extra_headers[0] = .{ .name = "Accept", .value = accept };
-        const headers: []const http.Header = if (token) |value| blk: {
+        if (token) |value| {
             pending.authorization = try std.fmt.allocPrint(registry.allocator, "Bearer {s}", .{value});
+        } else if (basic_authorization) |value| {
+            pending.authorization = try registry.allocator.dupe(u8, value);
+        }
+        errdefer if (pending.authorization) |value| {
+            wipeSecret(value);
+            registry.allocator.free(value);
+        };
+        const headers: []const http.Header = if (pending.authorization != null) blk: {
             pending.extra_headers[1] = .{ .name = "Authorization", .value = pending.authorization.? };
             break :blk pending.extra_headers[0..2];
         } else pending.extra_headers[0..1];
@@ -197,11 +219,23 @@ pub const Registry = struct {
             return error.InsecureTokenRealm;
         }
         const token_url = try buildTokenUrl(registry.allocator, challenge.realm, challenge.service, scope);
-        const pending = try registry.openRaw(token_url, "application/json", null);
+        const basic_authorization = if (registry.username) |username|
+            try buildBasicAuthorization(registry.allocator, username, registry.password.?)
+        else
+            null;
+        defer if (basic_authorization) |value| {
+            wipeSecret(value);
+            registry.allocator.free(value);
+        };
+        const pending = try registry.openRaw(token_url, "application/json", null, basic_authorization);
         defer registry.destroyPending(pending);
         if (pending.response.head.status != .ok) return error.TokenRequestFailed;
 
         const body = try registry.readBody(pending, token_limit);
+        defer {
+            wipeSecret(body);
+            registry.allocator.free(body);
+        }
         const parsed = try std.json.parseFromSlice(TokenResponse, registry.allocator, body, .{ .ignore_unknown_fields = true });
         defer parsed.deinit();
         const value = parsed.value.token orelse parsed.value.access_token orelse return error.InvalidTokenResponse;
@@ -235,6 +269,10 @@ pub const Registry = struct {
 
     fn destroyPending(registry: *Registry, pending: *Pending) void {
         pending.request.deinit();
+        if (pending.authorization) |value| {
+            wipeSecret(value);
+            registry.allocator.free(value);
+        }
         registry.allocator.destroy(pending);
     }
 };
@@ -372,6 +410,38 @@ fn digestOf(allocator: Allocator, bytes: []const u8) Allocator.Error![]u8 {
     return std.fmt.allocPrint(allocator, "sha256:{s}", .{hex});
 }
 
+fn validateCredentials(username: ?[]const u8, password: ?[]const u8) !void {
+    if (username == null and password == null) return;
+    if (username == null or password == null) return error.IncompleteRegistryCredentials;
+    try validateBasicCredentials(username.?, password.?);
+}
+
+fn validateBasicCredentials(username: []const u8, password: []const u8) !void {
+    if (username.len == 0 or password.len == 0 or username.len > 4096 or password.len > 4096 or
+        std.mem.indexOfAny(u8, username, ":\r\n") != null or std.mem.indexOfAny(u8, password, "\r\n") != null)
+        return error.InvalidRegistryCredentials;
+}
+
+fn buildBasicAuthorization(allocator: Allocator, username: []const u8, password: []const u8) ![]u8 {
+    try validateBasicCredentials(username, password);
+    const credentials = try std.fmt.allocPrint(allocator, "{s}:{s}", .{ username, password });
+    defer {
+        wipeSecret(credentials);
+        allocator.free(credentials);
+    }
+    const encoded = try allocator.alloc(u8, std.base64.standard.Encoder.calcSize(credentials.len));
+    defer {
+        wipeSecret(encoded);
+        allocator.free(encoded);
+    }
+    const value = std.base64.standard.Encoder.encode(encoded, credentials);
+    return std.fmt.allocPrint(allocator, "Basic {s}", .{value});
+}
+
+fn wipeSecret(bytes: []const u8) void {
+    std.crypto.secureZero(u8, @ptrCast(@constCast(bytes)));
+}
+
 fn writeBytes(store: storage.BlobStore, digest: []const u8, bytes: []const u8) anyerror!void {
     var reader = Io.Reader.fixed(bytes);
     try store.writeVerified(digest, @intCast(bytes.len), &reader);
@@ -394,4 +464,18 @@ test "encodes registry token query values" {
     const url = try buildTokenUrl(std.testing.allocator, "https://auth.example/token", "registry.example", "repository:library/alpine:pull");
     defer std.testing.allocator.free(url);
     try std.testing.expectEqualStrings("https://auth.example/token?service=registry.example&scope=repository%3Alibrary%2Falpine%3Apull", url);
+}
+
+test "validates paired registry credentials and builds Basic authorization" {
+    const allocator = std.testing.allocator;
+    try validateCredentials(null, null);
+    try std.testing.expectError(error.IncompleteRegistryCredentials, validateCredentials("user", null));
+    try std.testing.expectError(error.InvalidRegistryCredentials, validateCredentials("bad:user", "secret"));
+    try std.testing.expectError(error.InvalidRegistryCredentials, validateCredentials("user", "line\nbreak"));
+    const authorization = try buildBasicAuthorization(allocator, "rift-user", "rift-secret");
+    defer {
+        wipeSecret(authorization);
+        allocator.free(authorization);
+    }
+    try std.testing.expectEqualStrings("Basic cmlmdC11c2VyOnJpZnQtc2VjcmV0", authorization);
 }
