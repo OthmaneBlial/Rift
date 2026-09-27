@@ -17,7 +17,22 @@ The benchmark copies the local image blobs, image records, and guest boot files 
 
 The first launch already has the image and guest files cached. It is **not** a fresh installation or an uncached macOS filesystem measurement. The RSS figure comes from `ps` for the Rift host worker; it does not measure VM memory or total system pressure. Each VM is configured with 256 MiB of guest RAM. The store size is the logical size of all copied cache files, including any other images present, and excludes the binary.
 
-## Recorded local run
+## Current local runs
+
+Apple M2, macOS 26.6, Zig 0.16.0, `ReleaseSafe`, runtime commit `8b0138b`, 2026-09-27 UTC. Three runs used the same cached store and benchmark script:
+
+| Metric | Run 1 | Run 2 | Run 3 |
+| --- | ---: | ---: | ---: |
+| Signed binary size | 1,584,704 bytes | 1,584,704 bytes | 1,584,704 bytes |
+| First Alpine launch with cached assets | 2,057.2 ms | 2,205.5 ms | 1,050.8 ms |
+| Subsequent Alpine launches, median of 5 | 1,625.9 ms | 1,671.0 ms | 1,010.8 ms |
+| `rift version`, median of 5 | 7.2 ms | 6.9 ms | 7.2 ms |
+| Detached host worker RSS after guest ready | 10,560 KiB | 10,544 KiB | 10,544 KiB |
+| Copied store, logical file bytes | 112,367,255 bytes | 112,367,255 bytes | 112,367,255 bytes |
+
+The slower samples' cause was not isolated. A fresh local build of earlier commit `2dec30e` measured a 1,030.2 ms subsequent median between runs 2 and 3; run 3 of the current commit then measured 1,010.8 ms. These results do not establish a consistent startup regression or cross-machine speed.
+
+## Earlier local run
 
 Apple M2, macOS 26.6, Zig 0.16.0, `ReleaseSafe`, runtime commit `2dec30e`, 2026-09-27 UTC:
 

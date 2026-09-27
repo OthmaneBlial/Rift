@@ -73,7 +73,7 @@ install -m 755 zig-out/bin/rift "$HOME/.local/bin/rift"
 
 Add `~/.local/bin` to your shell's `PATH` if needed. The binary is signed locally with the Virtualization entitlement. This repository does not yet have a Developer ID signature or notarized public download; macOS Gatekeeper rejects the current ad-hoc signed archive. The source build is the supported installation path for now.
 
-For reproducible local size, startup, and host worker RSS measurements, run `zig build -Doptimize=ReleaseSafe benchmark` after pulling and running Alpine once. On one Apple M2 run, the signed binary was 1,500,192 bytes and five subsequent cached Alpine launches had a 1,028.8 ms median. See [the benchmark method and limits](docs/BENCHMARKS.md).
+For reproducible local size, startup, and host worker RSS measurements, run `zig build -Doptimize=ReleaseSafe benchmark` after pulling and running Alpine once. On one Apple M2, the current signed binary was 1,584,704 bytes; three cached Alpine runs had subsequent launch medians of 1,625.9, 1,671.0, and 1,010.8 ms. See [the benchmark method, samples, and limits](docs/BENCHMARKS.md).
 
 To check the macOS VM bridge on Apple Silicon, prepare the pinned Alpine guest and run the local integration check:
 
