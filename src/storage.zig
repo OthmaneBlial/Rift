@@ -4,16 +4,26 @@ const sha256_prefix = "sha256:";
 
 pub const BlobStore = struct {
     io: std.Io,
+    guard: std.Io.File,
     blobs: std.Io.Dir,
     images: std.Io.Dir,
 
     pub fn init(io: std.Io, root: std.Io.Dir) anyerror!BlobStore {
         try root.createDirPath(io, "blobs/sha256");
         try root.createDirPath(io, "images");
-        const blobs = try root.openDir(io, "blobs/sha256", .{});
+        const guard = root.openFile(io, "cache.lock", .{ .mode = .read_write, .allow_directory = false, .follow_symlinks = false }) catch |err| switch (err) {
+            error.FileNotFound => root.createFile(io, "cache.lock", .{ .exclusive = true, .read = true, .permissions = .fromMode(0o600) }) catch |create_err| switch (create_err) {
+                error.PathAlreadyExists => try root.openFile(io, "cache.lock", .{ .mode = .read_write, .allow_directory = false, .follow_symlinks = false }),
+                else => return create_err,
+            },
+            else => return err,
+        };
+        errdefer guard.close(io);
+        const blobs = try root.openDir(io, "blobs/sha256", .{ .iterate = true });
         errdefer blobs.close(io);
         return .{
             .io = io,
+            .guard = guard,
             .blobs = blobs,
             .images = try root.openDir(io, "images", .{ .iterate = true }),
         };
@@ -22,7 +32,21 @@ pub const BlobStore = struct {
     pub fn deinit(store: *BlobStore) void {
         store.images.close(store.io);
         store.blobs.close(store.io);
+        store.guard.close(store.io);
         store.* = undefined;
+    }
+
+    // ponytail: One cache lock serializes pulls and pruning; use finer locks if concurrent pulls matter.
+    pub fn lockShared(store: BlobStore) !void {
+        try store.guard.lock(store.io, .shared);
+    }
+
+    pub fn lockExclusive(store: BlobStore) !void {
+        try store.guard.lock(store.io, .exclusive);
+    }
+
+    pub fn unlock(store: BlobStore) void {
+        store.guard.unlock(store.io);
     }
 
     pub fn recordImage(store: BlobStore, allocator: std.mem.Allocator, record: ImageRecord) anyerror!void {

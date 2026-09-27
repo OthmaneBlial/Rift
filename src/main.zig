@@ -120,6 +120,8 @@ fn pullImage(init: std.process.Init, image_name: []const u8, writer: *Io.Writer)
     };
     var store = try openImageStore(init);
     defer store.deinit();
+    try store.lockExclusive();
+    defer store.unlock();
     var image = try reference.parse(init.arena.allocator(), image_name);
     defer image.deinit(init.arena.allocator());
     var client = registry.Registry.init(init.arena.allocator(), init.io, image.registry, image.repository);
@@ -155,11 +157,17 @@ fn ensurePulled(init: std.process.Init, arguments: []const []const u8, detached:
     const canonical = try image.formatAlloc(allocator);
     var store = try openImageStore(init);
     defer store.deinit();
-    const records = try store.listImages(allocator);
-    defer storage.deinitImageRecords(allocator, records);
-    for (records) |record| {
-        if (std.mem.eql(u8, record.reference, canonical)) return;
-    }
+    const cached = blk: {
+        try store.lockShared();
+        defer store.unlock();
+        const records = try store.listImages(allocator);
+        defer storage.deinitImageRecords(allocator, records);
+        for (records) |record| {
+            if (std.mem.eql(u8, record.reference, canonical)) break :blk true;
+        }
+        break :blk false;
+    };
+    if (cached) return;
 
     std.debug.print("rift: pulling {s} (not cached)\n", .{image_name});
     var buffer: [512]u8 = undefined;
@@ -171,6 +179,8 @@ fn ensurePulled(init: std.process.Init, arguments: []const []const u8, detached:
 fn listImages(init: std.process.Init, writer: *Io.Writer) !void {
     var store = try openImageStore(init);
     defer store.deinit();
+    try store.lockShared();
+    defer store.unlock();
     const allocator = init.arena.allocator();
     const records = try store.listImages(allocator);
     defer storage.deinitImageRecords(allocator, records);

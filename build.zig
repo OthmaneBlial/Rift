@@ -84,6 +84,12 @@ pub fn build(b: *std.Build) void {
         check_auto_pull.step.dependOn(&sign_exe.step);
         b.step("run-auto-pull-check", "Run Alpine from an empty HOME without a separate pull").dependOn(&check_auto_pull.step);
 
+        const check_cache_lock = b.addSystemCommand(&.{"/usr/bin/python3"});
+        check_cache_lock.addFileArg(b.path("scripts/check_cache_lock.py"));
+        check_cache_lock.addArg(exe_path);
+        check_cache_lock.step.dependOn(&sign_exe.step);
+        b.step("cache-lock-check", "Check cross-process image cache locking").dependOn(&check_cache_lock.step);
+
         const check_process = b.addSystemCommand(&.{"/usr/bin/python3"});
         check_process.addFileArg(b.path("scripts/check_process.py"));
         check_process.addArg(exe_path);

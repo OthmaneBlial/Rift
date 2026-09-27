@@ -56,6 +56,7 @@ zig build run-network-check
 zig build run-port-check
 zig build run-detached-check
 zig build run-auto-pull-check
+zig build cache-lock-check
 zig build run-process-check
 zig build run-volume-check
 zig build run -- system info

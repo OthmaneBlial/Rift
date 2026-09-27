@@ -29,6 +29,9 @@ pub fn execute(init: std.process.Init, arguments: []const []const u8, stop_path:
     defer data_dir.close(init.io);
     var store = try storage.BlobStore.init(init.io, data_dir);
     defer store.deinit();
+    try store.lockShared();
+    var cache_locked = true;
+    defer if (cache_locked) store.unlock();
     const records = try store.listImages(allocator);
     defer storage.deinitImageRecords(allocator, records);
     const manifest_digest = for (records) |record| {
@@ -85,6 +88,8 @@ pub fn execute(init: std.process.Init, arguments: []const []const u8, stop_path:
     var control = try run_dir.openDir(init.io, "control", .{});
     defer control.close(init.io);
     try rootfs.assemble(allocator, init.io, image_root, store, manifest_digest);
+    store.unlock();
+    cache_locked = false;
     const interactive = try Io.File.stdin().isTty(init.io);
     try guest.writeInitramfs(allocator, init.io, base_initramfs, run_dir, command, environment, working_dir, process.User orelse "", volumes, interactive, port != null);
 
