@@ -1,42 +1,64 @@
 # Rift roadmap
 
-Rift is an early source preview for Apple Silicon macOS. This document tracks the work required to make it reliable and straightforward to adopt. It has no promised dates.
+This is the running checklist from Rift’s first CLI and OCI work through a dependable release. `[x]` means implemented and locally verified; `[ ]` means still open.
 
-## Working today
+## Project foundation
 
-- Pull and verify public `linux/arm64` OCI images; optional environment credentials cover the tested Basic-to-Bearer flow.
-- Run Alpine and nginx in isolated Linux VMs through Apple's Virtualization.framework.
-- Use image command, environment, working directory, user, and group defaults, with `-e` and `-w` overrides.
-- Use outbound networking, DNS, one localhost TCP port mapping, and explicit read-only or writable file and directory volumes.
-- Manage detached containers with `ps`, `inspect`, `logs`, `stop`, `kill`, and `rm`.
-- Inspect and clean local storage with `system df`, `rmi`, and `clean`.
-- Run formatting, unit, build, and macOS integration checks locally with `scripts/check-local.sh`.
+- [x] Build the Zig CLI with help, version, and host information.
+- [x] Add the Apache-2.0 license and architecture documentation.
+- [x] Run formatting, builds, unit tests, and macOS checks locally with `scripts/check-local.sh`.
+- [x] Keep CI local-only as requested; no GitHub Actions workflows.
+- [x] Add the repository logo, project topics, and first GitHub Pages website.
+- [x] Create the `v0.1.0` source-preview tag and release.
 
-## Next
+## OCI images and local storage
 
-1. Broaden safe OCI layer support: ownership, PAX metadata, extended attributes, and supported special files.
-2. Complete OCI process controls and isolation with focused threat-model review and regression checks.
-3. Improve the detached workflow, including a secure command channel for `rift exec` and structured log options.
-4. Expand registry compatibility tests beyond the local private-registry fixture.
-5. Measure cold and cached startup, memory, binary size, and storage with reproducible methods.
-6. Establish a Developer ID signing and notarization path before offering public macOS binaries.
-7. Improve installation and upgrade paths after signed distribution is available.
+- [x] Parse OCI image references, indexes, and manifests; select and test `linux/arm64` images.
+- [x] Stream image blobs into content-addressed storage with SHA-256 and size verification.
+- [x] Pull public OCI images with Bearer authentication and platform selection.
+- [x] Support optional environment credentials for private Bearer challenges (unit-tested; provider integration remains open).
+- [x] Automatically pull uncached public images for foreground and detached runs.
+- [x] Store and list local image metadata.
+- [x] Report local disk usage by storage category.
+- [x] Remove image references with `rmi` and reclaim unreferenced blobs with `clean --yes`.
+- [ ] Verify compatibility with more public registries and private registry providers.
 
-## Adoption milestone
+## Linux guest and image filesystem
 
-The main usability milestone is a verified local workflow without Docker:
+- [x] Boot a local Linux guest through Apple’s Virtualization.framework bridge.
+- [x] Download and verify pinned guest boot files on first run.
+- [x] Safely extract tar, gzip, and zstd layers, including OCI whiteouts and regular-file hardlinks.
+- [x] Assemble a local root filesystem from verified image manifests and layers.
+- [x] Preserve standard tar modification times for files, symlinks, and directories.
+- [x] Smoke-test execution of pulled Alpine BusyBox inside the VM through a read-only share.
+- [ ] Support OCI ownership, PAX metadata, extended attributes, and required special files.
 
-```sh
-rift pull alpine
-rift run --rm alpine echo "Hello from Rift"
-rift pull nginx
-id=$(rift run -d -p 8080:80 nginx)
-rift ps
-rift logs "$id"
-rift stop "$id"
-rift rm "$id"
-rift system df
-rift clean
-```
+## Container execution and lifecycle
 
-Before calling Rift ready for broad adoption, validate that workflow on a clean Apple Silicon Mac, close the documented OCI and isolation gaps that affect common images, and provide a signed, notarized installation path. Passing local checks alone does not prove those release and compatibility goals.
+- [x] Run basic foreground OCI commands through the public CLI.
+- [x] Apply image Entrypoint, Cmd, and Env defaults, with `-e` overrides.
+- [x] Apply absolute image `WorkingDir`, `-w`, numeric or named `User`, and supplementary groups.
+- [x] Use private PID and mount namespaces, basic `/dev` and `/proc`, reduced capabilities, and `no_new_privs`.
+- [ ] Implement broader OCI process settings and review isolation against a documented threat model.
+- [ ] Add `rift exec` for running a command in an existing container.
+- [x] Provide outbound NAT and DNS for foreground commands.
+- [x] Forward one localhost TCP port for foreground commands.
+- [x] Run detached containers; provide `ps`, `inspect`, plain `logs`, graceful `stop`, force `kill`, and `rm`.
+- [x] Mount explicit read-only and writable directory volumes.
+- [x] Mount explicit read-only and writable file volumes.
+- [x] Preview and confirm cleanup of abandoned runtime staging.
+- [x] Preview and prune unreferenced image blobs under a cache lock.
+- [ ] Add structured log output.
+
+## Verification, release, and adoption
+
+- [x] Verify the nginx welcome page over a forwarded localhost port, including a detached run.
+- [x] Remove foreground temporary state after normal completion; retain detached logs and status until `rift rm`.
+- [x] Package and check a local release archive.
+- [ ] Add reproducible measurements for startup, idle memory, binary size, and storage.
+- [ ] Establish Developer ID signing and notarization, then publish signed binaries and checksums.
+- [ ] Provide a straightforward install and upgrade path for signed releases.
+- [ ] Verify the complete install-to-clean workflow on a clean Apple Silicon Mac without Docker.
+- [ ] Refresh and verify the GitHub Pages website when the project reaches 100%.
+
+Rift is still an early source preview, not a Docker replacement. A passing local check does not establish registry-wide compatibility or a signed, notarized release.
