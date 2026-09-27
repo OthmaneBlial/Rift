@@ -120,7 +120,8 @@ No Docker Engine, Docker CLI, Docker Desktop, or container daemon is part of the
 - [x] Initial safe extraction of tar, gzip, and zstd layers, including OCI whiteouts and regular-file hardlinks
 - [x] Local root filesystem assembly from verified manifest and layer blobs
 - [x] Local VM smoke that executes pulled Alpine BusyBox through a read-only share
-- [ ] Complete OCI filesystem metadata and special files
+- [x] Apply standard tar modification times to files, symlinks, and directories during root filesystem assembly
+- [ ] OCI ownership, PAX metadata, extended attributes, and special files
 - [x] Basic foreground OCI command execution through Rift's public CLI
 - [x] Image entrypoint, command, environment defaults, and `-e` overrides
 - [x] Absolute image `WorkingDir`, `-w` override, numeric or named image `User`, and image supplementary groups through a static guest executor

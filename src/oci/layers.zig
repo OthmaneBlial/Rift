@@ -3,40 +3,45 @@ const Io = std.Io;
 
 const max_layer_bytes = 8 * 1024 * 1024 * 1024;
 
+pub const DirectoryMetadata = struct {
+    mode: u32,
+    mtime: Io.Timestamp,
+};
+
 /// Apply a verified OCI layer to a private, unpublished root directory.
 /// Whiteouts run first so they cannot delete files added by the same layer.
-pub fn apply(allocator: std.mem.Allocator, io: Io, root: Io.Dir, blob: Io.File, media_type: []const u8, directory_modes: *std.StringHashMap(u32)) !void {
-    try pass(allocator, io, root, blob, media_type, directory_modes, .whiteouts);
-    try pass(allocator, io, root, blob, media_type, directory_modes, .entries);
+pub fn apply(allocator: std.mem.Allocator, io: Io, root: Io.Dir, blob: Io.File, media_type: []const u8, directory_metadata: *std.StringHashMap(DirectoryMetadata)) !void {
+    try pass(allocator, io, root, blob, media_type, directory_metadata, .whiteouts);
+    try pass(allocator, io, root, blob, media_type, directory_metadata, .entries);
 }
 
 const Pass = enum { whiteouts, entries };
 
-fn pass(allocator: std.mem.Allocator, io: Io, root: Io.Dir, blob: Io.File, media_type: []const u8, directory_modes: *std.StringHashMap(u32), phase: Pass) !void {
+fn pass(allocator: std.mem.Allocator, io: Io, root: Io.Dir, blob: Io.File, media_type: []const u8, directory_metadata: *std.StringHashMap(DirectoryMetadata), phase: Pass) !void {
     var input_buffer: [32 * 1024]u8 = undefined;
     var input = blob.reader(io, &input_buffer);
     if (std.mem.eql(u8, media_type, "application/vnd.oci.image.layer.v1.tar") or
         std.mem.eql(u8, media_type, "application/vnd.docker.image.rootfs.diff.tar"))
     {
-        return applyTar(allocator, io, root, &input.interface, directory_modes, phase);
+        return applyTar(allocator, io, root, &input.interface, directory_metadata, phase);
     }
     if (std.mem.eql(u8, media_type, "application/vnd.oci.image.layer.v1.tar+gzip") or
         std.mem.eql(u8, media_type, "application/vnd.docker.image.rootfs.diff.tar.gzip"))
     {
         var output_buffer: [std.compress.flate.max_window_len]u8 = undefined;
         var decompressor = std.compress.flate.Decompress.init(&input.interface, .gzip, &output_buffer);
-        return applyTar(allocator, io, root, &decompressor.reader, directory_modes, phase);
+        return applyTar(allocator, io, root, &decompressor.reader, directory_metadata, phase);
     }
     if (std.mem.eql(u8, media_type, "application/vnd.oci.image.layer.v1.tar+zstd")) {
         const output_buffer = try allocator.alloc(u8, std.compress.zstd.default_window_len + std.compress.zstd.block_size_max);
         defer allocator.free(output_buffer);
         var decompressor = std.compress.zstd.Decompress.init(&input.interface, output_buffer, .{});
-        return applyTar(allocator, io, root, &decompressor.reader, directory_modes, phase);
+        return applyTar(allocator, io, root, &decompressor.reader, directory_metadata, phase);
     }
     return error.UnsupportedLayerMediaType;
 }
 
-fn applyTar(allocator: std.mem.Allocator, io: Io, root: Io.Dir, reader: *Io.Reader, directory_modes: *std.StringHashMap(u32), phase: Pass) !void {
+fn applyTar(allocator: std.mem.Allocator, io: Io, root: Io.Dir, reader: *Io.Reader, directory_metadata: *std.StringHashMap(DirectoryMetadata), phase: Pass) !void {
     var name_buffer: [Io.Dir.max_path_bytes]u8 = undefined;
     var link_buffer: [Io.Dir.max_path_bytes]u8 = undefined;
     var clean_buffer: [Io.Dir.max_path_bytes]u8 = undefined;
@@ -59,6 +64,7 @@ fn applyTar(allocator: std.mem.Allocator, io: Io, root: Io.Dir, reader: *Io.Read
             else => return err,
         };
         const entry = next orelse break;
+        const mtime = try tarMtime(&it.header_buffer);
         count += 1;
         if (count > 1_000_000 or entry.size > max_layer_bytes - total) return error.LayerTooLarge;
         total += entry.size;
@@ -81,10 +87,11 @@ fn applyTar(allocator: std.mem.Allocator, io: Io, root: Io.Dir, reader: *Io.Read
         switch (entry.kind) {
             .directory => {
                 const mode: u32 = @intCast(entry.mode & 0o7777);
-                if (directory_modes.getPtr(path)) |stored_mode| {
-                    stored_mode.* = mode;
+                const metadata: DirectoryMetadata = .{ .mode = mode, .mtime = mtime };
+                if (directory_metadata.getPtr(path)) |stored_metadata| {
+                    stored_metadata.* = metadata;
                 } else {
-                    try directory_modes.put(try directory_modes.allocator.dupe(u8, path), mode);
+                    try directory_metadata.put(try directory_metadata.allocator.dupe(u8, path), metadata);
                 }
                 const existing = parent.statFile(io, name, .{ .follow_symlinks = false }) catch |err| switch (err) {
                     error.FileNotFound => null,
@@ -108,22 +115,27 @@ fn applyTar(allocator: std.mem.Allocator, io: Io, root: Io.Dir, reader: *Io.Read
                 try it.streamRemaining(entry, &writer.interface);
                 try writer.interface.flush();
                 try output.setPermissions(io, .fromMode(@intCast(entry.mode & 0o777)));
+                try output.setTimestamps(io, .{ .modify_timestamp = .init(mtime) });
             },
             .sym_link => {
                 try checkLink(path, entry.link_name);
                 try parent.deleteTree(io, name);
                 try parent.symLink(io, entry.link_name, name, .{});
+                try parent.setTimestamps(io, name, .{
+                    .follow_symlinks = false,
+                    .modify_timestamp = .init(mtime),
+                });
             },
         }
     }
 }
 
-pub fn applyDirectoryModes(io: Io, root: Io.Dir, directory_modes: *std.StringHashMap(u32)) !void {
-    var entries = directory_modes.iterator();
-    while (entries.next()) |entry| try applyDirectoryMode(io, root, entry.key_ptr.*, entry.value_ptr.*);
+pub fn applyDirectoryMetadata(io: Io, root: Io.Dir, directory_metadata: *std.StringHashMap(DirectoryMetadata)) !void {
+    var entries = directory_metadata.iterator();
+    while (entries.next()) |entry| try applyDirectoryMetadataEntry(io, root, entry.key_ptr.*, entry.value_ptr.*);
 }
 
-fn applyDirectoryMode(io: Io, root: Io.Dir, path: []const u8, mode: u32) !void {
+fn applyDirectoryMetadataEntry(io: Io, root: Io.Dir, path: []const u8, metadata: DirectoryMetadata) !void {
     var parent = openParent(io, root, parentPath(path), false) catch |err| switch (err) {
         error.UnsafeLayerPath => return,
         else => return err,
@@ -140,7 +152,11 @@ fn applyDirectoryMode(io: Io, root: Io.Dir, path: []const u8, mode: u32) !void {
         else => return err,
     };
     defer directory.close(io);
-    try directory.setPermissions(io, .fromMode(@intCast(mode)));
+    try directory.setPermissions(io, .fromMode(@intCast(metadata.mode)));
+    try parent.setTimestamps(io, name, .{
+        .follow_symlinks = false,
+        .modify_timestamp = .init(metadata.mtime),
+    });
 }
 
 fn applyHardlink(io: Io, root: Io.Dir, it: *std.tar.Iterator, name_buffer: []const u8, link_buffer: []const u8, phase: Pass) !void {
@@ -157,6 +173,7 @@ fn applyHardlink(io: Io, root: Io.Dir, it: *std.tar.Iterator, name_buffer: []con
     if (path.len == 0 or target.len == 0 or std.mem.eql(u8, path, target)) return error.UnsafeLayerLink;
     if (std.mem.startsWith(u8, basename(path), ".wh.")) return error.InvalidWhiteout;
     if (phase == .whiteouts) return;
+    const mtime = try tarMtime(header);
 
     var source = (try openParent(io, root, parentPath(target), false)) orelse return error.InvalidHardlink;
     defer source.close(io);
@@ -165,6 +182,25 @@ fn applyHardlink(io: Io, root: Io.Dir, it: *std.tar.Iterator, name_buffer: []con
     defer parent.close(io);
     try parent.deleteTree(io, basename(path));
     try source.hardLink(basename(target), parent, basename(path), io, .{ .follow_symlinks = false });
+    try parent.setTimestamps(io, basename(path), .{
+        .follow_symlinks = false,
+        .modify_timestamp = .init(mtime),
+    });
+}
+
+fn tarMtime(header: *const [512]u8) !Io.Timestamp {
+    const field = header[136..148];
+    var seconds: i96 = undefined;
+    if (field[0] & 0x80 != 0) {
+        var encoded: i96 = @intCast(field[0] & 0x7f);
+        for (field[1..]) |byte| encoded = encoded * 256 + byte;
+        seconds = if (field[0] & 0x40 != 0) encoded - (@as(i96, 1) << 95) else encoded;
+    } else {
+        const text = std.mem.trim(u8, field, " \x00");
+        seconds = if (text.len == 0) 0 else std.fmt.parseInt(i96, text, 8) catch return error.InvalidLayerTimestamp;
+    }
+    const nanoseconds = std.math.mul(i96, seconds, std.time.ns_per_s) catch return error.InvalidLayerTimestamp;
+    return .fromNanoseconds(nanoseconds);
 }
 
 fn tarHeaderName(header: *const [512]u8, buffer: []u8) ![]const u8 {
@@ -311,30 +347,36 @@ test "applies final directory modes after all layers" {
     defer root.close(io);
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
-    var directory_modes = std.StringHashMap(u32).init(arena.allocator());
-    defer directory_modes.deinit();
+    var directory_metadata = std.StringHashMap(DirectoryMetadata).init(arena.allocator());
+    defer directory_metadata.deinit();
 
     var first_archive: Io.Writer.Allocating = .init(allocator);
     defer first_archive.deinit();
     var first_tar: std.tar.Writer = .{ .underlying_writer = &first_archive.writer };
-    try first_tar.writeDir("tmp", .{ .mode = 0o1777 });
+    try first_tar.writeDir("tmp", .{ .mode = 0o1777, .mtime = 1_600_000_000 });
     try temp.dir.writeFile(io, .{ .sub_path = "first.tar", .data = first_archive.written() });
     const first_blob = try temp.dir.openFile(io, "first.tar", .{ .mode = .read_only });
     defer first_blob.close(io);
-    try apply(allocator, io, root, first_blob, "application/vnd.oci.image.layer.v1.tar", &directory_modes);
+    try apply(allocator, io, root, first_blob, "application/vnd.oci.image.layer.v1.tar", &directory_metadata);
 
     var second_archive: Io.Writer.Allocating = .init(allocator);
     defer second_archive.deinit();
     var second_tar: std.tar.Writer = .{ .underlying_writer = &second_archive.writer };
-    try second_tar.writeFileBytes("tmp/probe", "ok", .{});
+    try second_tar.writeFileBytes("tmp/probe", "ok", .{ .mtime = 1_650_000_000 });
+    try second_tar.writeLink("tmp/link", "probe", .{ .mtime = 1_550_000_000 });
     try temp.dir.writeFile(io, .{ .sub_path = "second.tar", .data = second_archive.written() });
     const second_blob = try temp.dir.openFile(io, "second.tar", .{ .mode = .read_only });
     defer second_blob.close(io);
-    try apply(allocator, io, root, second_blob, "application/vnd.oci.image.layer.v1.tar", &directory_modes);
+    try apply(allocator, io, root, second_blob, "application/vnd.oci.image.layer.v1.tar", &directory_metadata);
 
-    try applyDirectoryModes(io, root, &directory_modes);
+    try applyDirectoryMetadata(io, root, &directory_metadata);
     const stat = try root.statFile(io, "tmp", .{ .follow_symlinks = false });
     try std.testing.expectEqual(@as(u32, 0o1777), @as(u32, @intCast(stat.permissions.toMode() & 0o7777)));
+    try std.testing.expectEqual(@as(i64, 1_600_000_000), stat.mtime.toSeconds());
+    const file_stat = try root.statFile(io, "tmp/probe", .{ .follow_symlinks = false });
+    try std.testing.expectEqual(@as(i64, 1_650_000_000), file_stat.mtime.toSeconds());
+    const link_stat = try root.statFile(io, "tmp/link", .{ .follow_symlinks = false });
+    try std.testing.expectEqual(@as(i64, 1_550_000_000), link_stat.mtime.toSeconds());
     const contents = try root.readFileAlloc(io, "tmp/probe", allocator, .limited(4));
     defer allocator.free(contents);
     try std.testing.expectEqualStrings("ok", contents);
@@ -404,10 +446,10 @@ test "applies hardlinks and rejects targets outside the root" {
 fn applyOne(allocator: std.mem.Allocator, io: Io, root: Io.Dir, blob: Io.File, media_type: []const u8) !void {
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
-    var directory_modes = std.StringHashMap(u32).init(arena.allocator());
-    defer directory_modes.deinit();
-    try apply(allocator, io, root, blob, media_type, &directory_modes);
-    try applyDirectoryModes(io, root, &directory_modes);
+    var directory_metadata = std.StringHashMap(DirectoryMetadata).init(arena.allocator());
+    defer directory_metadata.deinit();
+    try apply(allocator, io, root, blob, media_type, &directory_metadata);
+    try applyDirectoryMetadata(io, root, &directory_metadata);
 }
 
 fn writeTestHardlink(writer: *Io.Writer, name: []const u8, target: []const u8) !void {
