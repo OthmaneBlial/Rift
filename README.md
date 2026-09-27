@@ -18,6 +18,7 @@ rift clean --yes
 rift pull alpine
 rift images
 rift run --rm alpine echo hello
+rift run -w /tmp alpine pwd
 rift pull nginx
 rift run -d -p 8080:80 nginx
 rift ps
@@ -26,7 +27,7 @@ rift stop <container-id>
 rift rm <container-id>
 ```
 
-Image pulls use anonymous registry access and save SHA-256-verified OCI blobs and reference metadata under `~/Library/Application Support/Rift`. `run` pulls an image automatically when it is not cached; `pull` remains available to fetch or refresh it explicitly. `system df` reports logical file bytes by category without modifying storage. `clean` previews abandoned runtime staging; `clean --yes` removes only staging whose Rift process lock has been released. Image cache, active VMs, and container logs are preserved. `run` uses the image's `Entrypoint`, `Cmd`, and `Env` defaults, or your command arguments. Each run gets a disposable writable overlay inside its own Linux VM, currently configured with 256 MiB of guest RAM. `-p` accepts one `HOST:GUEST` TCP mapping bound to `127.0.0.1`. `run -d` starts one background Rift process per VM and prints its container ID. `stop` currently forces the VM off; `--rm` is unavailable with `-d`. Images requesting a non-root user or working directory other than `/` are rejected for now. Private registry credentials are not implemented.
+Image pulls use anonymous registry access and save SHA-256-verified OCI blobs and reference metadata under `~/Library/Application Support/Rift`. `run` pulls an image automatically when it is not cached; `pull` remains available to fetch or refresh it explicitly. `system df` reports logical file bytes by category without modifying storage. `clean` previews abandoned runtime staging; `clean --yes` removes only staging whose Rift process lock has been released. Image cache, active VMs, and container logs are preserved. `run` uses the image's `Entrypoint`, `Cmd`, `Env`, and absolute `WorkingDir` defaults, or your command and `-w` override. A working directory other than `/` currently requires `/bin/sh` inside the image. Each run gets a disposable writable overlay inside its own Linux VM, currently configured with 256 MiB of guest RAM. `-p` accepts one `HOST:GUEST` TCP mapping bound to `127.0.0.1`. `run -d` starts one background Rift process per VM and prints its container ID. `stop` currently forces the VM off; `--rm` is unavailable with `-d`. Images requesting a non-root user are rejected for now. Private registry credentials are not implemented.
 
 ## Build
 
@@ -42,6 +43,7 @@ zig build run-network-check
 zig build run-port-check
 zig build run-detached-check
 zig build run-auto-pull-check
+zig build run-workdir-check
 zig build run -- system info
 ```
 
@@ -69,7 +71,7 @@ zig build vm-network-check
 zig build oci-vm-check
 ```
 
-These checks boot Alpine, mount a read-only host directory, obtain a guest DHCP lease, and run `/bin/echo` from an Alpine root filesystem inside the VM. Run `rift pull alpine` before the direct `oci-vm-check` probe. The public CLI run checks pull Alpine automatically if absent; `run-auto-pull-check` uses an empty temporary HOME and requires network access for the registry and the pinned guest ISO. The DNS check also requires external DNS access.
+These checks boot Alpine, mount a read-only host directory, obtain a guest DHCP lease, and run `/bin/echo` from an Alpine root filesystem inside the VM. Run `rift pull alpine` before the direct `oci-vm-check` probe and `run-workdir-check` fixture. Other public CLI run checks pull Alpine automatically if absent; `run-auto-pull-check` uses an empty temporary HOME and requires network access for the registry and the pinned guest ISO. The DNS check also requires external DNS access.
 
 To assemble a pulled Alpine root filesystem locally, use the manifest digest shown by `rift images`:
 
@@ -102,7 +104,8 @@ No Docker Engine, Docker CLI, Docker Desktop, or container daemon is part of the
 - [ ] Complete OCI filesystem metadata and special files
 - [x] Basic foreground OCI command execution through Rift's public CLI
 - [x] Image entrypoint, command, and environment defaults
-- [ ] Non-root user and non-root working directory support
+- [x] Absolute image `WorkingDir` and `-w` override when the image contains `/bin/sh`
+- [ ] Non-root user and shell-free working directory support
 - [x] Outbound NAT and DNS for foreground commands
 - [x] One localhost TCP port mapping for foreground commands
 - [x] Detached run, process listing, plain logs, stop, and remove

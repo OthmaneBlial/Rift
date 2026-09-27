@@ -69,6 +69,12 @@ pub fn build(b: *std.Build) void {
         check_auto_pull.step.dependOn(&sign_exe.step);
         b.step("run-auto-pull-check", "Run Alpine from an empty HOME without a separate pull").dependOn(&check_auto_pull.step);
 
+        const check_workdir = b.addSystemCommand(&.{"/usr/bin/python3"});
+        check_workdir.addFileArg(b.path("scripts/check_workdir.py"));
+        check_workdir.addArg(exe_path);
+        check_workdir.step.dependOn(&sign_exe.step);
+        b.step("run-workdir-check", "Apply an OCI image working directory and CLI override").dependOn(&check_workdir.step);
+
         const benchmark = b.addSystemCommand(&.{"/usr/bin/python3"});
         benchmark.addFileArg(b.path("scripts/benchmark.py"));
         benchmark.addArg(exe_path);

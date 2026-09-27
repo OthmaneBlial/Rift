@@ -1,8 +1,8 @@
 const std = @import("std");
 const Io = std.Io;
 
-pub fn writeInitramfs(allocator: std.mem.Allocator, io: Io, base: Io.File, output_dir: Io.Dir, command: []const []const u8, environment: []const []const u8, interactive: bool, require_network: bool) !void {
-    const script = try makeScript(allocator, command, environment, interactive, require_network);
+pub fn writeInitramfs(allocator: std.mem.Allocator, io: Io, base: Io.File, output_dir: Io.Dir, command: []const []const u8, environment: []const []const u8, working_dir: []const u8, interactive: bool, require_network: bool) !void {
+    const script = try makeScript(allocator, command, environment, working_dir, interactive, require_network);
     defer allocator.free(script);
     var output = try output_dir.createFile(io, "initramfs", .{ .exclusive = true });
     defer output.close(io);
@@ -17,7 +17,7 @@ pub fn writeInitramfs(allocator: std.mem.Allocator, io: Io, base: Io.File, outpu
     try writer.interface.flush();
 }
 
-fn makeScript(allocator: std.mem.Allocator, command: []const []const u8, environment: []const []const u8, interactive: bool, require_network: bool) ![]u8 {
+fn makeScript(allocator: std.mem.Allocator, command: []const []const u8, environment: []const []const u8, working_dir: []const u8, interactive: bool, require_network: bool) ![]u8 {
     if (command.len == 0 or command.len > 256) return error.InvalidArguments;
     var output: Io.Writer.Allocating = .init(allocator);
     defer output.deinit();
@@ -56,7 +56,12 @@ fn makeScript(allocator: std.mem.Allocator, command: []const []const u8, environ
     }
     try writer.writeAll(" /usr/bin/busybox chroot /mnt/root");
     if (command[0].len == 0) return error.InvalidArguments;
-    if (command[0][0] != '/') try writer.writeAll(" /bin/sh -c 'exec \"$@\"' rift-sh");
+    if (working_dir.len != 0 and !std.mem.eql(u8, working_dir, "/")) {
+        try writer.writeAll(" /bin/sh -c 'cd \"$1\" || exit 125; shift; exec \"$@\"' rift-workdir ");
+        try quote(writer, working_dir);
+    } else if (command[0][0] != '/') {
+        try writer.writeAll(" /bin/sh -c 'exec \"$@\"' rift-sh");
+    }
     for (command) |argument| {
         if (std.mem.indexOfScalar(u8, argument, 0) != null) return error.InvalidArguments;
         try writer.writeByte(' ');
@@ -103,13 +108,16 @@ fn writeNewc(writer: *Io.Writer, name: []const u8, mode: u32, data: []const u8) 
 }
 
 test "shell arguments remain quoted" {
-    const script = try makeScript(std.testing.allocator, &.{ "/bin/echo", "a'b", "$(touch /tmp/host)" }, &.{"PATH=/bin"}, false, true);
+    const script = try makeScript(std.testing.allocator, &.{ "/bin/echo", "a'b", "$(touch /tmp/host)" }, &.{"PATH=/bin"}, "/", false, true);
     defer std.testing.allocator.free(script);
     try std.testing.expect(std.mem.indexOf(u8, script, "env -i 'PATH=/bin' /usr/bin/busybox chroot") != null);
     try std.testing.expect(std.mem.indexOf(u8, script, "'/bin/echo' 'a'\"'\"'b' '$(touch /tmp/host)'") != null);
     try std.testing.expect(std.mem.indexOf(u8, script, "< /dev/null") != null);
     try std.testing.expect(std.mem.indexOf(u8, script, "if [ -s /mnt/control/guest-ip ]; then") != null);
-    const bare = try makeScript(std.testing.allocator, &.{ "echo", "hello" }, &.{}, true, false);
+    const bare = try makeScript(std.testing.allocator, &.{ "echo", "hello" }, &.{}, "/", true, false);
     defer std.testing.allocator.free(bare);
     try std.testing.expect(std.mem.indexOf(u8, bare, "/bin/sh -c 'exec \"$@\"' rift-sh 'echo' 'hello'") != null);
+    const workdir = try makeScript(std.testing.allocator, &.{"/bin/pwd"}, &.{}, "/tmp/a'b", false, false);
+    defer std.testing.allocator.free(workdir);
+    try std.testing.expect(std.mem.indexOf(u8, workdir, "chroot /mnt/root /bin/sh -c 'cd \"$1\" || exit 125; shift; exec \"$@\"' rift-workdir '/tmp/a'\"'\"'b' '/bin/pwd'") != null);
 }

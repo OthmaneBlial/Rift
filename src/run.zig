@@ -38,9 +38,8 @@ pub fn execute(init: std.process.Init, arguments: []const []const u8, stop_path:
     if (process.User) |user| {
         if (user.len != 0 and !std.mem.eql(u8, user, "root") and !std.mem.eql(u8, user, "0")) return error.UnsupportedImageUser;
     }
-    if (process.WorkingDir) |directory| {
-        if (directory.len != 0 and !std.mem.eql(u8, directory, "/")) return error.UnsupportedWorkingDirectory;
-    }
+    const working_dir = options.working_dir orelse process.WorkingDir orelse "/";
+    if (!validWorkingDirectory(working_dir)) return error.UnsupportedWorkingDirectory;
     const command = try config.command(allocator, process, arguments[offset + 1 ..]);
 
     try boot_assets.ensure(allocator, init.io, data_dir);
@@ -84,7 +83,7 @@ pub fn execute(init: std.process.Init, arguments: []const []const u8, stop_path:
     defer control.close(init.io);
     try rootfs.assemble(allocator, init.io, image_root, store, manifest_digest);
     const interactive = try Io.File.stdin().isTty(init.io);
-    try guest.writeInitramfs(allocator, init.io, base_initramfs, run_dir, command, process.Env orelse &.{}, interactive, port != null);
+    try guest.writeInitramfs(allocator, init.io, base_initramfs, run_dir, command, process.Env orelse &.{}, working_dir, interactive, port != null);
 
     var root_path_buffer: [Io.Dir.max_path_bytes]u8 = undefined;
     var control_path_buffer: [Io.Dir.max_path_bytes]u8 = undefined;
@@ -114,11 +113,12 @@ pub fn execute(init: std.process.Init, arguments: []const []const u8, stop_path:
     return @intCast(code);
 }
 
-pub const Options = struct { image_index: usize, port: ?vm.PortMapping, remove_after_exit: bool };
+pub const Options = struct { image_index: usize, port: ?vm.PortMapping, working_dir: ?[]const u8, remove_after_exit: bool };
 
 pub fn parseOptions(arguments: []const []const u8) !Options {
     var offset: usize = 0;
     var port: ?vm.PortMapping = null;
+    var working_dir: ?[]const u8 = null;
     var remove_after_exit = false;
     while (offset < arguments.len) {
         if (std.mem.eql(u8, arguments[offset], "--rm")) {
@@ -129,10 +129,18 @@ pub fn parseOptions(arguments: []const []const u8) !Options {
             if (port != null or offset + 1 >= arguments.len) return error.InvalidArguments;
             port = try parsePort(arguments[offset + 1]);
             offset += 2;
+        } else if (std.mem.eql(u8, arguments[offset], "-w")) {
+            if (working_dir != null or offset + 1 >= arguments.len or arguments[offset + 1].len == 0 or !validWorkingDirectory(arguments[offset + 1])) return error.InvalidArguments;
+            working_dir = arguments[offset + 1];
+            offset += 2;
         } else break;
     }
     if (arguments.len < offset + 1) return error.InvalidArguments;
-    return .{ .image_index = offset, .port = port, .remove_after_exit = remove_after_exit };
+    return .{ .image_index = offset, .port = port, .working_dir = working_dir, .remove_after_exit = remove_after_exit };
+}
+
+fn validWorkingDirectory(path: []const u8) bool {
+    return path.len == 0 or (path.len <= 4096 and path[0] == '/' and std.mem.indexOfScalar(u8, path, 0) == null);
 }
 
 fn parsePort(text: []const u8) !vm.PortMapping {
@@ -152,4 +160,13 @@ test "port mappings require two valid TCP ports" {
     for (&invalid_ports) |invalid| {
         try std.testing.expectError(error.InvalidArguments, parsePort(invalid));
     }
+}
+
+test "working directory override requires one absolute path" {
+    const selected = try parseOptions(&.{ "-w", "/tmp", "alpine", "/bin/pwd" });
+    try std.testing.expectEqualStrings("/tmp", selected.working_dir.?);
+    try std.testing.expectEqual(@as(usize, 2), selected.image_index);
+    try std.testing.expectError(error.InvalidArguments, parseOptions(&.{ "-w", "relative", "alpine" }));
+    try std.testing.expectError(error.InvalidArguments, parseOptions(&.{ "-w", "", "alpine" }));
+    try std.testing.expectError(error.InvalidArguments, parseOptions(&.{ "-w", "/tmp", "-w", "/", "alpine" }));
 }

@@ -24,7 +24,7 @@ fn printHelp(writer: *Io.Writer) Io.Writer.Error!void {
             "  clean [--yes]      Preview or remove stale runtime staging\n" ++
             "  images             List locally pulled images\n" ++
             "  pull <image>       Pull an OCI image for this host\n" ++
-            "  run [-d] [--rm] [-p HOST:GUEST] <image> [command] [args...] Run an image\n" ++
+            "  run [-d] [--rm] [-p HOST:GUEST] [-w DIR] <image> [command] [args...] Run an image\n" ++
             "  ps                 List detached containers\n" ++
             "  logs <id>          Show a detached container's output\n" ++
             "  stop <id>          Stop a detached container\n" ++
@@ -265,7 +265,7 @@ pub fn main(init: std.process.Init) void {
             error.InvalidImageConfig => std.debug.print("rift: image configuration is invalid or mismatches its layers\n", .{}),
             error.ImageHasNoCommand => std.debug.print("rift: image has no default command; specify one after the image\n", .{}),
             error.UnsupportedImageUser => std.debug.print("rift: this image requests a non-root user, which is not supported yet\n", .{}),
-            error.UnsupportedWorkingDirectory => std.debug.print("rift: this image requests a working directory other than '/', which is not supported yet\n", .{}),
+            error.UnsupportedWorkingDirectory => std.debug.print("rift: image working directory must be an absolute path\n", .{}),
             else => std.debug.print("rift: output failed: {s}\n", .{@errorName(err)}),
         }
         std.process.exit(if (err == error.InvalidArguments or err == error.CommandUnavailable) 2 else 1);
