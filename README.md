@@ -26,7 +26,7 @@ rift stop <container-id>
 rift rm <container-id>
 ```
 
-Image pulls use anonymous registry access and save SHA-256-verified OCI blobs and reference metadata under `~/Library/Application Support/Rift`. `system df` reports logical file bytes by category without modifying storage. `clean` previews abandoned runtime staging; `clean --yes` removes only staging whose Rift process lock has been released. Image cache, active VMs, and container logs are preserved. `run` requires an image pulled earlier, including `nginx` in the example above. It uses the image's `Entrypoint`, `Cmd`, and `Env` defaults, or your command arguments. Each run gets a disposable writable overlay inside its own Linux VM, currently configured with 256 MiB of guest RAM. `-p` accepts one `HOST:GUEST` TCP mapping bound to `127.0.0.1`. `run -d` starts one background Rift process per VM and prints its container ID. `stop` currently forces the VM off; `--rm` is unavailable with `-d`. Images requesting a non-root user or working directory other than `/` are rejected for now. Private registry credentials are not implemented.
+Image pulls use anonymous registry access and save SHA-256-verified OCI blobs and reference metadata under `~/Library/Application Support/Rift`. `run` pulls an image automatically when it is not cached; `pull` remains available to fetch or refresh it explicitly. `system df` reports logical file bytes by category without modifying storage. `clean` previews abandoned runtime staging; `clean --yes` removes only staging whose Rift process lock has been released. Image cache, active VMs, and container logs are preserved. `run` uses the image's `Entrypoint`, `Cmd`, and `Env` defaults, or your command arguments. Each run gets a disposable writable overlay inside its own Linux VM, currently configured with 256 MiB of guest RAM. `-p` accepts one `HOST:GUEST` TCP mapping bound to `127.0.0.1`. `run -d` starts one background Rift process per VM and prints its container ID. `stop` currently forces the VM off; `--rm` is unavailable with `-d`. Images requesting a non-root user or working directory other than `/` are rejected for now. Private registry credentials are not implemented.
 
 ## Build
 
@@ -41,6 +41,7 @@ zig build run-check
 zig build run-network-check
 zig build run-port-check
 zig build run-detached-check
+zig build run-auto-pull-check
 zig build run -- system info
 ```
 
@@ -68,7 +69,7 @@ zig build vm-network-check
 zig build oci-vm-check
 ```
 
-These checks boot Alpine, mount a read-only host directory, obtain a guest DHCP lease, and run `/bin/echo` from a pulled Alpine root filesystem inside the VM. Run `rift pull alpine` before `oci-vm-check`, `run-check`, `run-network-check`, `run-port-check`, or `run-detached-check`. The DNS check requires external DNS access.
+These checks boot Alpine, mount a read-only host directory, obtain a guest DHCP lease, and run `/bin/echo` from an Alpine root filesystem inside the VM. Run `rift pull alpine` before the direct `oci-vm-check` probe. The public CLI run checks pull Alpine automatically if absent; `run-auto-pull-check` uses an empty temporary HOME and requires network access for the registry and the pinned guest ISO. The DNS check also requires external DNS access.
 
 To assemble a pulled Alpine root filesystem locally, use the manifest digest shown by `rift images`:
 
@@ -89,6 +90,7 @@ No Docker Engine, Docker CLI, Docker Desktop, or container daemon is part of the
 - [x] OCI references, indexes, manifests, and `linux/arm64` selection with tests
 - [x] Streaming content-addressed blob storage with SHA-256 and size verification
 - [x] Public OCI pulls with Bearer token auth, platform selection, and verified blob downloads
+- [x] Foreground and detached runs automatically pull uncached public images
 - [x] Local image metadata and listing
 - [x] Read-only disk usage report by storage category
 - [x] Local Virtualization.framework bridge and Alpine guest boot check

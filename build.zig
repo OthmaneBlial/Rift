@@ -63,6 +63,12 @@ pub fn build(b: *std.Build) void {
         check_detached.step.dependOn(&sign_exe.step);
         b.step("run-detached-check", "Start, inspect, stop, and remove a detached Alpine container").dependOn(&check_detached.step);
 
+        const check_auto_pull = b.addSystemCommand(&.{"/usr/bin/python3"});
+        check_auto_pull.addFileArg(b.path("scripts/check_auto_pull.py"));
+        check_auto_pull.addArg(exe_path);
+        check_auto_pull.step.dependOn(&sign_exe.step);
+        b.step("run-auto-pull-check", "Run Alpine from an empty HOME without a separate pull").dependOn(&check_auto_pull.step);
+
         const benchmark = b.addSystemCommand(&.{"/usr/bin/python3"});
         benchmark.addFileArg(b.path("scripts/benchmark.py"));
         benchmark.addArg(exe_path);

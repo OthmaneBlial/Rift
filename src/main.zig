@@ -24,7 +24,7 @@ fn printHelp(writer: *Io.Writer) Io.Writer.Error!void {
             "  clean [--yes]      Preview or remove stale runtime staging\n" ++
             "  images             List locally pulled images\n" ++
             "  pull <image>       Pull an OCI image for this host\n" ++
-            "  run [-d] [--rm] [-p HOST:GUEST] <image> [command] [args...] Run a pulled image\n" ++
+            "  run [-d] [--rm] [-p HOST:GUEST] <image> [command] [args...] Run an image\n" ++
             "  ps                 List detached containers\n" ++
             "  logs <id>          Show a detached container's output\n" ++
             "  stop <id>          Stop a detached container\n" ++
@@ -77,11 +77,15 @@ fn dispatch(args: []const []const u8, writer: *Io.Writer, init: ?std.process.Ini
     }
 
     if (args.len > 0 and std.mem.eql(u8, args[0], "run")) {
-        if (args.len > 1 and std.mem.eql(u8, args[1], "-d")) {
-            try containers.spawn(init orelse return error.CommandUnavailable, args[2..], writer);
+        const process = init orelse return error.CommandUnavailable;
+        const detached = args.len > 1 and std.mem.eql(u8, args[1], "-d");
+        const run_args = if (detached) args[2..] else args[1..];
+        try ensurePulled(process, run_args, detached);
+        if (detached) {
+            try containers.spawn(process, run_args, writer);
             return 0;
         }
-        return runtime.execute(init orelse return error.CommandUnavailable, args[1..], null);
+        return runtime.execute(process, run_args, null);
     }
 
     if (args.len == 1 and std.mem.eql(u8, args[0], "ps")) {
@@ -137,6 +141,30 @@ fn pullImage(init: std.process.Init, image_name: []const u8, writer: *Io.Writer)
         result.digest,
         result.layer_count,
     });
+}
+
+fn ensurePulled(init: std.process.Init, arguments: []const []const u8, detached: bool) !void {
+    if (builtin.os.tag != .macos or builtin.cpu.arch != .aarch64) return error.UnsupportedHost;
+    const options = try runtime.parseOptions(arguments);
+    if (detached and options.remove_after_exit) return error.DetachedAutoRemoveUnsupported;
+    const allocator = init.arena.allocator();
+    const image_name = arguments[options.image_index];
+    var image = try reference.parse(allocator, image_name);
+    defer image.deinit(allocator);
+    const canonical = try image.formatAlloc(allocator);
+    var store = try openImageStore(init);
+    defer store.deinit();
+    const records = try store.listImages(allocator);
+    defer storage.deinitImageRecords(allocator, records);
+    for (records) |record| {
+        if (std.mem.eql(u8, record.reference, canonical)) return;
+    }
+
+    std.debug.print("rift: pulling {s} (not cached)\n", .{image_name});
+    var buffer: [512]u8 = undefined;
+    var stderr: Io.File.Writer = .init(.stderr(), init.io, &buffer);
+    try pullImage(init, image_name, &stderr.interface);
+    try stderr.interface.flush();
 }
 
 fn listImages(init: std.process.Init, writer: *Io.Writer) !void {
