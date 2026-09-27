@@ -21,6 +21,7 @@ fn printHelp(writer: *Io.Writer) Io.Writer.Error!void {
             "  version, --version Show version\n" ++
             "  system info        Show host information\n" ++
             "  system df          Show Rift storage usage\n" ++
+            "  clean [--yes]      Preview or remove stale runtime staging\n" ++
             "  images             List locally pulled images\n" ++
             "  pull <image>       Pull an OCI image for this host\n" ++
             "  run [-d] [--rm] [-p HOST:GUEST] <image> [command] [args...] Run a pulled image\n" ++
@@ -54,6 +55,12 @@ fn dispatch(args: []const []const u8, writer: *Io.Writer, init: ?std.process.Ini
 
     if (args.len == 2 and std.mem.eql(u8, args[0], "system") and std.mem.eql(u8, args[1], "df")) {
         try reportDisk(init orelse return error.CommandUnavailable, writer);
+        return 0;
+    }
+
+    if (args.len > 0 and std.mem.eql(u8, args[0], "clean")) {
+        if (args.len > 2 or (args.len == 2 and !std.mem.eql(u8, args[1], "--yes"))) return error.InvalidArguments;
+        try cleanDisk(init orelse return error.CommandUnavailable, args.len == 2, writer);
         return 0;
     }
 
@@ -160,15 +167,25 @@ fn openImageStore(init: std.process.Init) !storage.BlobStore {
 }
 
 fn reportDisk(init: std.process.Init, writer: *Io.Writer) !void {
+    var data_dir = (try openDataDir(init)) orelse return (disk.Report{}).print(writer);
+    defer data_dir.close(init.io);
+    try (try disk.scan(init.io, data_dir)).print(writer);
+}
+
+fn cleanDisk(init: std.process.Init, confirmed: bool, writer: *Io.Writer) !void {
+    var data_dir = (try openDataDir(init)) orelse return writer.writeAll("No stale runtime staging found.\n");
+    defer data_dir.close(init.io);
+    try disk.clean(init.arena.allocator(), init.io, data_dir, confirmed, writer);
+}
+
+fn openDataDir(init: std.process.Init) !?Io.Dir {
     const home = init.environ_map.get("HOME") orelse return error.HomeDirectoryUnavailable;
     var home_dir = try Io.Dir.openDirAbsolute(init.io, home, .{});
     defer home_dir.close(init.io);
-    var data_dir = home_dir.openDir(init.io, "Library/Application Support/Rift", .{ .follow_symlinks = false, .iterate = true }) catch |err| switch (err) {
-        error.FileNotFound => return (disk.Report{}).print(writer),
+    return home_dir.openDir(init.io, "Library/Application Support/Rift", .{ .follow_symlinks = false, .iterate = true }) catch |err| switch (err) {
+        error.FileNotFound => null,
         else => return err,
     };
-    defer data_dir.close(init.io);
-    try (try disk.scan(init.io, data_dir)).print(writer);
 }
 
 pub fn main(init: std.process.Init) void {

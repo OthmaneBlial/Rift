@@ -34,6 +34,10 @@ def main() -> int:
             time.sleep(0.2)
         else:
             raise RuntimeError("container never reached running state with readable logs")
+        active = set(runtime.iterdir()) - before
+        preview = call(rift, "clean")
+        if preview.returncode != 0 or len(active) != 1 or next(iter(active)).name in preview.stdout:
+            raise RuntimeError(f"clean offered to remove active staging: {preview!r}")
         stopped = call(rift, "stop", identifier)
         if stopped.returncode != 0 or f"Stopped {identifier}" not in stopped.stdout:
             raise RuntimeError(f"stop failed: {stopped!r}")

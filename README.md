@@ -13,6 +13,8 @@ rift --help
 rift version
 rift system info
 rift system df
+rift clean
+rift clean --yes
 rift pull alpine
 rift images
 rift run --rm alpine echo hello
@@ -24,7 +26,7 @@ rift stop <container-id>
 rift rm <container-id>
 ```
 
-Image pulls use anonymous registry access and save SHA-256-verified OCI blobs and reference metadata under `~/Library/Application Support/Rift`. `system df` reports logical file bytes by category without modifying storage. `run` requires an image pulled earlier, including `nginx` in the example above. It uses the image's `Entrypoint`, `Cmd`, and `Env` defaults, or your command arguments. Each run gets a disposable writable overlay inside its own Linux VM. `-p` accepts one `HOST:GUEST` TCP mapping bound to `127.0.0.1`. `run -d` starts one background Rift process per VM and prints its container ID. `stop` currently forces the VM off; `--rm` is unavailable with `-d`. Images requesting a non-root user or working directory other than `/` are rejected for now. Private registry credentials are not implemented.
+Image pulls use anonymous registry access and save SHA-256-verified OCI blobs and reference metadata under `~/Library/Application Support/Rift`. `system df` reports logical file bytes by category without modifying storage. `clean` previews abandoned runtime staging; `clean --yes` removes only staging whose Rift process lock has been released. Image cache, active VMs, and container logs are preserved. `run` requires an image pulled earlier, including `nginx` in the example above. It uses the image's `Entrypoint`, `Cmd`, and `Env` defaults, or your command arguments. Each run gets a disposable writable overlay inside its own Linux VM. `-p` accepts one `HOST:GUEST` TCP mapping bound to `127.0.0.1`. `run -d` starts one background Rift process per VM and prints its container ID. `stop` currently forces the VM off; `--rm` is unavailable with `-d`. Images requesting a non-root user or working directory other than `/` are rejected for now. Private registry credentials are not implemented.
 
 ## Build
 
@@ -90,9 +92,10 @@ No Docker Engine, Docker CLI, Docker Desktop, or container daemon is part of the
 - [x] Outbound NAT and DNS for foreground commands
 - [x] One localhost TCP port mapping for foreground commands
 - [x] Detached run, process listing, plain logs, stop, and remove
-- [ ] Structured logs, volumes, and broader cleanup
+- [x] Preview and confirmed cleanup of abandoned runtime staging
+- [ ] Structured logs, volumes, and image cache pruning
 
-Foreground runs remove their temporary state on normal completion, including runs without `--rm`. Detached runs keep their logs and status until `rift rm`; the VM and temporary root filesystem are removed on stop or exit. Local checks have served the nginx welcome page over a forwarded localhost port, including with `run -d`. Interrupting a foreground run can leave temporary staging until cleanup is implemented. There is no release artifact yet. Do not use Rift as a Docker replacement today.
+Foreground runs remove their temporary state on normal completion, including runs without `--rm`. Detached runs keep their logs and status until `rift rm`; the VM and temporary root filesystem are removed on stop or exit. Local checks have served the nginx welcome page over a forwarded localhost port, including with `run -d`. An interrupted foreground run can leave staging, which `rift clean` can preview and remove after the process exits. There is no release artifact yet. Do not use Rift as a Docker replacement today.
 
 ## License
 

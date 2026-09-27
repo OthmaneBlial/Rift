@@ -70,9 +70,12 @@ pub fn execute(init: std.process.Init, arguments: []const []const u8, stop_path:
     const hex = std.fmt.bytesToHex(random, .lower);
     const name = try std.fmt.allocPrint(allocator, "run-{s}", .{hex});
     try runtime.createDir(init.io, name, .fromMode(0o700));
-    defer runtime.deleteTree(init.io, name) catch {};
+    errdefer runtime.deleteTree(init.io, name) catch {};
     var run_dir = try runtime.openDir(init.io, name, .{});
     defer run_dir.close(init.io);
+    const active = try run_dir.createFile(init.io, "active.lock", .{ .exclusive = true, .lock = .exclusive, .permissions = .fromMode(0o600) });
+    defer active.close(init.io);
+    defer runtime.deleteTree(init.io, name) catch {};
     try run_dir.createDir(init.io, "rootfs", .default_dir);
     try run_dir.createDir(init.io, "control", .default_dir);
     var image_root = try run_dir.openDir(init.io, "rootfs", .{});
