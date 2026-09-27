@@ -95,6 +95,38 @@ def main() -> int:
         supplementary = subprocess.run([binary, "run", "alpine", "/bin/busybox", "id", "-G"], env=env, capture_output=True, text=True, timeout=60)
         if supplementary.returncode != 0 or "1001" not in supplementary.stdout.split():
             raise RuntimeError(f"named image user's supplementary group was not applied: {supplementary!r}")
+        ownership_archive = io.BytesIO()
+        with tarfile.open(fileobj=ownership_archive, mode="w") as layer:
+            root = tarfile.TarInfo(".")
+            root.type = tarfile.DIRTYPE
+            root.mode = 0o755
+            root.uid = 1000
+            root.gid = 1000
+            layer.addfile(root)
+            directory = tarfile.TarInfo("opt/rift-owned")
+            directory.type = tarfile.DIRTYPE
+            directory.mode = 0o700
+            directory.uid = 1000
+            directory.gid = 1000
+            layer.addfile(directory)
+            owned_file = tarfile.TarInfo("opt/rift-owned/probe")
+            owned_file.mode = 0o600
+            owned_file.uid = 1000
+            owned_file.gid = 1000
+            owned_file.size = len(b"before\n")
+            layer.addfile(owned_file, io.BytesIO(b"before\n"))
+        append_layer(ownership_archive.getvalue())
+        select_user("1000:1000")
+        owner_check = subprocess.run(
+            [binary, "run", "alpine", "/bin/busybox", "sh", "-c",
+             "test \"$(stat -c '%u:%g' /)\" = '1000:1000' && "
+             "test \"$(stat -c '%u:%g %a' /opt/rift-owned/probe)\" = '1000:1000 600' && "
+             "printf 'after\\n' >> /opt/rift-owned/probe && "
+             "grep -q '^after$' /opt/rift-owned/probe && echo RIFT_OWNER_OK"],
+            env=env, capture_output=True, text=True, timeout=60,
+        )
+        if owner_check.returncode != 0 or owner_check.stdout.strip() != "RIFT_OWNER_OK":
+            raise RuntimeError(f"OCI file and directory ownership check failed: {owner_check!r}")
         writable_tmp = subprocess.run(
             [binary, "run", "alpine", "/bin/busybox", "sh", "-c", "touch /tmp/rift-user-write && test -f /tmp/rift-user-write && echo RIFT_TMP_WRITABLE"],
             env=env, capture_output=True, text=True, timeout=60,
@@ -119,7 +151,7 @@ def main() -> int:
             raise RuntimeError(f"fixture still contains a working shell: {removed_shell!r}")
         if list((data / "runtime").iterdir()):
             raise RuntimeError("process settings run left runtime staging behind")
-    print("Rift process settings check passed: working directory, numeric and named users, writable /tmp, shell-free image")
+    print("Rift process and ownership check passed: users, groups, OCI-owned files, writable /tmp, shell-free image")
     return 0
 
 

@@ -38,7 +38,7 @@ fn makeScript(allocator: std.mem.Allocator, command: []const []const u8, environ
             "   /usr/bin/busybox mount -t virtiofs rift-control /mnt/control; then\n" ++
             "  if /usr/bin/busybox mount -t tmpfs -o size=256m tmpfs /mnt/state &&\n" ++
             "     /usr/bin/busybox mkdir -p /mnt/state/upper /mnt/state/work &&\n" ++
-            "     /usr/bin/busybox mount -t overlay overlay -o lowerdir=/mnt/rift,upperdir=/mnt/state/upper,workdir=/mnt/state/work /mnt/root; then\n" ++
+            "     /usr/bin/busybox mount -t overlay overlay -o metacopy=on,lowerdir=/mnt/rift,upperdir=/mnt/state/upper,workdir=/mnt/state/work /mnt/root; then\n" ++
             "    /usr/bin/busybox --install -s /usr/bin >/dev/null 2>&1\n" ++
             "    /usr/bin/busybox ip link set eth0 up >/dev/null 2>&1\n" ++
             "    if /usr/bin/busybox udhcpc -i eth0 -q -n -t 3 -T 1 >/dev/null 2>&1; then\n" ++
@@ -143,6 +143,7 @@ test "shell arguments remain quoted" {
     const bare = try makeScript(std.testing.allocator, &.{ "echo", "hello" }, &.{}, "/", "", &.{}, true, false);
     defer std.testing.allocator.free(bare);
     try std.testing.expect(std.mem.indexOf(u8, bare, "/rift-exec /mnt/root '/' '' 0 'echo' 'hello'") != null);
+    try std.testing.expect(std.mem.indexOf(u8, bare, "mount -t overlay overlay -o metacopy=on,lowerdir=/mnt/rift") != null);
     try std.testing.expect(std.mem.indexOf(u8, bare, "if [ -e /mnt/control/stop ]; then") != null);
     try std.testing.expect(std.mem.indexOf(u8, bare, "/usr/bin/busybox kill -TERM \"$workload_pid\"") != null);
     const workdir = try makeScript(std.testing.allocator, &.{"/bin/pwd"}, &.{}, "/tmp/a'b", "nobody", &.{}, false, false);

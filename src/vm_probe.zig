@@ -48,9 +48,15 @@ fn runOci(init: std.process.Init, kernel: []const u8, initramfs: []const u8, ima
     const directory = try std.fmt.allocPrint(allocator, ".zig-cache/oci-vm-{s}", .{hex});
     try std.Io.Dir.cwd().createDirPath(init.io, directory);
     defer std.Io.Dir.cwd().deleteTree(init.io, directory) catch {};
-    var root = try std.Io.Dir.cwd().openDir(init.io, directory, .{});
+    var run_dir = try std.Io.Dir.cwd().openDir(init.io, directory, .{});
+    defer run_dir.close(init.io);
+    try run_dir.createDir(init.io, "rootfs", .default_dir);
+    try run_dir.createDir(init.io, "control", .default_dir);
+    var root = try run_dir.openDir(init.io, "rootfs", .{});
     defer root.close(init.io);
-    try rootfs.assemble(allocator, init.io, root, store, digest);
+    var control = try run_dir.openDir(init.io, "control", .{});
+    defer control.close(init.io);
+    try rootfs.assemble(allocator, init.io, root, control, store, digest);
 
     var path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const path_size = try root.realPath(init.io, &path_buffer);

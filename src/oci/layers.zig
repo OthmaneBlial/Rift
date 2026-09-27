@@ -4,6 +4,7 @@ const Io = std.Io;
 const max_layer_bytes = 8 * 1024 * 1024 * 1024;
 const max_image_layer_bytes = 32 * 1024 * 1024 * 1024;
 const max_pax_header_bytes = 1024 * 1024;
+const max_owner_records = 1_000_000;
 
 pub const ExpansionBudget = struct {
     // apply decompresses every layer once for whiteouts and again for entries.
@@ -16,6 +17,11 @@ pub const DirectoryMetadata = struct {
     mtime: Io.Timestamp,
 };
 
+pub const Ownership = struct {
+    uid: u32,
+    gid: u32,
+};
+
 /// Apply a verified OCI layer to a private, unpublished root directory.
 /// Whiteouts run first so they cannot delete files added by the same layer.
 pub fn apply(
@@ -25,10 +31,11 @@ pub fn apply(
     blob: Io.File,
     media_type: []const u8,
     directory_metadata: *std.StringHashMap(DirectoryMetadata),
+    ownership: *std.StringHashMap(Ownership),
     budget: *ExpansionBudget,
 ) !void {
-    try pass(allocator, io, root, blob, media_type, directory_metadata, &budget.whiteouts, .whiteouts);
-    try pass(allocator, io, root, blob, media_type, directory_metadata, &budget.entries, .entries);
+    try pass(allocator, io, root, blob, media_type, directory_metadata, ownership, &budget.whiteouts, .whiteouts);
+    try pass(allocator, io, root, blob, media_type, directory_metadata, ownership, &budget.entries, .entries);
 }
 
 const Pass = enum { whiteouts, entries };
@@ -41,6 +48,7 @@ const LayerTarEntry = struct {
     mode: u32,
     kind: LayerTarEntryKind,
     mtime: Io.Timestamp,
+    ownership: Ownership,
 };
 
 const PaxOverrides = struct {
@@ -49,6 +57,10 @@ const PaxOverrides = struct {
     size: ?u64 = null,
     has_mtime: bool = false,
     mtime: ?Io.Timestamp = null,
+    has_uid: bool = false,
+    uid: ?u32 = null,
+    has_gid: bool = false,
+    gid: ?u32 = null,
 };
 
 /// std.tar.Iterator drops PAX mtime records and global PAX headers. Keep its
@@ -64,6 +76,8 @@ const LayerTarIterator = struct {
     padding: usize = 0,
     unread_file_bytes: u64 = 0,
     global_mtime: ?Io.Timestamp = null,
+    global_uid: ?u32 = null,
+    global_gid: ?u32 = null,
 
     fn init(allocator: std.mem.Allocator, reader: *Io.Reader, image_total: *u64, file_name_buffer: []u8, link_name_buffer: []u8) LayerTarIterator {
         return .{
@@ -127,6 +141,10 @@ const LayerTarIterator = struct {
                         '3', '4' => .device,
                         else => .file,
                     };
+                    const ownership: Ownership = .{
+                        .uid = if (pax.has_uid) pax.uid orelse try tarHeaderId(header[108..116]) else self.global_uid orelse try tarHeaderId(header[108..116]),
+                        .gid = if (pax.has_gid) pax.gid orelse try tarHeaderId(header[116..124]) else self.global_gid orelse try tarHeaderId(header[116..124]),
+                    };
                     self.padding = tarBlockPadding(entry_size);
                     self.unread_file_bytes = entry_size;
                     return .{
@@ -136,6 +154,7 @@ const LayerTarIterator = struct {
                         .mode = try tarHeaderMode(header),
                         .kind = entry_kind,
                         .mtime = mtime,
+                        .ownership = ownership,
                     };
                 },
                 else => return error.TarUnsupportedHeader,
@@ -200,6 +219,10 @@ const LayerTarIterator = struct {
                     self.global_mtime = if (value.len == 0) null else try parsePaxMtime(value);
                     pax.has_mtime = false;
                     pax.mtime = null;
+                } else if (std.mem.eql(u8, key, "uid")) {
+                    self.global_uid = if (value.len == 0) null else try parsePaxId(value);
+                } else if (std.mem.eql(u8, key, "gid")) {
+                    self.global_gid = if (value.len == 0) null else try parsePaxId(value);
                 }
             } else if (std.mem.eql(u8, key, "path")) {
                 pax.path = try copyTarString(self.file_name_buffer, value);
@@ -210,6 +233,12 @@ const LayerTarIterator = struct {
             } else if (std.mem.eql(u8, key, "mtime")) {
                 pax.has_mtime = true;
                 pax.mtime = if (value.len == 0) null else try parsePaxMtime(value);
+            } else if (std.mem.eql(u8, key, "uid")) {
+                pax.has_uid = true;
+                pax.uid = if (value.len == 0) null else try parsePaxId(value);
+            } else if (std.mem.eql(u8, key, "gid")) {
+                pax.has_gid = true;
+                pax.gid = if (value.len == 0) null else try parsePaxId(value);
             }
             offset = end;
         }
@@ -255,6 +284,33 @@ fn tarHeaderMode(header: *const [512]u8) !u32 {
     return @intCast(try tarHeaderOctal(header[100..108]));
 }
 
+fn tarHeaderId(field: []const u8) !u32 {
+    if (field.len == 0 or field[0] == 0xff) return error.TarNumericValueNegative;
+    var value: u64 = 0;
+    if (field[0] & 0x80 != 0) {
+        if (field[0] & 0x40 != 0) return error.TarNumericValueNegative;
+        value = field[0] & 0x3f;
+        for (field[1..]) |byte| {
+            value = std.math.mul(u64, value, 256) catch return error.TarNumericValueTooBig;
+            value = std.math.add(u64, value, byte) catch return error.TarNumericValueTooBig;
+        }
+    } else {
+        const text = std.mem.trim(u8, field, " \x00");
+        value = if (text.len == 0) 0 else std.fmt.parseInt(u64, text, 8) catch return error.TarHeader;
+    }
+    const id = std.math.cast(u32, value) orelse return error.TarNumericValueTooBig;
+    if (id == std.math.maxInt(u32)) return error.TarNumericValueTooBig;
+    return id;
+}
+
+fn parsePaxId(value: []const u8) !u32 {
+    if (value.len == 0) return error.PaxInvalidAttribute;
+    for (value) |digit| if (digit < '0' or digit > '9') return error.PaxInvalidAttribute;
+    const id = std.fmt.parseInt(u32, value, 10) catch return error.PaxInvalidAttribute;
+    if (id == std.math.maxInt(u32)) return error.PaxInvalidAttribute;
+    return id;
+}
+
 fn parsePaxMtime(value: []const u8) !Io.Timestamp {
     if (value.len == 0) return error.InvalidLayerTimestamp;
     const dot = std.mem.indexOfScalar(u8, value, '.') orelse value.len;
@@ -281,31 +337,31 @@ fn parsePaxMtime(value: []const u8) !Io.Timestamp {
     return .fromNanoseconds(nanoseconds);
 }
 
-fn pass(allocator: std.mem.Allocator, io: Io, root: Io.Dir, blob: Io.File, media_type: []const u8, directory_metadata: *std.StringHashMap(DirectoryMetadata), image_total: *u64, phase: Pass) !void {
+fn pass(allocator: std.mem.Allocator, io: Io, root: Io.Dir, blob: Io.File, media_type: []const u8, directory_metadata: *std.StringHashMap(DirectoryMetadata), ownership: *std.StringHashMap(Ownership), image_total: *u64, phase: Pass) !void {
     var input_buffer: [32 * 1024]u8 = undefined;
     var input = blob.reader(io, &input_buffer);
     if (std.mem.eql(u8, media_type, "application/vnd.oci.image.layer.v1.tar") or
         std.mem.eql(u8, media_type, "application/vnd.docker.image.rootfs.diff.tar"))
     {
-        return applyTar(allocator, io, root, &input.interface, directory_metadata, image_total, phase);
+        return applyTar(allocator, io, root, &input.interface, directory_metadata, ownership, image_total, phase);
     }
     if (std.mem.eql(u8, media_type, "application/vnd.oci.image.layer.v1.tar+gzip") or
         std.mem.eql(u8, media_type, "application/vnd.docker.image.rootfs.diff.tar.gzip"))
     {
         var output_buffer: [std.compress.flate.max_window_len]u8 = undefined;
         var decompressor = std.compress.flate.Decompress.init(&input.interface, .gzip, &output_buffer);
-        return applyTar(allocator, io, root, &decompressor.reader, directory_metadata, image_total, phase);
+        return applyTar(allocator, io, root, &decompressor.reader, directory_metadata, ownership, image_total, phase);
     }
     if (std.mem.eql(u8, media_type, "application/vnd.oci.image.layer.v1.tar+zstd")) {
         const output_buffer = try allocator.alloc(u8, std.compress.zstd.default_window_len + std.compress.zstd.block_size_max);
         defer allocator.free(output_buffer);
         var decompressor = std.compress.zstd.Decompress.init(&input.interface, output_buffer, .{});
-        return applyTar(allocator, io, root, &decompressor.reader, directory_metadata, image_total, phase);
+        return applyTar(allocator, io, root, &decompressor.reader, directory_metadata, ownership, image_total, phase);
     }
     return error.UnsupportedLayerMediaType;
 }
 
-fn applyTar(allocator: std.mem.Allocator, io: Io, root: Io.Dir, reader: *Io.Reader, directory_metadata: *std.StringHashMap(DirectoryMetadata), image_total: *u64, phase: Pass) !void {
+fn applyTar(allocator: std.mem.Allocator, io: Io, root: Io.Dir, reader: *Io.Reader, directory_metadata: *std.StringHashMap(DirectoryMetadata), ownership: *std.StringHashMap(Ownership), image_total: *u64, phase: Pass) !void {
     var name_buffer: [Io.Dir.max_path_bytes]u8 = undefined;
     var link_buffer: [Io.Dir.max_path_bytes]u8 = undefined;
     var clean_buffer: [Io.Dir.max_path_bytes]u8 = undefined;
@@ -329,20 +385,33 @@ fn applyTar(allocator: std.mem.Allocator, io: Io, root: Io.Dir, reader: *Io.Read
             if (entry.kind != .file or entry.size != 0) return error.InvalidWhiteout;
             if (std.mem.eql(u8, name, ".wh.") or std.mem.eql(u8, name[4..], ".") or
                 std.mem.eql(u8, name[4..], "..")) return error.InvalidWhiteout;
-            if (phase == .whiteouts) try applyWhiteout(allocator, io, root, path, name);
+            if (phase == .whiteouts) {
+                try applyWhiteout(allocator, io, root, path, name);
+                if (std.mem.eql(u8, name, ".wh..wh..opq")) {
+                    try removeOwnerDescendants(allocator, ownership, parentPath(path));
+                } else {
+                    const parent_path = parentPath(path);
+                    const target = try std.fmt.allocPrint(allocator, "{s}{s}{s}", .{ parent_path, if (parent_path.len == 0) "" else "/", name[4..] });
+                    defer allocator.free(target);
+                    try removeOwnerSubtree(allocator, ownership, target);
+                }
+            }
             continue;
         }
         if (entry.kind == .device) {
             if (entry.size != 0 or !std.mem.startsWith(u8, path, "dev/")) return error.UnsupportedLayerSpecialFile;
             continue;
         }
-        if (path.len == 0) continue;
+        if (path.len == 0) {
+            if (phase == .entries and entry.kind == .directory) try setOwnership(ownership, path, entry.ownership);
+            continue;
+        }
         if (phase == .whiteouts) {
-            if (entry.kind == .hard_link) try applyHardlink(io, root, path, entry.link_name, entry.size, entry.mtime, phase);
+            if (entry.kind == .hard_link) try applyHardlink(allocator, io, root, path, entry.link_name, entry.size, entry.mtime, entry.ownership, ownership, phase);
             continue;
         }
         if (entry.kind == .hard_link) {
-            try applyHardlink(io, root, path, entry.link_name, entry.size, entry.mtime, phase);
+            try applyHardlink(allocator, io, root, path, entry.link_name, entry.size, entry.mtime, entry.ownership, ownership, phase);
             continue;
         }
 
@@ -362,13 +431,19 @@ fn applyTar(allocator: std.mem.Allocator, io: Io, root: Io.Dir, reader: *Io.Read
                     else => return err,
                 };
                 if (existing) |stat| {
-                    if (stat.kind == .directory) continue;
+                    if (stat.kind == .directory) {
+                        try setOwnership(ownership, path, entry.ownership);
+                        continue;
+                    }
                     try parent.deleteTree(io, name);
+                    try removeOwnerSubtree(allocator, ownership, path);
                 }
                 try parent.createDirPath(io, name);
+                try setOwnership(ownership, path, entry.ownership);
             },
             .file => {
                 try parent.deleteTree(io, name);
+                try removeOwnerSubtree(allocator, ownership, path);
                 var output = try parent.createFile(io, name, .{
                     .exclusive = true,
                     .permissions = .fromMode(@intCast(entry.mode & 0o777)),
@@ -380,15 +455,18 @@ fn applyTar(allocator: std.mem.Allocator, io: Io, root: Io.Dir, reader: *Io.Read
                 try writer.interface.flush();
                 try output.setPermissions(io, .fromMode(@intCast(entry.mode & 0o777)));
                 try output.setTimestamps(io, .{ .modify_timestamp = .init(entry.mtime) });
+                try setOwnership(ownership, path, entry.ownership);
             },
             .sym_link => {
                 try checkLink(path, entry.link_name);
                 try parent.deleteTree(io, name);
+                try removeOwnerSubtree(allocator, ownership, path);
                 try parent.symLink(io, entry.link_name, name, .{});
                 try parent.setTimestamps(io, name, .{
                     .follow_symlinks = false,
                     .modify_timestamp = .init(entry.mtime),
                 });
+                try setOwnership(ownership, path, entry.ownership);
             },
             .hard_link => unreachable,
             .device => unreachable,
@@ -433,11 +511,52 @@ fn applyDirectoryMetadataEntry(io: Io, root: Io.Dir, path: []const u8, metadata:
     });
 }
 
-fn applyHardlink(io: Io, root: Io.Dir, path: []const u8, raw_target: []const u8, size: u64, mtime: Io.Timestamp, phase: Pass) !void {
+fn setOwnership(ownership: *std.StringHashMap(Ownership), path: []const u8, value: Ownership) !void {
+    if (value.uid == 0 and value.gid == 0) {
+        if (ownership.count() == 0) return;
+        if (ownership.fetchRemove(path)) |removed| ownership.allocator.free(removed.key);
+        return;
+    }
+    if (ownership.getPtr(path)) |stored| {
+        stored.* = value;
+        return;
+    }
+    if (ownership.count() >= max_owner_records) return error.TooManyOwnedImageEntries;
+    try ownership.put(try ownership.allocator.dupe(u8, path), value);
+}
+
+fn removeOwnerSubtree(allocator: std.mem.Allocator, ownership: *std.StringHashMap(Ownership), prefix: []const u8) !void {
+    try removeOwnerEntries(allocator, ownership, prefix, true);
+}
+
+fn removeOwnerDescendants(allocator: std.mem.Allocator, ownership: *std.StringHashMap(Ownership), prefix: []const u8) !void {
+    try removeOwnerEntries(allocator, ownership, prefix, false);
+}
+
+fn removeOwnerEntries(allocator: std.mem.Allocator, ownership: *std.StringHashMap(Ownership), prefix: []const u8, include_self: bool) !void {
+    var removed_paths: std.ArrayList([]const u8) = .empty;
+    defer removed_paths.deinit(allocator);
+    var entries = ownership.iterator();
+    while (entries.next()) |entry| {
+        const path = entry.key_ptr.*;
+        const is_self = std.mem.eql(u8, path, prefix);
+        const is_descendant = if (prefix.len == 0)
+            path.len != 0
+        else
+            path.len > prefix.len and std.mem.startsWith(u8, path, prefix) and path[prefix.len] == '/';
+        if ((include_self and is_self) or is_descendant) try removed_paths.append(allocator, path);
+    }
+    for (removed_paths.items) |path| {
+        if (ownership.fetchRemove(path)) |removed| ownership.allocator.free(removed.key);
+    }
+}
+
+fn applyHardlink(allocator: std.mem.Allocator, io: Io, root: Io.Dir, path: []const u8, raw_target: []const u8, size: u64, mtime: Io.Timestamp, entry_ownership: Ownership, ownership: *std.StringHashMap(Ownership), phase: Pass) !void {
     if (size != 0) return error.TarUnsupportedHeader;
     var clean_target_buffer: [Io.Dir.max_path_bytes]u8 = undefined;
     const target = try cleanPath(raw_target, &clean_target_buffer);
     if (path.len == 0 or target.len == 0 or std.mem.eql(u8, path, target)) return error.UnsafeLayerLink;
+    const target_ownership = ownership.get(target) orelse entry_ownership;
     if (std.mem.startsWith(u8, basename(path), ".wh.")) return error.InvalidWhiteout;
     if (phase == .whiteouts) return;
     var source = (try openParent(io, root, parentPath(target), false)) orelse return error.InvalidHardlink;
@@ -446,11 +565,13 @@ fn applyHardlink(io: Io, root: Io.Dir, path: []const u8, raw_target: []const u8,
     var parent = (try openParent(io, root, parentPath(path), true)).?;
     defer parent.close(io);
     try parent.deleteTree(io, basename(path));
+    try removeOwnerSubtree(allocator, ownership, path);
     try source.hardLink(basename(target), parent, basename(path), io, .{ .follow_symlinks = false });
     try parent.setTimestamps(io, basename(path), .{
         .follow_symlinks = false,
         .modify_timestamp = .init(mtime),
     });
+    try setOwnership(ownership, path, target_ownership);
 }
 
 fn tarMtime(header: *const [512]u8) !Io.Timestamp {
@@ -623,6 +744,8 @@ test "rejects aggregate decompressed layer bytes before extracting entries" {
     defer arena.deinit();
     var directory_metadata = std.StringHashMap(DirectoryMetadata).init(arena.allocator());
     defer directory_metadata.deinit();
+    var ownership = std.StringHashMap(Ownership).init(arena.allocator());
+    defer ownership.deinit();
     var budget: ExpansionBudget = .{ .entries = max_image_layer_bytes - 1 };
 
     try std.testing.expectError(error.ImageLayersTooLarge, apply(
@@ -632,6 +755,7 @@ test "rejects aggregate decompressed layer bytes before extracting entries" {
         blob,
         "application/vnd.oci.image.layer.v1.tar",
         &directory_metadata,
+        &ownership,
         &budget,
     ));
     try std.testing.expectError(error.FileNotFound, root.statFile(io, "must-not-exist", .{ .follow_symlinks = false }));
@@ -649,6 +773,8 @@ test "applies final directory modes after all layers" {
     defer arena.deinit();
     var directory_metadata = std.StringHashMap(DirectoryMetadata).init(arena.allocator());
     defer directory_metadata.deinit();
+    var ownership = std.StringHashMap(Ownership).init(arena.allocator());
+    defer ownership.deinit();
 
     var first_archive: Io.Writer.Allocating = .init(allocator);
     defer first_archive.deinit();
@@ -658,7 +784,7 @@ test "applies final directory modes after all layers" {
     const first_blob = try temp.dir.openFile(io, "first.tar", .{ .mode = .read_only });
     defer first_blob.close(io);
     var budget: ExpansionBudget = .{};
-    try apply(allocator, io, root, first_blob, "application/vnd.oci.image.layer.v1.tar", &directory_metadata, &budget);
+    try apply(allocator, io, root, first_blob, "application/vnd.oci.image.layer.v1.tar", &directory_metadata, &ownership, &budget);
 
     var second_archive: Io.Writer.Allocating = .init(allocator);
     defer second_archive.deinit();
@@ -668,7 +794,7 @@ test "applies final directory modes after all layers" {
     try temp.dir.writeFile(io, .{ .sub_path = "second.tar", .data = second_archive.written() });
     const second_blob = try temp.dir.openFile(io, "second.tar", .{ .mode = .read_only });
     defer second_blob.close(io);
-    try apply(allocator, io, root, second_blob, "application/vnd.oci.image.layer.v1.tar", &directory_metadata, &budget);
+    try apply(allocator, io, root, second_blob, "application/vnd.oci.image.layer.v1.tar", &directory_metadata, &ownership, &budget);
 
     try applyDirectoryMetadata(io, root, &directory_metadata);
     const stat = try root.statFile(io, "tmp", .{ .follow_symlinks = false });
@@ -836,6 +962,91 @@ test "honors local and global PAX modification times" {
     try std.testing.expectError(error.InvalidLayerTimestamp, parsePaxMtime("7.-5"));
 }
 
+test "tracks tar and PAX ownership through overrides and whiteouts" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var temp = std.testing.tmpDir(.{});
+    defer temp.cleanup();
+    try temp.dir.createDirPath(io, "root");
+    var root = try temp.dir.openDir(io, "root", .{});
+    defer root.close(io);
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    var directory_metadata = std.StringHashMap(DirectoryMetadata).init(arena.allocator());
+    defer directory_metadata.deinit();
+    var ownership = std.StringHashMap(Ownership).init(arena.allocator());
+    defer ownership.deinit();
+    var budget: ExpansionBudget = .{};
+
+    var archive: Io.Writer.Allocating = .init(allocator);
+    defer archive.deinit();
+    var tar: std.tar.Writer = .{ .underlying_writer = &archive.writer };
+    try writeTestPaxHeaderKind(allocator, &archive, &tar, 'g', &.{
+        .{ .key = "uid", .value = "1234" },
+        .{ .key = "gid", .value = "2345" },
+    });
+    try tar.writeDir(".", .{});
+    try tar.writeFileBytes("global-file", "g", .{});
+    try writeTestPaxHeader(allocator, &archive, &tar, &.{
+        .{ .key = "uid", .value = "7" },
+        .{ .key = "gid", .value = "8" },
+    });
+    try tar.writeFileBytes("local-file", "l", .{});
+    try writeTestPaxHeader(allocator, &archive, &tar, &.{
+        .{ .key = "uid", .value = "" },
+        .{ .key = "gid", .value = "" },
+    });
+    try tar.writeFileBytes("reset-file", "r", .{});
+    try tar.writeDir("owned-dir", .{});
+    try tar.writeFileBytes("owned-dir/child", "c", .{});
+    try writeTestHardlink(&archive.writer, "owned-dir/hardlink", "owned-dir/child");
+    try writeTestPaxHeaderKind(allocator, &archive, &tar, 'g', &.{
+        .{ .key = "uid", .value = "" },
+        .{ .key = "gid", .value = "" },
+    });
+    const header_offset = archive.written().len;
+    try tar.writeFileBytes("header-file", "h", .{});
+    const archive_bytes = @constCast(archive.written());
+    setTestTarId(archive_bytes[header_offset + 108 ..][0..8], 4321);
+    setTestTarId(archive_bytes[header_offset + 116 ..][0..8], 8765);
+    updateTestTarChecksum(archive_bytes[header_offset..][0..512]);
+    const base256_offset = archive.written().len;
+    try tar.writeFileBytes("base256-file", "b", .{});
+    const base256_bytes = @constCast(archive.written());
+    setTestTarIdBase256(base256_bytes[base256_offset + 108 ..][0..8], 3_000_000);
+    setTestTarIdBase256(base256_bytes[base256_offset + 116 ..][0..8], 4_000_000);
+    updateTestTarChecksum(base256_bytes[base256_offset..][0..512]);
+    try temp.dir.writeFile(io, .{ .sub_path = "ownership.tar", .data = archive.written() });
+    const blob = try temp.dir.openFile(io, "ownership.tar", .{ .mode = .read_only });
+    defer blob.close(io);
+    try apply(allocator, io, root, blob, "application/vnd.oci.image.layer.v1.tar", &directory_metadata, &ownership, &budget);
+
+    try std.testing.expectEqual(Ownership{ .uid = 1234, .gid = 2345 }, ownership.get("global-file").?);
+    try std.testing.expectEqual(Ownership{ .uid = 1234, .gid = 2345 }, ownership.get("").?);
+    try std.testing.expectEqual(Ownership{ .uid = 7, .gid = 8 }, ownership.get("local-file").?);
+    try std.testing.expect(!ownership.contains("reset-file"));
+    try std.testing.expectEqual(Ownership{ .uid = 1234, .gid = 2345 }, ownership.get("owned-dir").?);
+    try std.testing.expectEqual(Ownership{ .uid = 1234, .gid = 2345 }, ownership.get("owned-dir/hardlink").?);
+    try std.testing.expectEqual(Ownership{ .uid = 4321, .gid = 8765 }, ownership.get("header-file").?);
+    try std.testing.expectEqual(Ownership{ .uid = 3_000_000, .gid = 4_000_000 }, ownership.get("base256-file").?);
+    try std.testing.expectError(error.PaxInvalidAttribute, parsePaxId("4294967295"));
+
+    var whiteouts: Io.Writer.Allocating = .init(allocator);
+    defer whiteouts.deinit();
+    var whiteout_tar: std.tar.Writer = .{ .underlying_writer = &whiteouts.writer };
+    try whiteout_tar.writeFileBytes(".wh.global-file", "", .{});
+    try whiteout_tar.writeFileBytes("owned-dir/.wh..wh..opq", "", .{});
+    try temp.dir.writeFile(io, .{ .sub_path = "whiteouts.tar", .data = whiteouts.written() });
+    const whiteout_blob = try temp.dir.openFile(io, "whiteouts.tar", .{ .mode = .read_only });
+    defer whiteout_blob.close(io);
+    try apply(allocator, io, root, whiteout_blob, "application/vnd.oci.image.layer.v1.tar", &directory_metadata, &ownership, &budget);
+
+    try std.testing.expect(!ownership.contains("global-file"));
+    try std.testing.expect(ownership.contains("owned-dir"));
+    try std.testing.expect(!ownership.contains("owned-dir/child"));
+    try std.testing.expect(!ownership.contains("owned-dir/hardlink"));
+}
+
 test "rejects paths through symlink parents" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;
@@ -946,8 +1157,10 @@ fn applyOne(allocator: std.mem.Allocator, io: Io, root: Io.Dir, blob: Io.File, m
     defer arena.deinit();
     var directory_metadata = std.StringHashMap(DirectoryMetadata).init(arena.allocator());
     defer directory_metadata.deinit();
+    var ownership = std.StringHashMap(Ownership).init(arena.allocator());
+    defer ownership.deinit();
     var budget: ExpansionBudget = .{};
-    try apply(allocator, io, root, blob, media_type, &directory_metadata, &budget);
+    try apply(allocator, io, root, blob, media_type, &directory_metadata, &ownership, &budget);
     try applyDirectoryMetadata(io, root, &directory_metadata);
 }
 
@@ -959,6 +1172,26 @@ fn writeTestHardlink(writer: *Io.Writer, name: []const u8, target: []const u8) !
     bytes[156] = '1';
     updateTestTarChecksum(bytes);
     try writer.writeAll(bytes);
+}
+
+fn setTestTarId(field: []u8, value: u32) void {
+    var text: [16]u8 = undefined;
+    const encoded = std.fmt.bufPrint(&text, "{o}", .{value}) catch unreachable;
+    @memset(field, '0');
+    @memcpy(field[field.len - encoded.len - 1 ..][0..encoded.len], encoded);
+    field[field.len - 1] = 0;
+}
+
+fn setTestTarIdBase256(field: []u8, value: u32) void {
+    @memset(field, 0);
+    var remaining: u64 = value;
+    for (0..field.len) |offset| {
+        const index = field.len - offset - 1;
+        field[index] = @truncate(remaining);
+        remaining >>= 8;
+    }
+    std.debug.assert(remaining == 0);
+    field[0] |= 0x80;
 }
 
 fn writeTestSpecial(writer: *Io.Writer, name: []const u8, kind: u8) !void {

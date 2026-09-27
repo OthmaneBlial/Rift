@@ -9,6 +9,7 @@
 #include <pwd.h>
 #include <sched.h>
 #include <signal.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -568,7 +569,141 @@ static int mark_exec_agent_ready(int directory) {
     return close(descriptor);
 }
 
+static uint32_t load_u32_le(const unsigned char value[4]) {
+    return (uint32_t)value[0] | (uint32_t)value[1] << 8 | (uint32_t)value[2] << 16 | (uint32_t)value[3] << 24;
+}
+
+static int read_exact(int descriptor, void *buffer, size_t size) {
+    unsigned char *cursor = buffer;
+    while (size) {
+        ssize_t count = read(descriptor, cursor, size);
+        if (count < 0 && errno == EINTR) continue;
+        if (count <= 0) {
+            errno = count == 0 ? EINVAL : errno;
+            return -1;
+        }
+        cursor += count;
+        size -= (size_t)count;
+    }
+    return 0;
+}
+
+static int valid_owner_path(const char *path, size_t length) {
+    if (!length || length > PATH_MAX || path[0] == '/' || path[length - 1] == '/') return 0;
+    size_t start = 0;
+    for (size_t index = 0; index <= length; ++index) {
+        if (index < length && path[index] != '/') {
+            if (path[index] == '\0') return 0;
+            continue;
+        }
+        size_t component_length = index - start;
+        if (!component_length || component_length > NAME_MAX ||
+            (component_length == 1 && path[start] == '.') ||
+            (component_length == 2 && path[start] == '.' && path[start + 1] == '.')) return 0;
+        start = index + 1;
+    }
+    return 1;
+}
+
+static int chown_image_path(const char *root_path, char *path, uid_t uid, gid_t gid) {
+    int directory = open(root_path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (directory < 0) return fail("open image root for ownership");
+    char *part = path;
+    for (;;) {
+        char *separator = strchr(part, '/');
+        if (!separator) break;
+        *separator = '\0';
+        int next = openat(directory, part, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+        if (next < 0) {
+            int status = fail("open image owner parent");
+            close(directory);
+            *separator = '/';
+            return status;
+        }
+        close(directory);
+        directory = next;
+        part = separator + 1;
+    }
+    int result = fchownat(directory, part, uid, gid, AT_SYMLINK_NOFOLLOW);
+    int status = result == 0 ? 0 : fail("apply image ownership");
+    close(directory);
+    return status;
+}
+
+static int chown_image_root(const char *root_path, uid_t uid, gid_t gid) {
+    int directory = open(root_path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (directory < 0) return fail("open image root for ownership");
+    int result = fchownat(directory, ".", uid, gid, AT_SYMLINK_NOFOLLOW);
+    int status = result == 0 ? 0 : fail("apply image root ownership");
+    close(directory);
+    return status;
+}
+
+static int apply_image_ownership(const char *root_path) {
+    const int descriptor = open("/mnt/control/owners", O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
+    if (descriptor < 0) return errno == ENOENT ? 0 : fail("open image ownership manifest");
+    struct stat info;
+    if (fstat(descriptor, &info) != 0 || !S_ISREG(info.st_mode) || info.st_size < 8 || info.st_size > 64 * 1024 * 1024) {
+        close(descriptor);
+        errno = EINVAL;
+        return fail("validate image ownership manifest");
+    }
+    unsigned char magic[8];
+    if (read_exact(descriptor, magic, sizeof(magic)) != 0 || memcmp(magic, "RIFTOWN1", sizeof(magic)) != 0) {
+        close(descriptor);
+        errno = EINVAL;
+        return fail("read image ownership manifest");
+    }
+    off_t remaining = info.st_size - (off_t)sizeof(magic);
+    unsigned long records = 0;
+    while (remaining) {
+        unsigned char header[12];
+        if (remaining < (off_t)sizeof(header) || read_exact(descriptor, header, sizeof(header)) != 0) {
+            close(descriptor);
+            errno = EINVAL;
+            return fail("read image ownership record");
+        }
+        remaining -= (off_t)sizeof(header);
+        const uint32_t uid = load_u32_le(&header[0]);
+        const uint32_t gid = load_u32_le(&header[4]);
+        const uint32_t path_length = load_u32_le(&header[8]);
+        if (++records > 1000000 || uid == UINT32_MAX || gid == UINT32_MAX || path_length > PATH_MAX ||
+            (off_t)path_length > remaining || (uid == 0 && gid == 0)) {
+            close(descriptor);
+            errno = EINVAL;
+            return fail("validate image ownership record");
+        }
+        if (path_length == 0) {
+            if (chown_image_root(root_path, (uid_t)uid, (gid_t)gid) != 0) {
+                close(descriptor);
+                return 125;
+            }
+            continue;
+        }
+        char path[PATH_MAX + 1];
+        if (read_exact(descriptor, path, path_length) != 0) {
+            close(descriptor);
+            errno = EINVAL;
+            return fail("read image ownership path");
+        }
+        remaining -= (off_t)path_length;
+        path[path_length] = '\0';
+        if (!valid_owner_path(path, path_length)) {
+            close(descriptor);
+            errno = EINVAL;
+            return fail("validate image ownership path");
+        }
+        if (chown_image_path(root_path, path, (uid_t)uid, (gid_t)gid) != 0) {
+            close(descriptor);
+            return 125;
+        }
+    }
+    close(descriptor);
+    return 0;
+}
+
 static int run_container(char **argv, unsigned long volume_count, int ready_descriptor) {
+    if (apply_image_ownership(argv[1]) != 0) return 125;
     if (chroot(argv[1]) != 0) return fail("chroot");
     if (chdir("/") != 0) return fail("chdir root");
 

@@ -94,7 +94,7 @@ pub fn execute(init: std.process.Init, arguments: []const []const u8, stop_path:
     const staged_volumes = try stageFileVolumes(allocator, init.io, run_dir, volumes);
     var image_root = try run_dir.openDir(init.io, "rootfs", .{});
     defer image_root.close(init.io);
-    try rootfs.assemble(allocator, init.io, image_root, store, manifest_digest);
+    try rootfs.assemble(allocator, init.io, image_root, control, store, manifest_digest);
     store.unlock();
     cache_locked = false;
     const interactive = try Io.File.stdin().isTty(init.io);

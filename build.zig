@@ -116,7 +116,7 @@ pub fn build(b: *std.Build) void {
         check_process.addFileArg(b.path("scripts/check_process.py"));
         check_process.addArg(exe_path);
         check_process.step.dependOn(&sign_exe.step);
-        b.step("run-process-check", "Apply OCI working directory and user settings").dependOn(&check_process.step);
+        b.step("run-process-check", "Check OCI working directory, users, groups, and file ownership").dependOn(&check_process.step);
 
         const check_volume = b.addSystemCommand(&.{"/usr/bin/python3"});
         check_volume.addFileArg(b.path("scripts/check_volume.py"));
