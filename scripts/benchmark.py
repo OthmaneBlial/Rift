@@ -29,6 +29,39 @@ def timed(binary: Path, env: dict[str, str], *args: str) -> float:
     return (time.perf_counter_ns() - start) / 1_000_000
 
 
+def system_memory_snapshot() -> dict[str, object]:
+    env = dict(os.environ, LC_ALL="C")
+    result = subprocess.run(["vm_stat"], env=env, capture_output=True, text=True, check=True, timeout=10)
+    page_size = re.search(r"page size of ([\d,]+) bytes", result.stdout)
+    free_pages = re.search(r"^Pages free:\s*([\d,]+)", result.stdout, re.MULTILINE)
+    if page_size is None or free_pages is None:
+        raise RuntimeError(f"could not read system memory statistics from vm_stat: {result.stdout}")
+    page_size_bytes = int(page_size.group(1).replace(",", ""))
+    free_page_count = int(free_pages.group(1).replace(",", ""))
+    memory_size = subprocess.run(["sysctl", "-n", "hw.memsize"], env=env, capture_output=True, text=True, check=True, timeout=10)
+    physical_memory_bytes = int(memory_size.stdout.strip())
+    free_page_bytes = free_page_count * page_size_bytes
+    if page_size_bytes <= 0 or physical_memory_bytes % page_size_bytes or free_page_bytes > physical_memory_bytes:
+        raise RuntimeError("system memory statistics are internally inconsistent")
+    try:
+        pressure = subprocess.run(["memory_pressure", "-Q"], env=env, capture_output=True, text=True, check=True, timeout=10)
+    except (FileNotFoundError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        pressure_free_percent = None
+    else:
+        match = re.search(r"System-wide memory free percentage:\s*(\d+)%", pressure.stdout)
+        pressure_free_percent = int(match.group(1)) if match else None
+        if pressure_free_percent is not None and not 0 <= pressure_free_percent <= 100:
+            pressure_free_percent = None
+    return {
+        "physical_memory_bytes": physical_memory_bytes,
+        "page_size_bytes": page_size_bytes,
+        "free_pages": free_page_count,
+        "free_page_bytes": free_page_bytes,
+        "bytes_not_on_free_list": physical_memory_bytes - free_page_bytes,
+        "memory_pressure_free_percent": pressure_free_percent,
+    }
+
+
 def copy_cache(source: Path, destination: Path) -> None:
     for section in ("images", "blobs", "guest"):
         if (source / section).is_symlink() or not (source / section).is_dir():
@@ -104,6 +137,7 @@ def process_footprints(pids: list[int]) -> Optional[tuple[int, dict[int, int]]]:
 
 def measure_worker(binary: Path, env: dict[str, str]) -> dict[str, object]:
     vm_processes_before = set(virtualization_processes())
+    system_memory_before = system_memory_snapshot()
     run_started_ns = time.perf_counter_ns()
     started = run(binary, env, "run", "-d", "alpine", "/bin/sh", "-c", "echo RIFT_BENCH_READY; sleep 60")
     identifier = started.stdout.strip()
@@ -122,13 +156,16 @@ def measure_worker(binary: Path, env: dict[str, str]) -> dict[str, object]:
             if "RIFT_BENCH_READY" in run(binary, env, "logs", identifier).stdout:
                 if guest_boot_ms is None:
                     raise RuntimeError("detached VM exited or became ready without a guest boot measurement")
+                detached_ready_ms = round((time.perf_counter_ns() - run_started_ns) / 1_000_000, 1)
                 worker_rss = []
                 vm_rss = []
                 vm_footprints = []
                 combined_footprints = []
+                system_memory_samples = []
                 vm_pid = None
                 note = None
                 for _ in range(3):
+                    system_memory_samples.append(system_memory_snapshot())
                     worker_pid, worker_sample = worker_process(identifier)
                     worker_rss.append(worker_sample)
                     vm_processes = virtualization_processes()
@@ -152,11 +189,13 @@ def measure_worker(binary: Path, env: dict[str, str]) -> dict[str, object]:
                     time.sleep(0.1)
                 return {
                     "vm_start_to_guest_control_ready_ms": guest_boot_ms,
-                    "detached_run_to_guest_ready_ms": round((time.perf_counter_ns() - run_started_ns) / 1_000_000, 1),
+                    "detached_run_to_guest_ready_ms": detached_ready_ms,
                     "detached_worker_rss_kib": int(statistics.median(worker_rss)),
                     "virtualization_vm_service_rss_kib": int(statistics.median(vm_rss)) if len(vm_rss) == 3 else None,
                     "virtualization_vm_service_footprint_bytes": int(statistics.median(vm_footprints)) if len(vm_footprints) == 3 else None,
                     "worker_and_vm_process_footprint_bytes": int(statistics.median(combined_footprints)) if len(combined_footprints) == 3 else None,
+                    "system_memory_before_vm": system_memory_before,
+                    "system_memory_idle_guest_samples": system_memory_samples,
                     "memory_measurement_note": note,
                 }
             time.sleep(0.1)
