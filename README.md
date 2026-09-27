@@ -13,9 +13,10 @@ rift --help
 rift version
 rift system info
 rift pull alpine
+rift images
 ```
 
-Image pulls use anonymous registry access and save SHA-256-verified OCI blobs under `~/Library/Application Support/Rift`. Private registry credentials, image listing, and container execution are not implemented.
+Image pulls use anonymous registry access and save SHA-256-verified OCI blobs and reference metadata under `~/Library/Application Support/Rift`. Private registry credentials and container execution are not implemented.
 
 ## Build
 
@@ -43,7 +44,8 @@ No Docker Engine, Docker CLI, Docker Desktop, or container daemon is part of the
 - [x] OCI references, indexes, manifests, and `linux/arm64` selection with tests
 - [x] Streaming content-addressed blob storage with SHA-256 and size verification
 - [x] Public OCI pulls with Bearer token auth, platform selection, and verified blob downloads
-- [ ] Image metadata, listing, and removal
+- [x] Local image metadata and listing
+- [ ] Image removal
 - [ ] Safe layer extraction
 - [ ] Linux VM boot and guest command execution
 - [ ] Container lifecycle, logs, networking, and cleanup

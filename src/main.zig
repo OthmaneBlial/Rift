@@ -17,6 +17,7 @@ fn printHelp(writer: *Io.Writer) Io.Writer.Error!void {
             "  help, --help       Show this help\n" ++
             "  version, --version Show version\n" ++
             "  system info        Show host information\n" ++
+            "  images             List locally pulled images\n" ++
             "  pull <image>       Pull an OCI image for this host\n",
     );
 }
@@ -44,6 +45,11 @@ fn dispatch(args: []const []const u8, writer: *Io.Writer, init: ?std.process.Ini
         return pullImage(init orelse return error.CommandUnavailable, args[1], writer);
     }
 
+    if (args.len > 0 and std.mem.eql(u8, args[0], "images")) {
+        if (args.len != 1) return error.InvalidArguments;
+        return listImages(init orelse return error.CommandUnavailable, writer);
+    }
+
     return error.CommandUnavailable;
 }
 
@@ -54,14 +60,7 @@ fn pullImage(init: std.process.Init, image_name: []const u8, writer: *Io.Writer)
         .x86_64 => manifest.Target{ .os = "linux", .architecture = "amd64" },
         else => return error.UnsupportedHostArchitecture,
     };
-    const home = init.environ_map.get("HOME") orelse return error.HomeDirectoryUnavailable;
-    var home_dir = try Io.Dir.openDirAbsolute(init.io, home, .{});
-    defer home_dir.close(init.io);
-    try home_dir.createDirPath(init.io, "Library/Application Support/Rift");
-    var data_dir = try home_dir.openDir(init.io, "Library/Application Support/Rift", .{});
-    defer data_dir.close(init.io);
-
-    var store = try storage.BlobStore.init(init.io, data_dir);
+    var store = try openImageStore(init);
     defer store.deinit();
     var image = try reference.parse(init.arena.allocator(), image_name);
     defer image.deinit(init.arena.allocator());
@@ -69,6 +68,14 @@ fn pullImage(init: std.process.Init, image_name: []const u8, writer: *Io.Writer)
     defer client.deinit();
 
     const result = try client.pull(image, store, target);
+    const canonical_reference = try image.formatAlloc(init.arena.allocator());
+    const platform = try std.fmt.allocPrint(init.arena.allocator(), "{s}/{s}", .{ target.os, target.architecture });
+    try store.recordImage(init.arena.allocator(), .{
+        .reference = canonical_reference,
+        .digest = result.digest,
+        .platform = platform,
+        .layer_count = result.layer_count,
+    });
     try writer.print("Pulled {s} for {s}/{s}: {s} ({d} layers)\n", .{
         image_name,
         target.os,
@@ -76,6 +83,31 @@ fn pullImage(init: std.process.Init, image_name: []const u8, writer: *Io.Writer)
         result.digest,
         result.layer_count,
     });
+}
+
+fn listImages(init: std.process.Init, writer: *Io.Writer) !void {
+    var store = try openImageStore(init);
+    defer store.deinit();
+    const records = try store.listImages(init.arena.allocator());
+    if (records.len == 0) return writer.writeAll("No images pulled yet.\n");
+    for (records) |record| {
+        try writer.print("{s}  {s}  {s} ({d} layers)\n", .{
+            record.reference,
+            record.platform,
+            record.digest,
+            record.layer_count,
+        });
+    }
+}
+
+fn openImageStore(init: std.process.Init) !storage.BlobStore {
+    const home = init.environ_map.get("HOME") orelse return error.HomeDirectoryUnavailable;
+    var home_dir = try Io.Dir.openDirAbsolute(init.io, home, .{});
+    defer home_dir.close(init.io);
+    try home_dir.createDirPath(init.io, "Library/Application Support/Rift");
+    var data_dir = try home_dir.openDir(init.io, "Library/Application Support/Rift", .{});
+    defer data_dir.close(init.io);
+    return storage.BlobStore.init(init.io, data_dir);
 }
 
 pub fn main(init: std.process.Init) void {
