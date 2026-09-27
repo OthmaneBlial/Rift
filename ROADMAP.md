@@ -1,6 +1,6 @@
 # Rift roadmap
 
-This is the running checklist from Rift’s first CLI and OCI work through a dependable release. `[x]` means implemented and locally verified; `[ ]` means still open.
+This is the running checklist from Rift’s first CLI and OCI work through a dependable release. `[x]` means implemented and verified, locally where applicable; `[ ]` means still open.
 
 ## Project foundation
 
