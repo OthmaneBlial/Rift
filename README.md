@@ -69,18 +69,20 @@ Host environment variables are not copied into containers. Volumes are read-only
 
 ## Benchmarks
 
-One cached run on an Apple M2 with macOS 26.6 and Zig 0.16.0 (`ReleaseSafe`, commit `c5c3dd6`):
+One cached run on an Apple M2 with macOS 26.6 and Zig 0.16.0 (`ReleaseSafe`, runtime `c5c3dd6`, benchmark `7be9f98`):
 
 | Metric | Result |
 | --- | ---: |
-| First cached Alpine launch | 1,167 ms |
-| Subsequent launches, median of 5 | 1,158 ms |
-| VM start to guest control ready | 437 ms |
-| Detached start to workload-ready marker | 1,734 ms |
+| First cached Alpine launch | 1,469 ms |
+| Subsequent launches, median of 5 | 1,131 ms |
+| VM start to guest control ready | 436 ms |
+| Detached start to workload-ready marker | 970 ms |
 | Executable size | 1,730,064 bytes |
-| Worker and VM-service process footprint after ready | 152.3 MiB |
+| Worker and VM-service process footprint after ready | 159.3 MiB |
+| Whole-Mac physical RAM | 16 GiB |
+| Memory pressure available, before VM / idle VM | 64% / 64% |
 
-The image and guest files were cached. VM-start timing ends when the guest mounts its rootfs and control shares; it excludes guest overlay setup and workload startup. The process footprint excludes kernel and other system memory. Homebrew v0.1.2's installed keg uses 1,724 KiB; its first-run guest assets use 44.3 MiB separately from the image cache. These are single-machine samples, not a Docker comparison. See [benchmark method and history](docs/BENCHMARKS.md).
+The image and guest files were cached. VM-start timing ends when the guest mounts its rootfs and control shares; it excludes guest overlay setup and workload startup. The memory pressure value covers the whole Mac, including unrelated processes, and is not Rift-attributable. Homebrew v0.1.2's installed keg uses 1,724 KiB; its first-run guest assets use 44.3 MiB separately from the image cache. These are single-machine samples, not a Docker comparison. See [benchmark method and history](docs/BENCHMARKS.md).
 
 ## Requirements and limits
 

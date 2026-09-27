@@ -13,13 +13,45 @@ zig-out/bin/rift run --rm alpine /bin/true
 zig build -Doptimize=ReleaseSafe benchmark
 ```
 
-The benchmark copies the local image blobs, image records, and guest boot files into a temporary HOME. Setup and copying are outside the timed region. It measures one Alpine `/bin/true` launch, five subsequent launches, five `rift version` calls, VM-start-to-guest-control-ready latency, and detached-run-to-workload-ready latency. The VM timer starts immediately before `startWithCompletionHandler` and stops when the host observes an initramfs marker written after the guest mounts the rootfs and control VirtioFS shares, before overlay setup, DHCP, or workload execution. Host polling checks for the marker about every 10 ms. This includes Virtualization.framework startup and guest boot through share mounting; it excludes host rootfs assembly and is not a kernel-only measurement. The detached latency includes host rootfs setup, VM startup, workload execution, and log polling. Each launch starts a new VM. Memory output includes Rift worker RSS, Virtualization.framework VM-service RSS, and macOS process footprints for the worker and VM service, when the VM process can be identified unambiguously. The script stops and removes its container, checks that logical storage usage returns to its starting value, and deletes the temporary HOME. Output is JSON so individual samples remain visible. It also records logical CPU count and 1/5/15-minute host load averages before and after timing; load average is not CPU utilization.
+The benchmark copies local image blobs, image records, and guest boot files into a temporary `HOME`; setup and copying are outside the timed region. It measures one Alpine `/bin/true` launch, five subsequent launches, five `rift version` calls, VM-start-to-guest-control-ready latency, and detached-run-to-workload-ready latency. The VM timer starts immediately before `startWithCompletionHandler` and stops when the host observes an initramfs marker written after the guest mounts the rootfs and control VirtioFS shares, before overlay setup, DHCP, or workload execution. Host polling checks for this marker about every 10 ms.
+
+The detached timer starts before `rift run -d` and stops when the first `rift logs` poll returns the workload-ready marker. It includes host rootfs setup, VM startup, workload execution, and log polling; it excludes the later RSS and footprint sampling. Each launch starts a new VM.
+
+The script records the worker RSS and, when process identification is unambiguous, Virtualization.framework VM-service RSS and process footprints. It also samples system memory immediately before VM launch and three times after the idle guest reports ready. These whole-Mac snapshots use `hw.memsize`, the free-page count from `vm_stat`, and `memory_pressure -Q` when available. They include every macOS process and the VM, so they are contextual system measurements, not memory attributable to Rift.
+
+`bytes_not_on_free_list` is total physical RAM minus the strict free-page list. It includes reclaimable caches and other pages, so it is not a process footprint or a measure of memory exclusively consumed by Rift. `memory_pressure_free_percent` is macOS's system-wide available-memory percentage; it is not an exact byte count. Do not add either system metric to process footprints. The script stops and removes its container, checks that logical storage usage returns to its starting value, and deletes the temporary `HOME`. Output is JSON so individual samples remain visible. It also records logical CPU count and 1/5/15-minute host load averages before and after timing; load average is not CPU utilization.
 
 The first launch already has the image and guest files cached. It is **not** a fresh installation or an uncached macOS filesystem measurement. `worker_and_vm_process_footprint_bytes` is the macOS footprint total for those two processes, with shared mappings de-duplicated by `footprint`; it excludes kernel and other system memory, so it is not total host memory. VM-service RSS can include shared mappings and should not be added to worker RSS as a unique-memory total. If the VM process or footprint report is ambiguous or unavailable, the footprint fields are null and `memory_measurement_note` explains why. Each VM is configured with 256 MiB of guest RAM. The store size is the logical size of all copied cache files, including any other images present, and excludes the binary.
 
 `binary_bytes` records the local executable size. Local builds are ad-hoc signed for execution on macOS; this is not Developer ID signing or notarization.
 
 ## Latest cached benchmark
+
+Apple M2, macOS 26.6, Zig 0.16.0, `ReleaseSafe`, runtime commit `c5c3dd6`, benchmark script commit `7be9f98`, 2026-09-27 20:49:20 UTC. One run with the cached store:
+
+| Metric | Result |
+| --- | ---: |
+| Local executable size | 1,730,064 bytes |
+| First Alpine launch with cached assets | 1,468.6 ms |
+| Subsequent Alpine launches, median of 5 | 1,131.2 ms |
+| Subsequent Alpine launch samples | 1,123.2, 1,170.4, 1,134.9, 1,131.2, 1,117.3 ms |
+| VM start to guest control ready | 435.5 ms |
+| Detached run to workload-ready marker | 970.1 ms |
+| `rift version`, median of 5 | 7.0 ms |
+| Detached Rift worker RSS | 10,800 KiB |
+| Virtualization.framework VM-service RSS | 209,472 KiB |
+| VM-service process footprint | 164,250,440 bytes (156.6 MiB) |
+| Worker and VM-service combined process footprint | 167,003,432 bytes (159.3 MiB) |
+| Whole-Mac physical RAM | 16 GiB |
+| Whole-Mac memory pressure available | 64% before VM; 64% across 3 idle-guest samples |
+| Whole-Mac free pages | 104,404 before VM; 92,684–92,802 across 3 idle-guest samples |
+| Copied store, logical file bytes | 151,145,470 bytes |
+| Host load average, 1/5/15 minute, before | 7.89 / 5.24 / 4.52 |
+| Host load average, 1/5/15 minute, after | 7.45 / 5.23 / 4.52 |
+
+This is one local sample. The whole-Mac memory values include unrelated host processes and must not be attributed to Rift. The VM-start metric ends at guest control-share readiness, before overlay setup and workload startup.
+
+## Previous cached benchmark
 
 Apple M2, macOS 26.6, Zig 0.16.0, `ReleaseSafe`, runtime commit `c5c3dd6`, 2026-09-27 20:36:44 UTC. One run with the cached store:
 
@@ -39,7 +71,7 @@ Apple M2, macOS 26.6, Zig 0.16.0, `ReleaseSafe`, runtime commit `c5c3dd6`, 2026-
 | Copied store, logical file bytes | 151,145,470 bytes |
 | Host load average, 1/5/15 minute, before and after | 4.46 / 4.35 / 4.41 |
 
-This is one local sample. The new VM-start metric ends at guest control-share readiness and does not measure the later overlay setup or workload startup.
+The VM-start metric ends at guest control-share readiness, before overlay setup and workload startup. This and the `3ea8402` sample below recorded detached latency after RSS and footprint sampling; those values include that post-ready work and are not comparable with the corrected marker timestamp above.
 
 ## Homebrew first-use footprint
 
@@ -56,7 +88,7 @@ Apple M2, macOS 26.6, Homebrew formula `rift` v0.1.2, 2026-09-27. `brew test rif
 
 The Homebrew keg includes its executable, license, README, SBOM, formula source, and receipt; the formula has no runtime dependencies and uses Zig as a build dependency. Guest assets are downloaded on first use into `~/Library/Application Support/Rift/guest`. The combined allocation excludes image-cache data, the Zig build dependency, and unrelated files. Reproduce the directory sizes with `du -sk /opt/homebrew/Cellar/rift/0.1.2 "$HOME/Library/Application Support/Rift/guest"`; measure the executable's logical bytes with `stat -f '%z' /opt/homebrew/Cellar/rift/0.1.2/bin/rift`.
 
-## Previous cached benchmark
+## Earlier cached benchmark
 
 Apple M2, macOS 26.6, Zig 0.16.0, `ReleaseSafe`, runtime commit `3ea8402`, 2026-09-27 20:25:08 UTC. One run with the cached store:
 
@@ -76,7 +108,7 @@ Apple M2, macOS 26.6, Zig 0.16.0, `ReleaseSafe`, runtime commit `3ea8402`, 2026-
 | Host load average, 1/5/15 minute, before | 2.98 / 4.58 / 4.86 |
 | Host load average, 1/5/15 minute, after | 3.00 / 4.53 / 4.84 |
 
-## Earlier cached benchmark
+## Older cached benchmark
 
 Apple M2, macOS 26.6, Zig 0.16.0, `ReleaseSafe`, runtime commit `9f95df9`, 2026-09-27 19:57:42 UTC. One earlier run with the cached store:
 
@@ -95,7 +127,7 @@ Apple M2, macOS 26.6, Zig 0.16.0, `ReleaseSafe`, runtime commit `9f95df9`, 2026-
 | Host load average, 1/5/15 minute, before | 5.44 / 4.47 / 4.64 |
 | Host load average, 1/5/15 minute, after | 4.91 / 4.39 / 4.61 |
 
-The memory sample is a process-attributed idle snapshot after the guest reports ready, not peak usage or total host memory. The detached-ready latency is not isolated boot time; the separate VM-start timer ends at guest control-share readiness. Broader measurement work still needs install-footprint coverage and system-wide memory scope.
+These process-attributed memory values are idle snapshots after the guest reports ready, not peak usage or whole-Mac memory. The separate whole-Mac snapshot is recorded in the latest result above.
 
 Apple M2, macOS 26.6, Zig 0.16.0, `ReleaseSafe`, runtime commit `60000c7`, 2026-09-27 17:59:58 UTC. Earlier run with the cached store:
 
@@ -174,4 +206,4 @@ Apple M2, macOS 26.6, Zig 0.16.0, `ReleaseSafe`, runtime commit `2dec30e`, 2026-
 | Detached host worker RSS after guest ready | 10,480 KiB |
 | Copied store, logical file bytes | 112,367,255 bytes |
 
-Subsequent launch samples: 1,007.5, 1,030.1, 1,028.8, 1,057.5, and 991.8 ms. This is one local run, not a cross-machine performance claim. Total host-plus-VM memory and larger-image startup are still unmeasured. The fresh-home sample above times public image pulls but does not establish repeatable throughput.
+Subsequent launch samples: 1,007.5, 1,030.1, 1,028.8, 1,057.5, and 991.8 ms. This is one local run, not a cross-machine performance claim. This historical run predates the whole-Mac memory snapshots recorded above; larger-image startup remains unmeasured. The fresh-home sample above times public image pulls but does not establish repeatable throughput.
