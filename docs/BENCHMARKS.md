@@ -41,6 +41,21 @@ Apple M2, macOS 26.6, Zig 0.16.0, `ReleaseSafe`, runtime commit `c5c3dd6`, 2026-
 
 This is one local sample. The new VM-start metric ends at guest control-share readiness and does not measure the later overlay setup or workload startup.
 
+## Homebrew first-use footprint
+
+Apple M2, macOS 26.6, Homebrew formula `rift` v0.1.2, 2026-09-27. `brew test rift` passed. A clean temporary `HOME` ran `rift run --rm alpine echo RIFT_BREW_CLEAN_HOME_OK` successfully with both the Docker CLI and Docker Desktop absent.
+
+| Component | Result |
+| --- | ---: |
+| Homebrew keg disk allocation (`du -sk`) | 1,724 KiB |
+| Installed executable logical size | 1,728,992 bytes |
+| First-use Alpine kernel and initramfs logical size | 46,402,986 bytes (44.3 MiB) |
+| Guest asset directory disk allocation (`du -sk`) | 45,316 KiB |
+| Keg plus guest asset disk allocation | 47,040 KiB (45.9 MiB) |
+| Alpine image blobs and record in the fresh home | 4,198,660 logical bytes, separate from runtime install |
+
+The Homebrew keg includes its executable, license, README, SBOM, formula source, and receipt; the formula has no runtime dependencies and uses Zig as a build dependency. Guest assets are downloaded on first use into `~/Library/Application Support/Rift/guest`. The combined allocation excludes image-cache data, the Zig build dependency, and unrelated files. Reproduce the directory sizes with `du -sk /opt/homebrew/Cellar/rift/0.1.2 "$HOME/Library/Application Support/Rift/guest"`; measure the executable's logical bytes with `stat -f '%z' /opt/homebrew/Cellar/rift/0.1.2/bin/rift`.
+
 ## Previous cached benchmark
 
 Apple M2, macOS 26.6, Zig 0.16.0, `ReleaseSafe`, runtime commit `3ea8402`, 2026-09-27 20:25:08 UTC. One run with the cached store:
@@ -113,7 +128,7 @@ Apple M2, macOS 26.6, Zig 0.16.0, `ReleaseSafe`, runtime commit `60000c7`, 2026-
 | Store after pulling Alpine and Nginx | 112,367,255 logical bytes; guest files were 46,402,986 bytes |
 | Complete smoke-run elapsed time | 17.89 s |
 
-The cleanup preview identified 19,447 logical bytes in two unreferenced blobs; `clean --yes` removed them. Timings are one sample and include this Mac's network and host load. The test did not measure guest download time separately, total host-plus-VM memory, or Homebrew installation, and a temporary home does not stand in for a freshly provisioned Mac.
+The cleanup preview identified 19,447 logical bytes in two unreferenced blobs; `clean --yes` removed them. Timings are one sample and include this Mac's network and host load. That historical run did not measure guest download time separately or total host-plus-VM memory. A temporary home does not stand in for a freshly provisioned Mac.
 
 ## Isolation milestone under host load
 

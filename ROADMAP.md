@@ -95,7 +95,7 @@ This roadmap carries the original plan forward from the first project commit. `[
 - [x] Verify file and directory volume targets reject paths beneath image symlinks.
 - [ ] Complete an adversarial review of host/guest isolation assumptions; ownership-index work is now bounded, while volume races, mount layouts, workload behavior, network exposure, and VM-boundary review remain.
 - [x] Measure VM-start-to-guest-control-ready latency on Apple M2; record timer endpoints and host polling resolution.
-- [ ] Measure installation footprint.
+- [x] Measure the Homebrew v0.1.2 keg and first-run guest assets in a fresh Rift home on Apple M2.
 - [ ] Measure total system-wide host-plus-VM memory.
 - [ ] Repeat performance measurements across more Macs.
 - [ ] Run the full runtime workflow on macOS 12 to verify the oldest declared host version.
