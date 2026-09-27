@@ -1,0 +1,397 @@
+const std = @import("std");
+const manifest = @import("manifest.zig");
+const reference = @import("reference.zig");
+const storage = @import("../storage.zig");
+
+const http = std.http;
+const Allocator = std.mem.Allocator;
+const Io = std.Io;
+
+const manifest_accept = "application/vnd.oci.image.index.v1+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.docker.distribution.manifest.v2+json";
+const manifest_limit = 4 * 1024 * 1024;
+const token_limit = 1024 * 1024;
+
+pub const Registry = struct {
+    allocator: Allocator,
+    client: http.Client,
+    token: ?[]const u8 = null,
+    registry: []const u8,
+    repository: []const u8,
+
+    pub fn init(allocator: Allocator, io: Io, registry: []const u8, repository: []const u8) Registry {
+        return .{
+            .allocator = allocator,
+            .client = .{ .allocator = allocator, .io = io },
+            .registry = registry,
+            .repository = repository,
+        };
+    }
+
+    pub fn deinit(registry: *Registry) void {
+        registry.client.deinit();
+        registry.* = undefined;
+    }
+
+    pub fn pull(
+        registry: *Registry,
+        image: reference.Reference,
+        store: storage.BlobStore,
+        target: manifest.Target,
+    ) anyerror!PullResult {
+        const selector = image.digest orelse image.tag.?;
+        const root_url = try std.fmt.allocPrint(
+            registry.allocator,
+            "https://{s}/v2/{s}/manifests/{s}",
+            .{ registry.registry, registry.repository, selector },
+        );
+        var root = try registry.getManifest(root_url);
+        defer root.deinit(registry.allocator);
+
+        const root_digest = try digestOf(registry.allocator, root.body);
+        if (image.digest) |expected| if (!std.mem.eql(u8, expected, root_digest)) return error.BlobDigestMismatch;
+        if (root.digest) |expected| if (!std.mem.eql(u8, expected, root_digest)) return error.BlobDigestMismatch;
+        try writeBytes(store, root_digest, root.body);
+
+        var selected_body = root.body;
+        var selected_digest = root_digest;
+
+        if (manifest.isIndexMediaType(root.media_type)) {
+            var arena = std.heap.ArenaAllocator.init(registry.allocator);
+            defer arena.deinit();
+            const index = manifest.parseIndex(arena.allocator(), root.body) catch return error.InvalidManifest;
+            const descriptor = try manifest.selectPlatform(index, target);
+            const child_url = try std.fmt.allocPrint(
+                registry.allocator,
+                "https://{s}/v2/{s}/manifests/{s}",
+                .{ registry.registry, registry.repository, descriptor.digest },
+            );
+            var child = try registry.getManifest(child_url);
+            defer child.deinit(registry.allocator);
+            if (!manifest.isManifestMediaType(child.media_type)) return error.UnsupportedManifestMediaType;
+            if (child.body.len != descriptor.size) return error.BlobSizeMismatch;
+            const actual = try digestOf(registry.allocator, child.body);
+            if (!std.mem.eql(u8, descriptor.digest, actual)) return error.BlobDigestMismatch;
+            if (child.digest) |expected| if (!std.mem.eql(u8, expected, descriptor.digest)) return error.BlobDigestMismatch;
+            try writeBytes(store, descriptor.digest, child.body);
+            selected_body = try registry.allocator.dupe(u8, child.body);
+            selected_digest = try registry.allocator.dupe(u8, descriptor.digest);
+        } else if (!manifest.isManifestMediaType(root.media_type)) {
+            return error.UnsupportedManifestMediaType;
+        }
+
+        var arena = std.heap.ArenaAllocator.init(registry.allocator);
+        defer arena.deinit();
+        const parsed = manifest.parseManifest(arena.allocator(), selected_body) catch return error.InvalidManifest;
+        try registry.downloadBlob(store, parsed.config.digest, parsed.config.size);
+        for (parsed.layers) |layer| try registry.downloadBlob(store, layer.digest, layer.size);
+
+        return .{
+            .digest = try registry.allocator.dupe(u8, selected_digest),
+            .layer_count = parsed.layers.len,
+        };
+    }
+
+    fn getManifest(registry: *Registry, url: []const u8) anyerror!SmallResponse {
+        const pending = try registry.openAuthenticated(url, manifest_accept);
+        defer registry.destroyPending(pending);
+        if (pending.response.head.status != .ok) return statusError(pending.response.head.status);
+
+        const media_type = try registry.headerCopy(pending, "content-type") orelse return error.MissingManifestMediaType;
+        const digest = try registry.headerCopy(pending, "docker-content-digest");
+        const body = try registry.readBody(pending, manifest_limit);
+        const normalized_media_type = try baseMediaType(registry.allocator, media_type);
+        return .{ .body = body, .media_type = normalized_media_type, .digest = digest };
+    }
+
+    fn downloadBlob(registry: *Registry, store: storage.BlobStore, digest: []const u8, size: u64) anyerror!void {
+        if (try store.containsVerified(digest, size)) return;
+        const url = try std.fmt.allocPrint(registry.allocator, "https://{s}/v2/{s}/blobs/{s}", .{ registry.registry, registry.repository, digest });
+        const pending = try registry.openAuthenticated(url, "application/octet-stream");
+        defer registry.destroyPending(pending);
+        if (pending.response.head.status != .ok) return statusError(pending.response.head.status);
+        if (pending.response.head.content_length) |length| if (length != size) return error.BlobSizeMismatch;
+
+        var transfer_buffer: [32 * 1024]u8 = undefined;
+        const body = pending.response.reader(&transfer_buffer);
+        try store.writeVerified(digest, size, body);
+    }
+
+    fn openAuthenticated(registry: *Registry, url: []const u8, accept: []const u8) anyerror!*Pending {
+        var pending = try registry.openRaw(url, accept, registry.token);
+        if (pending.response.head.status == .unauthorized) {
+            const challenge = try registry.headerCopy(pending, "www-authenticate") orelse {
+                registry.destroyPending(pending);
+                return error.UnsupportedRegistryAuth;
+            };
+            registry.destroyPending(pending);
+            registry.token = try registry.obtainToken(challenge);
+            pending = try registry.openRaw(url, accept, registry.token);
+        }
+
+        pending = try registry.followRedirects(pending, accept);
+        if (pending.response.head.status == .unauthorized) {
+            registry.destroyPending(pending);
+            return error.RegistryUnauthorized;
+        }
+        return pending;
+    }
+
+    fn followRedirects(registry: *Registry, initial: *Pending, accept: []const u8) anyerror!*Pending {
+        var pending = initial;
+        var redirects: u8 = 0;
+        while (isRedirect(pending.response.head.status)) {
+            if (redirects == 5) {
+                registry.destroyPending(pending);
+                return error.TooManyRegistryRedirects;
+            }
+            const location = try registry.headerCopy(pending, "location") orelse {
+                registry.destroyPending(pending);
+                return error.RegistryRedirectMissingLocation;
+            };
+            const uri = std.Uri.parse(location) catch {
+                registry.destroyPending(pending);
+                return error.InvalidRegistryRedirect;
+            };
+            if (!std.mem.eql(u8, uri.scheme, "https") or uri.host == null or uri.user != null or uri.password != null or uri.fragment != null) {
+                registry.destroyPending(pending);
+                return error.InsecureRegistryRedirect;
+            }
+            registry.destroyPending(pending);
+            pending = try registry.openRaw(location, accept, null);
+            redirects += 1;
+        }
+        return pending;
+    }
+
+    fn openRaw(registry: *Registry, url: []const u8, accept: []const u8, token: ?[]const u8) anyerror!*Pending {
+        const pending = try registry.allocator.create(Pending);
+        errdefer registry.allocator.destroy(pending);
+        pending.* = undefined;
+
+        pending.extra_headers[0] = .{ .name = "Accept", .value = accept };
+        const headers: []const http.Header = if (token) |value| blk: {
+            pending.authorization = try std.fmt.allocPrint(registry.allocator, "Bearer {s}", .{value});
+            pending.extra_headers[1] = .{ .name = "Authorization", .value = pending.authorization.? };
+            break :blk pending.extra_headers[0..2];
+        } else pending.extra_headers[0..1];
+
+        pending.request = try registry.client.request(.GET, try std.Uri.parse(url), .{
+            .headers = .{ .accept_encoding = .omit },
+            .extra_headers = headers,
+            .redirect_behavior = .unhandled,
+        });
+        errdefer pending.request.deinit();
+        try pending.request.sendBodiless();
+        pending.response = try pending.request.receiveHead(&pending.redirect_buffer);
+        return pending;
+    }
+
+    fn obtainToken(registry: *Registry, raw_challenge: []const u8) anyerror![]const u8 {
+        const challenge = parseBearerChallenge(raw_challenge) orelse return error.UnsupportedRegistryAuth;
+        const expected_scope = try std.fmt.allocPrint(registry.allocator, "repository:{s}:pull", .{registry.repository});
+        const scope = challenge.scope orelse expected_scope;
+        if (!std.mem.eql(u8, scope, expected_scope)) return error.UnsupportedRegistryAuth;
+
+        const realm = try std.Uri.parse(challenge.realm);
+        if (!std.mem.eql(u8, realm.scheme, "https") or realm.host == null or realm.user != null or realm.password != null or realm.fragment != null) {
+            return error.InsecureTokenRealm;
+        }
+        const token_url = try buildTokenUrl(registry.allocator, challenge.realm, challenge.service, scope);
+        const pending = try registry.openRaw(token_url, "application/json", null);
+        defer registry.destroyPending(pending);
+        if (pending.response.head.status != .ok) return error.TokenRequestFailed;
+
+        const body = try registry.readBody(pending, token_limit);
+        const parsed = try std.json.parseFromSlice(TokenResponse, registry.allocator, body, .{ .ignore_unknown_fields = true });
+        defer parsed.deinit();
+        const value = parsed.value.token orelse parsed.value.access_token orelse return error.InvalidTokenResponse;
+        if (value.len == 0 or value.len > 16 * 1024 or std.mem.indexOfAny(u8, value, "\r\n") != null) return error.InvalidTokenResponse;
+        return registry.allocator.dupe(u8, value);
+    }
+
+    fn readBody(registry: *Registry, pending: *Pending, limit: usize) anyerror![]u8 {
+        if (pending.response.head.content_length) |length| if (length > limit) return error.ResponseTooLarge;
+        var body: std.ArrayList(u8) = .empty;
+        var transfer_buffer: [32 * 1024]u8 = undefined;
+        var read_buffer: [32 * 1024]u8 = undefined;
+        const reader = pending.response.reader(&transfer_buffer);
+        while (true) {
+            const count = reader.readSliceShort(&read_buffer) catch return error.RegistryBodyReadFailed;
+            if (count == 0) break;
+            if (count > limit - body.items.len) return error.ResponseTooLarge;
+            try body.appendSlice(registry.allocator, read_buffer[0..count]);
+            if (count < read_buffer.len) break;
+        }
+        return body.toOwnedSlice(registry.allocator);
+    }
+
+    fn headerCopy(registry: *Registry, pending: *Pending, name: []const u8) Allocator.Error!?[]u8 {
+        var headers = pending.response.head.iterateHeaders();
+        while (headers.next()) |header| {
+            if (std.ascii.eqlIgnoreCase(header.name, name)) return try registry.allocator.dupe(u8, header.value);
+        }
+        return null;
+    }
+
+    fn destroyPending(registry: *Registry, pending: *Pending) void {
+        pending.request.deinit();
+        registry.allocator.destroy(pending);
+    }
+};
+
+pub const PullResult = struct {
+    digest: []const u8,
+    layer_count: usize,
+};
+
+const Pending = struct {
+    request: http.Client.Request,
+    response: http.Client.Response,
+    redirect_buffer: [8192]u8,
+    extra_headers: [2]http.Header,
+    authorization: ?[]const u8 = null,
+};
+
+const SmallResponse = struct {
+    body: []u8,
+    media_type: []u8,
+    digest: ?[]u8,
+
+    fn deinit(response: *SmallResponse, allocator: Allocator) void {
+        allocator.free(response.body);
+        allocator.free(response.media_type);
+        if (response.digest) |value| allocator.free(value);
+        response.* = undefined;
+    }
+};
+
+const TokenResponse = struct {
+    token: ?[]const u8 = null,
+    access_token: ?[]const u8 = null,
+};
+
+const BearerChallenge = struct {
+    realm: []const u8,
+    service: ?[]const u8,
+    scope: ?[]const u8,
+};
+
+pub fn parseBearerChallenge(input: []const u8) ?BearerChallenge {
+    const text = std.mem.trim(u8, input, " \t");
+    const separator = std.mem.indexOfAny(u8, text, " \t") orelse return null;
+    if (!std.ascii.eqlIgnoreCase(text[0..separator], "Bearer")) return null;
+
+    var result: BearerChallenge = .{ .realm = "", .service = null, .scope = null };
+    var index = separator;
+    while (index < text.len) {
+        while (index < text.len and (text[index] == ',' or text[index] == ' ' or text[index] == '\t')) : (index += 1) {}
+        if (index == text.len) break;
+        const key_start = index;
+        while (index < text.len and (std.ascii.isAlphanumeric(text[index]) or text[index] == '_' or text[index] == '-')) : (index += 1) {}
+        if (key_start == index) return null;
+        const key = text[key_start..index];
+        while (index < text.len and (text[index] == ' ' or text[index] == '\t')) : (index += 1) {}
+        if (index == text.len or text[index] != '=') return null;
+        index += 1;
+        while (index < text.len and (text[index] == ' ' or text[index] == '\t')) : (index += 1) {}
+
+        var value: []const u8 = undefined;
+        if (index < text.len and text[index] == '"') {
+            index += 1;
+            const start = index;
+            while (index < text.len and text[index] != '"') : (index += 1) {
+                if (text[index] == '\\' or text[index] == '\r' or text[index] == '\n') return null;
+            }
+            if (index == text.len) return null;
+            value = text[start..index];
+            index += 1;
+        } else {
+            const start = index;
+            while (index < text.len and text[index] != ',') : (index += 1) {}
+            value = std.mem.trim(u8, text[start..index], " \t");
+        }
+
+        if (std.ascii.eqlIgnoreCase(key, "realm")) result.realm = value else if (std.ascii.eqlIgnoreCase(key, "service")) result.service = value else if (std.ascii.eqlIgnoreCase(key, "scope")) result.scope = value;
+        while (index < text.len and (text[index] == ' ' or text[index] == '\t')) : (index += 1) {}
+        if (index < text.len and text[index] != ',') return null;
+    }
+    if (result.realm.len == 0) return null;
+    return result;
+}
+
+fn buildTokenUrl(allocator: Allocator, realm: []const u8, service: ?[]const u8, scope: []const u8) ![]u8 {
+    var output: Io.Writer.Allocating = .init(allocator);
+    defer output.deinit();
+    const separator: u8 = if (std.mem.indexOfScalar(u8, realm, '?') == null) '?' else '&';
+    try output.writer.print("{s}{c}", .{ realm, separator });
+    var has_parameter = false;
+    if (service) |value| {
+        try output.writer.writeAll("service=");
+        try percentEncodeQuery(&output.writer, value);
+        has_parameter = true;
+    }
+    if (has_parameter) try output.writer.writeByte('&');
+    try output.writer.writeAll("scope=");
+    try percentEncodeQuery(&output.writer, scope);
+    return allocator.dupe(u8, output.written());
+}
+
+fn percentEncodeQuery(writer: *Io.Writer, value: []const u8) Io.Writer.Error!void {
+    for (value) |byte| {
+        if (std.ascii.isAlphanumeric(byte) or byte == '-' or byte == '.' or byte == '_' or byte == '~') {
+            try writer.writeByte(byte);
+        } else {
+            try writer.print("%{X:0>2}", .{byte});
+        }
+    }
+}
+
+fn baseMediaType(allocator: Allocator, value: []const u8) Allocator.Error![]u8 {
+    const semicolon = std.mem.indexOfScalar(u8, value, ';') orelse value.len;
+    return allocator.dupe(u8, std.mem.trim(u8, value[0..semicolon], " \t"));
+}
+
+fn statusError(status: http.Status) anyerror {
+    return switch (status) {
+        .unauthorized => error.RegistryUnauthorized,
+        .forbidden => error.RegistryForbidden,
+        .not_found => error.ImageNotFound,
+        else => error.RegistryRequestFailed,
+    };
+}
+
+fn isRedirect(status: http.Status) bool {
+    return status == .moved_permanently or status == .found or status == .see_other or
+        status == .temporary_redirect or status == .permanent_redirect;
+}
+
+fn digestOf(allocator: Allocator, bytes: []const u8) Allocator.Error![]u8 {
+    var hash = std.crypto.hash.sha2.Sha256.init(.{});
+    hash.update(bytes);
+    const hex = std.fmt.bytesToHex(hash.finalResult(), .lower);
+    return std.fmt.allocPrint(allocator, "sha256:{s}", .{hex});
+}
+
+fn writeBytes(store: storage.BlobStore, digest: []const u8, bytes: []const u8) anyerror!void {
+    var reader = Io.Reader.fixed(bytes);
+    try store.writeVerified(digest, @intCast(bytes.len), &reader);
+}
+
+test "parses anonymous bearer token challenges with quoted parameters" {
+    const challenge = parseBearerChallenge("Bearer realm=\"https://auth.example/token\",service=\"registry.example\",scope=\"repository:team/app:pull\"").?;
+    try std.testing.expectEqualStrings("https://auth.example/token", challenge.realm);
+    try std.testing.expectEqualStrings("registry.example", challenge.service.?);
+    try std.testing.expectEqualStrings("repository:team/app:pull", challenge.scope.?);
+}
+
+test "rejects unsupported or malformed registry auth challenges" {
+    try std.testing.expect(parseBearerChallenge("Basic realm=\"https://auth.example/token\"") == null);
+    try std.testing.expect(parseBearerChallenge("Bearer realm=\"https://auth.example/token\\\"bad\"") == null);
+    try std.testing.expect(parseBearerChallenge("Bearer service=\"registry.example\"") == null);
+}
+
+test "encodes registry token query values" {
+    const url = try buildTokenUrl(std.testing.allocator, "https://auth.example/token", "registry.example", "repository:library/alpine:pull");
+    defer std.testing.allocator.free(url);
+    try std.testing.expectEqualStrings("https://auth.example/token?service=registry.example&scope=repository%3Alibrary%2Falpine%3Apull", url);
+}

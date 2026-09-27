@@ -2,7 +2,7 @@
 
 ## Current state
 
-Only `help`, `version`, and `system info` work. Rift cannot pull an image, start a VM, or execute a container. The rest of this document records the intended design and work still to prove.
+`help`, `version`, `system info`, and public `pull` work. Pull downloads and verifies OCI metadata and blobs for the host architecture. Rift cannot start a VM or execute a container. The rest of this document records the intended design and work still to prove.
 
 ## Runtime shape
 
@@ -22,7 +22,7 @@ The host-facing implementation stays in Zig. The guest agent is also intended to
 
 ## Planned execution path
 
-`rift pull alpine` should resolve the reference, authenticate to the registry, select the `linux/arm64` manifest on Apple silicon, fetch each required blob, verify its digest, and publish verified data into the content-addressed store.
+`rift pull alpine` resolves the reference, authenticates anonymously to public registries, selects the host's Linux architecture, fetches each required blob, verifies its digest, and publishes verified data into the content-addressed store. The current implementation does not persist tag-to-manifest metadata yet.
 
 `rift run --rm alpine echo hello` should assemble the image root, start a Linux VM with the matching kernel and guest agent, ask the guest to launch the command with container isolation, relay output and exit status, then stop the VM and remove only the temporary container state.
 
@@ -56,7 +56,7 @@ Boot time, memory, binary size, image storage, and cleanup behavior will be meas
 
 1. **Done:** OCI references, indexes, manifests, and platform selection with tests.
 2. **Done:** Streaming content-addressed SHA-256 storage with atomic publication and verification.
-3. Public registry pulls, authentication, and image metadata.
+3. **In progress:** Public registry pulls and authentication; persist image metadata.
 4. Secure image layer extraction and image listing/removal.
 5. A bootable Linux guest and a minimal guest command protocol.
 6. One real Alpine command, followed by lifecycle, logs, and cleanup.

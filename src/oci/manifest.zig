@@ -83,12 +83,12 @@ fn validDescriptor(descriptor: Descriptor) bool {
     return descriptor.mediaType.len != 0 and reference.isValidDigest(descriptor.digest);
 }
 
-fn isIndexMediaType(media_type: []const u8) bool {
+pub fn isIndexMediaType(media_type: []const u8) bool {
     return std.mem.eql(u8, media_type, "application/vnd.oci.image.index.v1+json") or
         std.mem.eql(u8, media_type, "application/vnd.docker.distribution.manifest.list.v2+json");
 }
 
-fn isManifestMediaType(media_type: []const u8) bool {
+pub fn isManifestMediaType(media_type: []const u8) bool {
     return std.mem.eql(u8, media_type, "application/vnd.oci.image.manifest.v1+json") or
         std.mem.eql(u8, media_type, "application/vnd.docker.distribution.manifest.v2+json");
 }

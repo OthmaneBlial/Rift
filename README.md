@@ -4,7 +4,7 @@
 
 **No Docker. No daemon. No Docker Desktop. Just one binary.**
 
-Rift is an early-stage Zig project for running Linux containers on macOS. Those lines describe the intended product. The current release is only a host CLI: it does not pull images, start a Linux VM, or run containers yet.
+Rift is an early-stage Zig project for running Linux containers on macOS. Those lines describe the intended product. The CLI can pull public OCI images for the Mac's architecture. It cannot start a Linux VM or run containers yet.
 
 ## Current commands
 
@@ -12,9 +12,10 @@ Rift is an early-stage Zig project for running Linux containers on macOS. Those 
 rift --help
 rift version
 rift system info
+rift pull alpine
 ```
 
-These commands are implemented. Container commands will appear here only after they work.
+Image pulls use anonymous registry access and save SHA-256-verified OCI blobs under `~/Library/Application Support/Rift`. Private registry credentials, image listing, and container execution are not implemented.
 
 ## Build
 
@@ -26,6 +27,8 @@ zig build
 zig build test
 zig build run -- system info
 ```
+
+GitHub Actions is disabled; run these checks locally.
 
 ## Runtime plan
 
@@ -39,12 +42,13 @@ No Docker Engine, Docker CLI, Docker Desktop, or container daemon is part of the
 - [x] Apache License 2.0, architecture notes, local formatting/build/test checks
 - [x] OCI references, indexes, manifests, and `linux/arm64` selection with tests
 - [x] Streaming content-addressed blob storage with SHA-256 and size verification
-- [ ] OCI registry access and image metadata
+- [x] Public OCI pulls with Bearer token auth, platform selection, and verified blob downloads
+- [ ] Image metadata, listing, and removal
 - [ ] Safe layer extraction
 - [ ] Linux VM boot and guest command execution
 - [ ] Container lifecycle, logs, networking, and cleanup
 
-There is no usable container workflow or release artifact yet. Do not use Rift as a Docker replacement today.
+There is no container execution workflow or release artifact yet. Do not use Rift as a Docker replacement today.
 
 ## License
 
