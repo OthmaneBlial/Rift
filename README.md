@@ -70,17 +70,17 @@ No Docker Engine, Docker CLI, Docker Desktop, or container daemon is part of the
 - [x] Local image metadata and listing
 - [x] Local Virtualization.framework bridge and Alpine guest boot check
 - [ ] Image removal
-- [x] Initial safe extraction of tar, gzip, and zstd layers, including OCI whiteouts
+- [x] Initial safe extraction of tar, gzip, and zstd layers, including OCI whiteouts and regular-file hardlinks
 - [x] Local root filesystem assembly from verified manifest and layer blobs
 - [x] Local VM smoke that executes pulled Alpine BusyBox through a read-only share
-- [ ] Hardlinks and complete OCI filesystem metadata
+- [ ] Complete OCI filesystem metadata and special files
 - [x] Basic foreground OCI command execution through Rift's public CLI
 - [x] Image entrypoint, command, and environment defaults
 - [ ] Non-root user and non-root working directory support
 - [x] Outbound NAT and DNS for foreground commands
 - [ ] Port forwarding, detached lifecycle, structured logs, volumes, and broader cleanup
 
-Each `run` is temporary, including runs without `--rm`. The CLI relays console output and returns the guest command's exit status. There is no release artifact yet. Do not use Rift as a Docker replacement today.
+Each `run` is temporary, including runs without `--rm`. The CLI relays console output and returns the guest command's exit status. A local `nginx -v` run succeeds; serving it through a host port remains unfinished. There is no release artifact yet. Do not use Rift as a Docker replacement today.
 
 ## License
 

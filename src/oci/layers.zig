@@ -46,7 +46,19 @@ fn applyTar(allocator: std.mem.Allocator, io: Io, root: Io.Dir, reader: *Io.Read
     });
     var total: u64 = 0;
     var count: usize = 0;
-    while (try it.next()) |entry| {
+    while (true) {
+        @memset(&name_buffer, 0);
+        @memset(&link_buffer, 0);
+        const next = it.next() catch |err| switch (err) {
+            error.TarUnsupportedHeader => {
+                count += 1;
+                if (count > 1_000_000) return error.LayerTooLarge;
+                try applyHardlink(io, root, &it, &name_buffer, &link_buffer, phase);
+                continue;
+            },
+            else => return err,
+        };
+        const entry = next orelse break;
         count += 1;
         if (count > 1_000_000 or entry.size > max_layer_bytes - total) return error.LayerTooLarge;
         total += entry.size;
@@ -98,6 +110,41 @@ fn applyTar(allocator: std.mem.Allocator, io: Io, root: Io.Dir, reader: *Io.Read
             },
         }
     }
+}
+
+fn applyHardlink(io: Io, root: Io.Dir, it: *std.tar.Iterator, name_buffer: []const u8, link_buffer: []const u8, phase: Pass) !void {
+    const header = &it.header_buffer;
+    if (header[156] != '1' or !std.mem.eql(u8, std.mem.trim(u8, header[124..136], "0 \x00"), "")) return error.TarUnsupportedHeader;
+
+    var raw_name_buffer: [Io.Dir.max_path_bytes]u8 = undefined;
+    const raw_name = if (name_buffer[0] != 0) std.mem.sliceTo(name_buffer, 0) else try tarHeaderName(header, &raw_name_buffer);
+    const raw_target = if (link_buffer[0] != 0) std.mem.sliceTo(link_buffer, 0) else std.mem.sliceTo(header[157..257], 0);
+    var clean_name_buffer: [Io.Dir.max_path_bytes]u8 = undefined;
+    var clean_target_buffer: [Io.Dir.max_path_bytes]u8 = undefined;
+    const path = try cleanPath(raw_name, &clean_name_buffer);
+    const target = try cleanPath(raw_target, &clean_target_buffer);
+    if (path.len == 0 or target.len == 0 or std.mem.eql(u8, path, target)) return error.UnsafeLayerLink;
+    if (std.mem.startsWith(u8, basename(path), ".wh.")) return error.InvalidWhiteout;
+    if (phase == .whiteouts) return;
+
+    var source = (try openParent(io, root, parentPath(target), false)) orelse return error.InvalidHardlink;
+    defer source.close(io);
+    if ((try source.statFile(io, basename(target), .{ .follow_symlinks = false })).kind != .file) return error.InvalidHardlink;
+    var parent = (try openParent(io, root, parentPath(path), true)).?;
+    defer parent.close(io);
+    try parent.deleteTree(io, basename(path));
+    try source.hardLink(basename(target), parent, basename(path), io, .{ .follow_symlinks = false });
+}
+
+fn tarHeaderName(header: *const [512]u8, buffer: []u8) ![]const u8 {
+    const name = std.mem.sliceTo(header[0..100], 0);
+    const prefix = std.mem.sliceTo(header[345..500], 0);
+    if (!std.mem.eql(u8, header[257..262], "ustar") or prefix.len == 0) return name;
+    if (prefix.len + 1 + name.len > buffer.len) return error.UnsafeLayerPath;
+    @memcpy(buffer[0..prefix.len], prefix);
+    buffer[prefix.len] = '/';
+    @memcpy(buffer[prefix.len + 1 ..][0..name.len], name);
+    return buffer[0 .. prefix.len + 1 + name.len];
 }
 
 fn applyWhiteout(allocator: std.mem.Allocator, io: Io, root: Io.Dir, path: []const u8, name: []const u8) !void {
@@ -245,4 +292,55 @@ test "rejects paths through symlink parents" {
     var path_buffer: [64]u8 = undefined;
     try std.testing.expectError(error.UnsafeLayerPath, cleanPath("../host", &path_buffer));
     try std.testing.expectError(error.UnsafeLayerLink, checkLink("bin/tool", "../../host"));
+}
+
+test "applies hardlinks and rejects targets outside the root" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var temp = std.testing.tmpDir(.{});
+    defer temp.cleanup();
+    try temp.dir.createDirPath(io, "root");
+    var root = try temp.dir.openDir(io, "root", .{});
+    defer root.close(io);
+
+    var archive: Io.Writer.Allocating = .init(allocator);
+    defer archive.deinit();
+    var tar: std.tar.Writer = .{ .underlying_writer = &archive.writer };
+    try tar.writeFileBytes("source", "shared", .{});
+    try writeTestHardlink(&archive.writer, "linked", "source");
+    try temp.dir.writeFile(io, .{ .sub_path = "layer.tar", .data = archive.written() });
+    const blob = try temp.dir.openFile(io, "layer.tar", .{ .mode = .read_only });
+    defer blob.close(io);
+    try apply(allocator, io, root, blob, "application/vnd.oci.image.layer.v1.tar");
+    const contents = try root.readFileAlloc(io, "linked", allocator, .limited(16));
+    defer allocator.free(contents);
+    try std.testing.expectEqualStrings("shared", contents);
+    const source = try root.openFile(io, "source", .{ .mode = .read_write });
+    defer source.close(io);
+    try source.writeStreamingAll(io, "Shared");
+    const linked_after_write = try root.readFileAlloc(io, "linked", allocator, .limited(16));
+    defer allocator.free(linked_after_write);
+    try std.testing.expectEqualStrings("Shared", linked_after_write);
+
+    var unsafe: Io.Writer.Allocating = .init(allocator);
+    defer unsafe.deinit();
+    try writeTestHardlink(&unsafe.writer, "escape", "../outside");
+    try temp.dir.writeFile(io, .{ .sub_path = "unsafe.tar", .data = unsafe.written() });
+    const unsafe_blob = try temp.dir.openFile(io, "unsafe.tar", .{ .mode = .read_only });
+    defer unsafe_blob.close(io);
+    try std.testing.expectError(error.UnsafeLayerPath, apply(allocator, io, root, unsafe_blob, "application/vnd.oci.image.layer.v1.tar"));
+}
+
+fn writeTestHardlink(writer: *Io.Writer, name: []const u8, target: []const u8) !void {
+    var header = std.tar.Writer.Header.init(.regular);
+    try header.setPath("", name);
+    try header.setLinkname(target);
+    const bytes = std.mem.asBytes(&header);
+    bytes[156] = '1';
+    @memset(bytes[148..156], ' ');
+    var checksum: usize = 0;
+    for (bytes) |byte| checksum += byte;
+    _ = try std.fmt.bufPrint(bytes[148..154], "{o:0>6}", .{checksum});
+    bytes[154] = 0;
+    try writer.writeAll(bytes);
 }

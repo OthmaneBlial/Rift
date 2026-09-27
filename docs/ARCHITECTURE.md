@@ -6,7 +6,7 @@
 
 Rift's Zig/Objective-C VM bridge boots an Alpine ARM64 kernel and initramfs to a shell, runs a command, and shuts down through the local `zig build vm-check` gate. `scripts/prepare_guest.py` reproduces those guest files from a pinned, SHA-256-verified Alpine ISO. Alpine packages its ARM64 kernel as a compressed EFI zboot image; the script extracts the uncompressed `Image` needed for direct boot. `rift run` uses verified copies installed under the user's Application Support directory.
 
-The layer installer handles OCI tar, gzip, and zstd layers. It applies whiteouts before entries from the same layer and refuses archive paths or parent symlinks that could redirect host writes. Root filesystem assembly reads a verified platform manifest, checks each cached layer digest and size again, and applies layers to a private staging directory. Rift exposes that directory read-only through VirtioFS. The guest mounts a writable tmpfs overlay above it, obtains a DHCP lease on a Virtualization.framework NAT adapter, copies DNS settings into the overlay, executes the command with `chroot`, writes an exit status to a separate disposable control share, and powers off. The CLI relays console output and returns that status. Local checks have proved output, exit code 37, shell argument quoting, temporary directory cleanup, and a DNS lookup from the pulled Alpine image. Hardlinks and complete OCI ownership, directory modes, timestamps, and extended attributes remain unfinished.
+The layer installer handles OCI tar, gzip, and zstd layers, including regular-file hardlinks. It applies whiteouts before entries from the same layer and refuses archive paths or parent symlinks that could redirect host writes. Root filesystem assembly reads a verified platform manifest, checks each cached layer digest and size again, and applies layers to a private staging directory. Rift exposes that directory read-only through VirtioFS. The guest mounts a writable tmpfs overlay above it, obtains a DHCP lease on a Virtualization.framework NAT adapter, copies DNS settings into the overlay, executes the command with `chroot`, writes an exit status to a separate disposable control share, and powers off. The CLI relays console output and returns that status. Local checks have proved output, exit code 37, shell argument quoting, temporary directory cleanup, a DNS lookup from the pulled Alpine image, and `nginx -v` from the pulled nginx image. Complete OCI ownership, directory modes, timestamps, extended attributes, and special files remain unfinished.
 
 ## Runtime shape
 
@@ -61,7 +61,7 @@ Boot time, memory, binary size, image storage, and cleanup behavior will be meas
 1. **Done:** OCI references, indexes, manifests, and platform selection with tests.
 2. **Done:** Streaming content-addressed SHA-256 storage with atomic publication and verification.
 3. **Done:** Public registry pulls, authentication, and local image metadata.
-4. Initial secure image layer extraction and image listing; hardlinks and removal remain.
+4. Initial secure image layer extraction, regular-file hardlinks, and image listing; image removal remains.
 5. A bootable Linux guest and a minimal command result path, proven locally.
 6. One real Alpine command through the public CLI, followed by full OCI process settings, lifecycle, logs, and cleanup.
 7. Outbound networking is proven locally; port forwarding and explicit volumes remain.
