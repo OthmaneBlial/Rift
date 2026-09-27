@@ -2,6 +2,8 @@
 
 This checklist follows the goals in the original project brief. `[x]` marks work implemented and verified within the stated scope; `[ ]` marks work still open. Partial support is split from the work that remains.
 
+**Checklist progress: 53 of 68 items complete (78%).** This is verified roadmap progress; Rift remains an early source preview until the open release, compatibility, security, and adoption work is complete.
+
 ## Project foundation
 
 - [x] Build the host runtime in Zig and target Apple Silicon macOS.
