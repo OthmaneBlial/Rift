@@ -2,7 +2,7 @@
 
 This cumulative checklist keeps the goals from Rift's first project brief and tracks progress since day one. Completed work stays visible as `[x]` only after verification; `[ ]` marks open work. Partial support is split from what remains.
 
-**Checklist progress: 55 of 71 items complete (77%).** This is verified roadmap progress; Rift remains an early source preview until the open release, compatibility, security, and adoption work is complete.
+**Checklist progress: 56 of 71 items complete (79%).** This is verified roadmap progress; Rift remains an early source preview until the open release, compatibility, security, and adoption work is complete.
 
 ## Project foundation
 
@@ -39,7 +39,7 @@ This cumulative checklist keeps the goals from Rift's first project brief and tr
 - [x] Support environment credentials for private Bearer-token challenges; verify the Basic-to-Bearer flow with a local registry fixture.
 - [x] Coordinate image pulls, runs, and cache pruning with a shared cache lock.
 - [x] Reclaim unreferenced blobs while preserving blobs used by valid image records.
-- [ ] Cap aggregate image download size per pull to prevent disk exhaustion.
+- [x] Cap each pull at 16 GiB of distinct image blobs missing from the verified cache.
 - [ ] Verify compatibility with more public registries and private registry providers.
 
 ## Linux guest and image filesystem

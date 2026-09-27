@@ -76,6 +76,7 @@ Host environment variables are not copied into containers. Volumes are read-only
 - Zig 0.16 or newer to build from source.
 - One lightweight Linux VM per run; the current guest limit is 2 CPUs and 256 MiB RAM.
 - One TCP port mapping per run; up to 16 explicit file or directory volumes.
+- Each pull is capped at 16 GiB of distinct image blobs not already verified in the local cache.
 - `exec` does not support interactive stdin or TTY allocation yet.
 - OCI file ownership, PAX `uid`/`gid` and global fields other than `mtime`, extended attributes, special files, and broader process isolation remain unsupported.
 - No Developer ID signature or notarized download yet. Build from source for now; do not use this preview as a Docker replacement.

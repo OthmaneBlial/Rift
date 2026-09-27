@@ -10,6 +10,8 @@ const Io = std.Io;
 const manifest_accept = "application/vnd.oci.image.index.v1+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.docker.distribution.manifest.v2+json";
 const manifest_limit = 4 * 1024 * 1024;
 const token_limit = 1024 * 1024;
+// ponytail: fixed 16 GiB per-pull cap; add an opt-in override if larger images become a supported use case.
+const image_download_limit: u64 = 16 * 1024 * 1024 * 1024;
 
 pub const Registry = struct {
     allocator: Allocator,
@@ -92,8 +94,8 @@ pub const Registry = struct {
         var arena = std.heap.ArenaAllocator.init(registry.allocator);
         defer arena.deinit();
         const parsed = manifest.parseManifest(arena.allocator(), selected_body) catch return error.InvalidManifest;
-        try registry.downloadBlob(store, parsed.config.digest, parsed.config.size);
-        for (parsed.layers) |layer| try registry.downloadBlob(store, layer.digest, layer.size);
+        const plan = try planMissingBlobs(arena.allocator(), store, parsed);
+        for (plan.blobs) |blob| try registry.downloadBlob(store, blob.digest, blob.size);
 
         return .{
             .digest = try registry.allocator.dupe(u8, selected_digest),
@@ -114,7 +116,6 @@ pub const Registry = struct {
     }
 
     fn downloadBlob(registry: *Registry, store: storage.BlobStore, digest: []const u8, size: u64) anyerror!void {
-        if (try store.containsVerified(digest, size)) return;
         const url = try std.fmt.allocPrint(registry.allocator, "{s}://{s}/v2/{s}/blobs/{s}", .{ registryScheme(registry.registry), registry.registry, registry.repository, digest });
         const pending = try registry.openAuthenticated(url, "application/octet-stream");
         defer registry.destroyPending(pending);
@@ -282,6 +283,50 @@ pub const PullResult = struct {
     digest: []const u8,
     layer_count: usize,
 };
+
+const BlobPlan = struct {
+    blobs: []manifest.Descriptor,
+    total_size: u64,
+};
+
+fn planMissingBlobs(allocator: Allocator, store: storage.BlobStore, image: manifest.Manifest) !BlobPlan {
+    var seen = std.StringHashMap(u64).init(allocator);
+    defer seen.deinit();
+    var blobs: std.ArrayList(manifest.Descriptor) = .empty;
+    errdefer blobs.deinit(allocator);
+    var total_size: u64 = 0;
+
+    try addMissingBlob(allocator, store, &seen, &blobs, &total_size, image.config);
+    for (image.layers) |layer| {
+        try addMissingBlob(allocator, store, &seen, &blobs, &total_size, layer);
+    }
+    return .{ .blobs = try blobs.toOwnedSlice(allocator), .total_size = total_size };
+}
+
+fn addMissingBlob(
+    allocator: Allocator,
+    store: storage.BlobStore,
+    seen: *std.StringHashMap(u64),
+    blobs: *std.ArrayList(manifest.Descriptor),
+    total_size: *u64,
+    descriptor: manifest.Descriptor,
+) !void {
+    if (seen.get(descriptor.digest)) |known_size| {
+        if (known_size != descriptor.size) return error.BlobSizeMismatch;
+        return;
+    }
+    try seen.put(descriptor.digest, descriptor.size);
+    if (try store.containsVerified(descriptor.digest, descriptor.size)) return;
+
+    total_size.* = try nextDownloadSize(total_size.*, descriptor.size);
+    try blobs.append(allocator, descriptor);
+}
+
+fn nextDownloadSize(total: u64, size: u64) error{ImageDownloadTooLarge}!u64 {
+    const next = std.math.add(u64, total, size) catch return error.ImageDownloadTooLarge;
+    if (next > image_download_limit) return error.ImageDownloadTooLarge;
+    return next;
+}
 
 const Pending = struct {
     request: http.Client.Request,
@@ -469,6 +514,66 @@ fn wipeSecret(bytes: []const u8) void {
 fn writeBytes(store: storage.BlobStore, digest: []const u8, bytes: []const u8) anyerror!void {
     var reader = Io.Reader.fixed(bytes);
     try store.writeVerified(digest, @intCast(bytes.len), &reader);
+}
+
+test "plans each missing image blob once and skips verified cached blobs" {
+    const allocator = std.testing.allocator;
+    var temp = std.testing.tmpDir(.{});
+    defer temp.cleanup();
+    var store = try storage.BlobStore.init(std.testing.io, temp.dir);
+    defer store.deinit();
+
+    const cached_digest = "sha256:2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824";
+    var cached_body = Io.Reader.fixed("hello");
+    try store.writeVerified(cached_digest, 5, &cached_body);
+
+    const missing_digest = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    const image = manifest.Manifest{
+        .schemaVersion = 2,
+        .config = .{
+            .mediaType = "application/vnd.oci.image.config.v1+json",
+            .digest = cached_digest,
+            .size = 5,
+        },
+        .layers = &.{
+            .{ .mediaType = "application/vnd.oci.image.layer.v1.tar", .digest = cached_digest, .size = 5 },
+            .{ .mediaType = "application/vnd.oci.image.layer.v1.tar", .digest = missing_digest, .size = 5 },
+            .{ .mediaType = "application/vnd.oci.image.layer.v1.tar", .digest = missing_digest, .size = 5 },
+        },
+    };
+    const plan = try planMissingBlobs(allocator, store, image);
+    defer allocator.free(plan.blobs);
+
+    try std.testing.expectEqual(@as(usize, 1), plan.blobs.len);
+    try std.testing.expectEqual(@as(u64, 5), plan.total_size);
+    try std.testing.expectEqualStrings(missing_digest, plan.blobs[0].digest);
+}
+
+test "caps aggregate uncached image downloads at 16 GiB" {
+    try std.testing.expectEqual(image_download_limit, try nextDownloadSize(image_download_limit - 1, 1));
+    try std.testing.expectError(error.ImageDownloadTooLarge, nextDownloadSize(image_download_limit, 1));
+    try std.testing.expectError(error.ImageDownloadTooLarge, nextDownloadSize(std.math.maxInt(u64), 1));
+
+    const allocator = std.testing.allocator;
+    var temp = std.testing.tmpDir(.{});
+    defer temp.cleanup();
+    var store = try storage.BlobStore.init(std.testing.io, temp.dir);
+    defer store.deinit();
+
+    const image = manifest.Manifest{
+        .schemaVersion = 2,
+        .config = .{
+            .mediaType = "application/vnd.oci.image.config.v1+json",
+            .digest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            .size = image_download_limit / 2,
+        },
+        .layers = &.{.{
+            .mediaType = "application/vnd.oci.image.layer.v1.tar",
+            .digest = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            .size = image_download_limit / 2 + 1,
+        }},
+    };
+    try std.testing.expectError(error.ImageDownloadTooLarge, planMissingBlobs(allocator, store, image));
 }
 
 test "parses anonymous bearer token challenges with quoted parameters" {

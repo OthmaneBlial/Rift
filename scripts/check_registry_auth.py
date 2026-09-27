@@ -49,6 +49,25 @@ def main() -> int:
         },
         separators=(",", ":"),
     ).encode()
+    oversized_manifest = json.dumps(
+        {
+            "schemaVersion": 2,
+            "mediaType": "application/vnd.oci.image.manifest.v1+json",
+            "config": {
+                "mediaType": "application/vnd.oci.image.config.v1+json",
+                "digest": "sha256:" + "a" * 64,
+                "size": 8 * 1024**3 + 1,
+            },
+            "layers": [
+                {
+                    "mediaType": "application/vnd.oci.image.layer.v1.tar",
+                    "digest": "sha256:" + "b" * 64,
+                    "size": 8 * 1024**3 + 1,
+                }
+            ],
+        },
+        separators=(",", ":"),
+    ).encode()
     events = {"challenge": 0, "token": 0, "manifest": 0, "blobs": 0}
 
     class Handler(BaseHTTPRequestHandler):
@@ -79,7 +98,7 @@ def main() -> int:
                 self.respond(200, json.dumps({"token": TOKEN}).encode(), "application/json")
                 return
 
-            if parsed.path == "/v2/team/app/manifests/latest":
+            if parsed.path in ("/v2/team/app/manifests/latest", "/v2/team/app/manifests/oversized"):
                 events["manifest"] += 1
                 if self.headers.get("Authorization") != f"Bearer {TOKEN}":
                     events["challenge"] += 1
@@ -91,7 +110,8 @@ def main() -> int:
                         {"WWW-Authenticate": f'Bearer realm="{realm}",service="rift-check",scope="repository:team/app:pull"'},
                     )
                     return
-                self.respond(200, manifest, "application/vnd.oci.image.manifest.v1+json")
+                body = oversized_manifest if parsed.path.endswith("/oversized") else manifest
+                self.respond(200, body, "application/vnd.oci.image.manifest.v1+json")
                 return
 
             if parsed.path.startswith("/v2/team/app/blobs/"):
@@ -129,14 +149,23 @@ def main() -> int:
             listed = subprocess.run([binary, "images"], capture_output=True, text=True, timeout=15, env=environment)
             if listed.returncode != 0 or image not in listed.stdout:
                 raise RuntimeError(f"authenticated image was not recorded: {listed!r}")
-        if events != {"challenge": 1, "token": 1, "manifest": 2, "blobs": 2}:
+
+            oversized_image = f"127.0.0.1:{server.server_port}/team/app:oversized"
+            rejected = subprocess.run([binary, "pull", oversized_image], capture_output=True, text=True, timeout=30, env=environment)
+            if rejected.returncode == 0 or "16 GiB" not in rejected.stderr:
+                raise RuntimeError(f"oversized image was not rejected with the pull limit: {rejected!r}")
+            listed = subprocess.run([binary, "images"], capture_output=True, text=True, timeout=15, env=environment)
+            if listed.returncode != 0 or oversized_image in listed.stdout:
+                raise RuntimeError(f"oversized image was recorded after rejection: {listed!r}")
+
+        if events != {"challenge": 2, "token": 2, "manifest": 4, "blobs": 2}:
             raise RuntimeError(f"unexpected registry request flow: {events}")
     finally:
         server.shutdown()
         server.server_close()
         thread.join(timeout=5)
 
-    print("Rift registry auth check passed: Basic token exchange, Bearer manifest and blob pulls, and local image metadata")
+    print("Rift registry check passed: Bearer auth, verified blob pulls, metadata, and pre-download 16 GiB limit")
     return 0
 
 

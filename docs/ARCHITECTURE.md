@@ -46,7 +46,7 @@ Warm VM reuse is a measured optimization, not a prerequisite for correctness. An
 
 - Registry responses, image metadata, and layer archives are untrusted input.
 - Verify content digests before making blobs visible to other commands.
-- Bound manifest and token bodies; stream blobs and verify each declared size and digest before publishing them.
+- Bound manifest and token bodies; cap uncached distinct blob downloads at 16 GiB per pull, then verify each declared size and digest before publishing them.
 - Reject archive traversal, unsafe links, and writes outside the image root.
 - Do not share host paths unless the user explicitly requests them.
 - Directory shares default to read-only at the Virtualization.framework boundary; `:rw` grants the guest write access to the selected host directory.

@@ -317,6 +317,7 @@ pub fn main(init: std.process.Init) void {
             error.InvalidManifest, error.MissingManifestMediaType, error.UnsupportedManifestMediaType => std.debug.print("rift: registry returned an invalid or unsupported image manifest\n", .{}),
             error.BlobDigestMismatch => std.debug.print("rift: downloaded blob failed SHA-256 verification\n", .{}),
             error.BlobSizeMismatch => std.debug.print("rift: downloaded blob size did not match its descriptor\n", .{}),
+            error.ImageDownloadTooLarge => std.debug.print("rift: image pull exceeds the 16 GiB uncached download limit\n", .{}),
             error.UnsupportedDigestAlgorithm => std.debug.print("rift: image uses an unsupported digest algorithm\n", .{}),
             error.InvalidImageMetadata => std.debug.print("rift: local image metadata is corrupt\n", .{}),
             error.CorruptCachedBlob => std.debug.print("rift: cached image blob failed verification\n", .{}),
