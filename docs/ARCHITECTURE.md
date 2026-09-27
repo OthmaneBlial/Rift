@@ -46,12 +46,12 @@ Warm VM reuse is a measured optimization, not a prerequisite for correctness. An
 
 - Registry responses, image metadata, and layer archives are untrusted input.
 - Verify content digests before making blobs visible to other commands.
-- Bound response sizes and validate manifests before allocating or extracting data.
+- Bound manifest and token bodies; stream blobs and verify each declared size and digest before publishing them.
 - Reject archive traversal, unsafe links, and writes outside the image root.
 - Do not share host paths unless the user explicitly requests them.
 - Directory shares default to read-only at the Virtualization.framework boundary; `:rw` grants the guest write access to the selected host directory.
 - The container process retains only `CHOWN`, `DAC_OVERRIDE`, `FOWNER`, `FSETID`, `KILL`, `SETGID`, `SETUID`, and `NET_BIND_SERVICE`. The executor drops other capability bounds, sets `no_new_privs`, and closes inherited file descriptors. This is a fixed profile, not full OCI capability configuration.
-- Treat the guest VM as a security boundary that still needs threat-model review and adversarial testing; a VM alone does not make all host integration safe.
+- The initial [threat model](THREAT_MODEL.md) documents current trust boundaries and limits. Adversarial isolation testing remains incomplete; a VM alone does not make all host integration safe.
 - Keep registry credentials out of logs and repository files. Current private-registry credentials are process-environment only, sent to the HTTPS token realm advertised by the requested registry, or to a loopback HTTP token realm for local registries; credentials are never persisted. Select a macOS credential-storage mechanism before adding persistent authentication.
 - Validate the signing and entitlement path needed to create Virtualization.framework VMs before claiming public binary distribution. See Apple's [Linux VM guide](https://developer.apple.com/documentation/virtualization/running-linux-in-a-virtual-machine).
 - `rift clean` must report what it will delete and preserve user data unless the user confirms the requested cleanup.

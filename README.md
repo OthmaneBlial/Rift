@@ -80,7 +80,7 @@ Host environment variables are not copied into containers. Volumes are read-only
 - OCI file ownership, PAX `uid`/`gid` and global fields other than `mtime`, extended attributes, special files, and broader process isolation remain unsupported.
 - No Developer ID signature or notarized download yet. Build from source for now; do not use this preview as a Docker replacement.
 
-Treat images and workloads as untrusted. Rift limits host access to explicitly mounted paths, but its security model still needs broader adversarial review.
+Treat images and workloads as untrusted. See the [threat model](docs/THREAT_MODEL.md) for current protections, assumptions, and open security review work.
 
 ## Local checks
 

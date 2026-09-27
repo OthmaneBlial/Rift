@@ -1,8 +1,8 @@
 # Rift roadmap
 
-This checklist follows the goals in the original project brief. `[x]` marks work implemented and verified within the stated scope; `[ ]` marks work still open. Partial support is split from the work that remains.
+This cumulative checklist keeps the goals from Rift's first project brief and tracks progress since day one. Completed work stays visible as `[x]` only after verification; `[ ]` marks open work. Partial support is split from what remains.
 
-**Checklist progress: 54 of 69 items complete (78%).** This is verified roadmap progress; Rift remains an early source preview until the open release, compatibility, security, and adoption work is complete.
+**Checklist progress: 55 of 71 items complete (77%).** This is verified roadmap progress; Rift remains an early source preview until the open release, compatibility, security, and adoption work is complete.
 
 ## Project foundation
 
@@ -39,6 +39,7 @@ This checklist follows the goals in the original project brief. `[x]` marks work
 - [x] Support environment credentials for private Bearer-token challenges; verify the Basic-to-Bearer flow with a local registry fixture.
 - [x] Coordinate image pulls, runs, and cache pruning with a shared cache lock.
 - [x] Reclaim unreferenced blobs while preserving blobs used by valid image records.
+- [ ] Cap aggregate image download size per pull to prevent disk exhaustion.
 - [ ] Verify compatibility with more public registries and private registry providers.
 
 ## Linux guest and image filesystem
@@ -76,7 +77,8 @@ This checklist follows the goals in the original project brief. `[x]` marks work
 - [x] Support non-interactive `exec` in the existing container namespaces, filesystem, environment, user, and working directory.
 - [ ] Add interactive `exec` with stdin, TTY allocation, and signal cancellation.
 - [ ] Implement broader OCI process and resource settings.
-- [ ] Document the threat model and complete adversarial isolation review.
+- [x] Document security assets, trust boundaries, current controls, and known limits.
+- [ ] Complete adversarial isolation review and test host/guest escape assumptions.
 - [ ] Add structured log output.
 
 ## Verification, performance, and adoption
