@@ -61,6 +61,12 @@ def main() -> int:
         unsafe_target = run(binary, "-v", f"{source}:/bin/sh", "alpine", "/bin/true")
         if unsafe_target.returncode != 125 or "rift-exec: open volume target:" not in unsafe_target.stdout:
             raise RuntimeError(f"symlink volume target was accepted: {unsafe_target!r}")
+        unsafe_parent_target = run(binary, "-v", f"{source}:/var/run/rift-volume", "alpine", "/bin/true")
+        if unsafe_parent_target.returncode != 125 or "rift-exec: open volume target:" not in unsafe_parent_target.stdout:
+            raise RuntimeError(f"directory volume traversed a symlinked target parent: {unsafe_parent_target!r}")
+        unsafe_file_parent_target = run(binary, "-v", f"{file_source}:/var/run/rift-volume", "alpine", "/bin/true")
+        if unsafe_file_parent_target.returncode != 125 or "rift-exec: open volume target:" not in unsafe_file_parent_target.stdout:
+            raise RuntimeError(f"file volume traversed a symlinked target parent: {unsafe_file_parent_target!r}")
         source_link = Path(temporary) / "link"
         source_link.symlink_to(source, target_is_directory=True)
         unsafe_source = run(binary, "-v", f"{source_link}:/input", "alpine", "/bin/true")
@@ -105,7 +111,7 @@ def main() -> int:
     after = set(runtime.iterdir()) if runtime.exists() else set()
     if after != before:
         raise RuntimeError(f"volume runs left runtime staging behind: {after - before}")
-    print("Rift volume check passed: read-only and writable file/directory shares, nested, detached, 16 shares, and unsafe-target rejection")
+    print("Rift volume check passed: read-only and writable file/directory shares, nested, detached, 16 shares, and symlink-target rejection")
     return 0
 
 
