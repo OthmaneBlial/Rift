@@ -1,65 +1,89 @@
 # Rift roadmap
 
-This is the running checklist from Rift’s first CLI and OCI work through a dependable release. `[x]` means implemented and verified, locally where applicable; `[ ]` means still open.
+This checklist follows the goals in the original project brief. `[x]` marks work implemented and verified within the stated scope; `[ ]` marks work still open. Partial support is split from the work that remains.
 
 ## Project foundation
 
-- [x] Build the Zig CLI with help, version, and host information.
-- [x] Add the Apache-2.0 license and architecture documentation.
-- [x] Run formatting, builds, unit tests, and macOS checks locally with `scripts/check-local.sh`.
-- [x] Keep CI local-only as requested; no GitHub Actions workflows.
-- [x] Add the repository logo, project topics, and first GitHub Pages website.
-- [x] Create the `v0.1.0` source-preview tag and release.
+- [x] Build the host runtime in Zig and target Apple Silicon macOS.
+- [x] Publish the Apache-2.0 source repository on GitHub with `main` as the default branch.
+- [x] Document the runtime architecture, security boundaries, current behavior, and limits.
+- [x] Provide local source-build instructions and a standalone Rift executable with no Zig or Python runtime dependency.
+- [x] Keep checks local-only as requested; `.github` has no hosted Actions workflow.
+- [x] Add the project logo, GitHub Pages site, repository homepage, and 17 relevant topics.
+- [x] Publish the `v0.1.0` source-preview tag and GitHub release.
+- [ ] Sign and notarize public macOS binaries; publish release checksums.
+- [ ] Provide a simple signed install and upgrade path, including Homebrew distribution.
+- [ ] Refresh and verify the project website when the roadmap reaches 100%.
 
-## OCI images and local storage
+## CLI and image workflow
 
-- [x] Parse OCI image references, indexes, and manifests; select and test `linux/arm64` images.
-- [x] Stream image blobs into content-addressed storage with SHA-256 and size verification.
-- [x] Pull public OCI images with Bearer authentication and platform selection.
-- [x] Support optional environment credentials for private Bearer challenges (unit-tested; provider integration remains open).
-- [x] Automatically pull uncached public images for foreground and detached runs.
-- [x] Store and list local image metadata.
-- [x] Report local disk usage by storage category.
-- [x] Remove image references with `rmi` and reclaim unreferenced blobs with `clean --yes`.
+- [x] Provide `--help`, `version`, and `system info` commands.
+- [x] Pull OCI images and list local images with `pull` and `images`.
+- [x] Run foreground containers, including `--rm` cleanup.
+- [x] Run detached containers and manage them with `ps`, `inspect`, `logs`, `stop`, `kill`, and `rm`.
+- [x] Run non-interactive commands in detached containers with `exec` and preserve their exit status.
+- [x] Remove local image references with `rmi` and inspect storage with `system df`.
+- [x] Preview cleanup and require confirmation before deleting stale runtime data or unused image blobs.
+- [ ] Add image-building support with `rift build`.
+
+## OCI registries and local image store
+
+- [x] Parse and normalize OCI image references, including Docker Hub shorthand.
+- [x] Parse OCI manifests and indexes; select `linux/arm64` images explicitly.
+- [x] Pull public images using registry Bearer authentication.
+- [x] Verify downloaded blob digests and sizes before storing them.
+- [x] Store image blobs by content digest and keep local image-reference metadata.
+- [x] Pull uncached images automatically for foreground and detached runs.
+- [x] Support environment credentials for private Bearer-token challenges; verify the Basic-to-Bearer flow with a local registry fixture.
+- [x] Coordinate image pulls, runs, and cache pruning with a shared cache lock.
+- [x] Reclaim unreferenced blobs while preserving blobs used by valid image records.
 - [ ] Verify compatibility with more public registries and private registry providers.
 
 ## Linux guest and image filesystem
 
-- [x] Boot a local Linux guest through Apple’s Virtualization.framework bridge.
-- [x] Download and verify pinned guest boot files on first run.
-- [x] Safely extract tar, gzip, and zstd layers, including OCI whiteouts and regular-file hardlinks.
-- [x] Assemble a local root filesystem from verified image manifests and layers.
-- [x] Preserve standard tar modification times for files, symlinks, and directories.
-- [x] Smoke-test execution of pulled Alpine BusyBox inside the VM through a read-only share.
-- [ ] Support OCI ownership, PAX metadata, extended attributes, and required special files.
+- [x] Boot Linux guests through Apple's Virtualization.framework bridge.
+- [x] Download pinned guest boot files on first use and verify their SHA-256 digest.
+- [x] Boot and exercise Alpine through local macOS VM checks.
+- [x] Assemble image root filesystems from verified manifests and layer blobs.
+- [x] Extract tar, gzip, and zstd layers; apply OCI whiteouts.
+- [x] Apply regular-file hardlinks and reject unsafe targets.
+- [x] Reject archive traversal, unsafe links, and writes redirected outside the image root.
+- [x] Preserve directory modes and standard tar modification times.
+- [x] Smoke-test pulled Alpine BusyBox inside the VM through a read-only share.
+- [x] Keep image files read-only and use a disposable writable overlay for container changes.
+- [ ] Preserve OCI file ownership and groups during layer extraction.
+- [ ] Support PAX metadata, including extended paths and timestamps.
+- [ ] Support OCI extended attributes and file capabilities.
+- [ ] Support required special files such as FIFOs and device nodes.
 
-## Container execution and lifecycle
+## Container behavior and isolation
 
-- [x] Run basic foreground OCI commands through the public CLI.
-- [x] Apply image Entrypoint, Cmd, and Env defaults, with `-e` overrides.
-- [x] Apply absolute image `WorkingDir`, `-w`, numeric or named `User`, and supplementary groups.
-- [x] Use private PID and mount namespaces, basic `/dev` and `/proc`, reduced capabilities, and `no_new_privs`.
-- [ ] Implement broader OCI process settings and review isolation against a documented threat model.
-- [x] Add non-interactive `rift exec` for detached containers; preserve arguments, environment, working directory, PID namespace, filesystem, and exit status.
-- [ ] Add interactive exec stdin/TTY support and signal cancellation.
-- [x] Provide outbound NAT and DNS for foreground commands.
-- [x] Forward one localhost TCP port for foreground commands.
-- [x] Run detached containers; provide `ps`, `inspect`, plain `logs`, graceful `stop`, force `kill`, and `rm`.
-- [x] Mount explicit read-only and writable directory volumes.
-- [x] Mount explicit read-only and writable file volumes.
-- [x] Preview and confirm cleanup of abandoned runtime staging.
-- [x] Preview and prune unreferenced image blobs under a cache lock.
+- [x] Apply image `Entrypoint`, `Cmd`, and `Env`, with explicit environment overrides.
+- [x] Apply image `WorkingDir` and the `-w` override.
+- [x] Apply numeric or named image users, primary groups, and supplementary groups.
+- [x] Give each workload private PID and mount namespaces, basic `/dev` and `/proc`, reduced capabilities, and `no_new_privs`.
+- [x] Provide outbound networking and DNS.
+- [x] Forward one TCP port from localhost into a container.
+- [x] Mount explicit host directories and files, read-only by default with opt-in write access.
+- [x] Run detached containers without a shared always-on daemon; keep one Rift worker per VM.
+- [x] Send graceful stop signals, force-stop workloads after the timeout, and support immediate `kill`.
+- [x] Retain detached logs and status until `rm`; clean foreground runtime state after normal completion.
+- [x] Support non-interactive `exec` in the existing container namespaces, filesystem, environment, user, and working directory.
+- [ ] Add interactive `exec` with stdin, TTY allocation, and signal cancellation.
+- [ ] Implement broader OCI process and resource settings.
+- [ ] Document the threat model and complete adversarial isolation review.
 - [ ] Add structured log output.
 
-## Verification, release, and adoption
+## Verification, performance, and adoption
 
-- [x] Verify the nginx welcome page over a forwarded localhost port, including a detached run.
-- [x] Remove foreground temporary state after normal completion; retain detached logs and status until `rift rm`.
+- [x] Run formatting, Zig unit tests, a `ReleaseSafe` build, guest preparation, and macOS integration checks through `scripts/check-local.sh`.
+- [x] Verify real CLI runs, automatic image pulls, DNS, detached lifecycle, and container exit codes locally.
+- [x] Verify nginx over the forwarded localhost port, including a detached run.
+- [x] Verify read-only and writable file and directory volumes.
+- [x] Verify private-registry authentication against a local registry fixture.
+- [x] Provide a reproducible local benchmark script and methodology for cached Alpine startup, CLI startup, host-worker RSS, binary size, and logical store size.
 - [x] Package and check a local release archive.
-- [ ] Add reproducible measurements for startup, idle memory, binary size, and storage.
-- [ ] Establish Developer ID signing and notarization, then publish signed binaries and checksums.
-- [ ] Provide a straightforward install and upgrade path for signed releases.
-- [ ] Verify the complete install-to-clean workflow on a clean Apple Silicon Mac without Docker.
-- [ ] Refresh and verify the GitHub Pages website when the project reaches 100%.
+- [ ] Measure fresh guest setup, registry pull speed, total host and VM memory, and results across more Macs.
+- [ ] Verify the complete first-use workflow on a clean Apple Silicon Mac without Docker: install, pull Alpine, run a command, serve nginx, and clean up.
 
-Rift is still an early source preview, not a Docker replacement. A passing local check does not establish registry-wide compatibility or a signed, notarized release.
+Rift remains an early source preview. Local checks do not establish registry-wide compatibility, a complete Docker replacement, or a signed and notarized release.
