@@ -33,7 +33,7 @@ pub fn apply(
 
 const Pass = enum { whiteouts, entries };
 
-const LayerTarEntryKind = enum { directory, sym_link, file, hard_link };
+const LayerTarEntryKind = enum { directory, sym_link, file, hard_link, device };
 const LayerTarEntry = struct {
     name: []const u8,
     link_name: []const u8,
@@ -108,7 +108,7 @@ const LayerTarIterator = struct {
                 },
                 'L' => gnu_name = try self.readGnuString(size, self.file_name_buffer),
                 'K' => gnu_link_name = try self.readGnuString(size, self.link_name_buffer),
-                '0', 0, '2', '5', '1' => {
+                '0', 0, '1', '2', '3', '4', '5' => {
                     const entry_size = pax.size orelse size;
                     if (entry_size > max_layer_bytes) return error.LayerTooLarge;
                     const mtime = if (pax.has_mtime)
@@ -124,6 +124,7 @@ const LayerTarIterator = struct {
                         '5' => .directory,
                         '2' => .sym_link,
                         '1' => .hard_link,
+                        '3', '4' => .device,
                         else => .file,
                     };
                     self.padding = tarBlockPadding(entry_size);
@@ -331,6 +332,10 @@ fn applyTar(allocator: std.mem.Allocator, io: Io, root: Io.Dir, reader: *Io.Read
             if (phase == .whiteouts) try applyWhiteout(allocator, io, root, path, name);
             continue;
         }
+        if (entry.kind == .device) {
+            if (entry.size != 0 or !std.mem.startsWith(u8, path, "dev/")) return error.UnsupportedLayerSpecialFile;
+            continue;
+        }
         if (path.len == 0) continue;
         if (phase == .whiteouts) {
             if (entry.kind == .hard_link) try applyHardlink(io, root, path, entry.link_name, entry.size, entry.mtime, phase);
@@ -386,6 +391,7 @@ fn applyTar(allocator: std.mem.Allocator, io: Io, root: Io.Dir, reader: *Io.Read
                 });
             },
             .hard_link => unreachable,
+            .device => unreachable,
         }
     }
 }
@@ -891,6 +897,50 @@ test "applies hardlinks and rejects targets outside the root" {
     try std.testing.expectError(error.UnsafeLayerPath, applyOne(allocator, io, root, unsafe_blob, "application/vnd.oci.image.layer.v1.tar"));
 }
 
+test "ignores image device nodes under runtime-managed /dev" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var temp = std.testing.tmpDir(.{});
+    defer temp.cleanup();
+    try temp.dir.createDirPath(io, "root");
+    var root = try temp.dir.openDir(io, "root", .{});
+    defer root.close(io);
+
+    var archive: Io.Writer.Allocating = .init(allocator);
+    defer archive.deinit();
+    var tar: std.tar.Writer = .{ .underlying_writer = &archive.writer };
+    try tar.writeDir("dev", .{});
+    try writeTestSpecial(&archive.writer, "dev/null", '3');
+    try writeTestSpecial(&archive.writer, "dev/sda", '4');
+    try temp.dir.writeFile(io, .{ .sub_path = "devices.tar", .data = archive.written() });
+    const blob = try temp.dir.openFile(io, "devices.tar", .{ .mode = .read_only });
+    defer blob.close(io);
+
+    try applyOne(allocator, io, root, blob, "application/vnd.oci.image.layer.v1.tar");
+    try std.testing.expectEqual(.directory, (try root.statFile(io, "dev", .{ .follow_symlinks = false })).kind);
+    try std.testing.expectError(error.FileNotFound, root.statFile(io, "dev/null", .{ .follow_symlinks = false }));
+    try std.testing.expectError(error.FileNotFound, root.statFile(io, "dev/sda", .{ .follow_symlinks = false }));
+}
+
+test "rejects image device nodes outside runtime-managed /dev" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var temp = std.testing.tmpDir(.{});
+    defer temp.cleanup();
+    try temp.dir.createDirPath(io, "root");
+    var root = try temp.dir.openDir(io, "root", .{});
+    defer root.close(io);
+
+    var archive: Io.Writer.Allocating = .init(allocator);
+    defer archive.deinit();
+    try writeTestSpecial(&archive.writer, "etc/device", '3');
+    try temp.dir.writeFile(io, .{ .sub_path = "device.tar", .data = archive.written() });
+    const blob = try temp.dir.openFile(io, "device.tar", .{ .mode = .read_only });
+    defer blob.close(io);
+
+    try std.testing.expectError(error.UnsupportedLayerSpecialFile, applyOne(allocator, io, root, blob, "application/vnd.oci.image.layer.v1.tar"));
+}
+
 fn applyOne(allocator: std.mem.Allocator, io: Io, root: Io.Dir, blob: Io.File, media_type: []const u8) !void {
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
@@ -907,6 +957,15 @@ fn writeTestHardlink(writer: *Io.Writer, name: []const u8, target: []const u8) !
     try header.setLinkname(target);
     const bytes = std.mem.asBytes(&header);
     bytes[156] = '1';
+    updateTestTarChecksum(bytes);
+    try writer.writeAll(bytes);
+}
+
+fn writeTestSpecial(writer: *Io.Writer, name: []const u8, kind: u8) !void {
+    var header = std.tar.Writer.Header.init(.regular);
+    try header.setPath("", name);
+    const bytes = std.mem.asBytes(&header);
+    bytes[156] = kind;
     updateTestTarChecksum(bytes);
     try writer.writeAll(bytes);
 }

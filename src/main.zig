@@ -323,6 +323,7 @@ pub fn main(init: std.process.Init) void {
             error.InvalidImageMetadata => std.debug.print("rift: local image metadata is corrupt\n", .{}),
             error.CorruptCachedBlob => std.debug.print("rift: cached image blob failed verification\n", .{}),
             error.ImageLayersTooLarge => std.debug.print("rift: image exceeds the 32 GiB decompressed layer limit\n", .{}),
+            error.UnsupportedLayerSpecialFile => std.debug.print("rift: image contains a special file outside /dev that Rift does not support yet\n", .{}),
             error.GuestAssetsMissing => std.debug.print("rift: guest boot files are missing\n", .{}),
             error.GuestAssetsCorrupt => std.debug.print("rift: guest assets failed SHA-256 verification\n", .{}),
             error.GuestDownloadFailed => std.debug.print("rift: could not download the pinned Alpine guest ISO\n", .{}),

@@ -36,7 +36,7 @@ Untrusted inputs include registry challenges and responses, image indexes and ma
 
 - There is no user namespace, seccomp filter, configurable capability profile, or complete OCI resource-control implementation. UID 0 in a workload is root in the guest's initial user namespace, with the fixed reduced capability set above; the VM remains the host boundary.
 - Outbound guest networking is not filtered. Localhost port forwarding is explicit, but guest egress policy is not configurable.
-- PAX ownership, OCI ownership, extended attributes, file capabilities, and special files are not implemented.
+- PAX ownership, OCI ownership, extended attributes, and file capabilities are not implemented. Image device nodes under `/dev` are ignored because the guest replaces that directory; FIFOs and special files outside `/dev` are unsupported.
 - A pull refuses more than 16 GiB of distinct blobs missing from the verified cache; larger fully cached images remain usable. The cap is fixed today; add an opt-in override if real uncached workloads require more.
 - Layer expansion has fixed per-layer and per-image-pass limits, but Rift does not enforce a filesystem free-space reservation or a wall-clock limit for extraction.
 - Registry TLS and content digests do not replace publisher signature verification. Registry-wide provider compatibility is not established.

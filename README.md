@@ -51,7 +51,7 @@ Rift forwards one TCP port per run. Detached containers keep their logs and stat
 
 ## What works
 
-- Pull public OCI images for `linux/arm64`; optional credentials support private Bearer-token registries.
+- Pull `linux/arm64` images from Docker Hub and Amazon ECR Public; optional credentials support private Bearer-token registries, verified against a local fixture.
 - Run foreground and detached containers with image entrypoint, command, environment, working directory, user, and supplementary groups.
 - Use outbound networking, DNS, one localhost port mapping, and explicit file or directory volumes.
 - Inspect and manage detached containers with `ps`, `inspect`, `logs`, non-interactive `exec`, `stop`, `kill`, and `rm`.
@@ -79,7 +79,7 @@ Host environment variables are not copied into containers. Volumes are read-only
 - Each pull is capped at 16 GiB of distinct image blobs not already verified in the local cache.
 - Each layer is capped at 8 GiB decompressed; all image layers together are capped at 32 GiB per extraction pass.
 - `exec` does not support interactive stdin or TTY allocation yet.
-- OCI file ownership, PAX `uid`/`gid` and global fields other than `mtime`, extended attributes, special files, and broader process isolation remain unsupported.
+- OCI file ownership, PAX `uid`/`gid` and global fields other than `mtime`, extended attributes, FIFOs, and special files outside `/dev` remain unsupported. Image device nodes under `/dev` are ignored because every container gets a fresh restricted `/dev`.
 - No Developer ID signature or notarized download yet. Build from source for now; do not use this preview as a Docker replacement.
 
 Treat images and workloads as untrusted. See the [threat model](docs/THREAT_MODEL.md) for current protections, assumptions, and open security review work.

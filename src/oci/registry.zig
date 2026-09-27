@@ -214,17 +214,17 @@ pub const Registry = struct {
         const challenge = parseBearerChallenge(raw_challenge) orelse return error.UnsupportedRegistryAuth;
         const expected_scope = try std.fmt.allocPrint(registry.allocator, "repository:{s}:pull", .{registry.repository});
         const scope = challenge.scope orelse expected_scope;
-        if (!std.mem.eql(u8, scope, expected_scope)) return error.UnsupportedRegistryAuth;
+        const scope_kind = authScopeKind(registry.registry, scope, expected_scope) orelse return error.UnsupportedRegistryAuth;
 
         const realm = try std.Uri.parse(challenge.realm);
         if (!allowedTokenRealm(realm, isLoopbackRegistry(registry.registry))) {
             return error.InsecureTokenRealm;
         }
         const token_url = try buildTokenUrl(registry.allocator, challenge.realm, challenge.service, scope);
-        const basic_authorization = if (registry.username) |username|
-            try buildBasicAuthorization(registry.allocator, username, registry.password.?)
-        else
-            null;
+        const basic_authorization = if (scope_kind == .repository) blk: {
+            if (registry.username) |username| break :blk try buildBasicAuthorization(registry.allocator, username, registry.password.?);
+            break :blk null;
+        } else null;
         defer if (basic_authorization) |value| {
             wipeSecret(value);
             registry.allocator.free(value);
@@ -359,6 +359,14 @@ const BearerChallenge = struct {
     service: ?[]const u8,
     scope: ?[]const u8,
 };
+
+const AuthScopeKind = enum { repository, public_ecr };
+
+fn authScopeKind(registry: []const u8, scope: []const u8, expected_scope: []const u8) ?AuthScopeKind {
+    if (std.mem.eql(u8, scope, expected_scope)) return .repository;
+    if (std.ascii.eqlIgnoreCase(registry, "public.ecr.aws") and std.mem.eql(u8, scope, "aws")) return .public_ecr;
+    return null;
+}
 
 pub fn parseBearerChallenge(input: []const u8) ?BearerChallenge {
     const text = std.mem.trim(u8, input, " \t");
@@ -581,6 +589,15 @@ test "parses anonymous bearer token challenges with quoted parameters" {
     try std.testing.expectEqualStrings("https://auth.example/token", challenge.realm);
     try std.testing.expectEqualStrings("registry.example", challenge.service.?);
     try std.testing.expectEqualStrings("repository:team/app:pull", challenge.scope.?);
+}
+
+test "supports ECR Public anonymous bearer scope without forwarding registry credentials" {
+    const challenge = parseBearerChallenge("Bearer realm=\"https://public.ecr.aws/token/\",service=\"public.ecr.aws\",scope=\"aws\"").?;
+    const expected_scope = "repository:amazonlinux/amazonlinux:pull";
+    try std.testing.expectEqual(AuthScopeKind.public_ecr, authScopeKind("public.ecr.aws", challenge.scope.?, expected_scope).?);
+    try std.testing.expectEqual(AuthScopeKind.repository, authScopeKind("registry.example", expected_scope, expected_scope).?);
+    try std.testing.expect(authScopeKind("registry.example", "aws", expected_scope) == null);
+    try std.testing.expect(authScopeKind("public.ecr.aws", "repository:someone/else:pull", expected_scope) == null);
 }
 
 test "rejects unsupported or malformed registry auth challenges" {
