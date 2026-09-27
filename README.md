@@ -46,6 +46,8 @@ zig build run -- system info
 
 GitHub Actions is disabled; run these checks locally. `zig-out/bin/rift` needs no Zig or Python at runtime. A fresh installation needs network access on the first `run` to fetch the verified Alpine guest boot files.
 
+For reproducible local size, startup, and host worker RSS measurements, run `zig build -Doptimize=ReleaseSafe benchmark` after pulling and running Alpine once. On one Apple M2 run, the signed binary was 1,500,192 bytes and five subsequent cached Alpine launches had a 1,028.8 ms median. See [the benchmark method and limits](docs/BENCHMARKS.md).
+
 To check the macOS VM bridge on Apple Silicon, prepare the pinned Alpine guest and run the local integration check:
 
 ```sh

@@ -63,6 +63,12 @@ pub fn build(b: *std.Build) void {
         check_detached.step.dependOn(&sign_exe.step);
         b.step("run-detached-check", "Start, inspect, stop, and remove a detached Alpine container").dependOn(&check_detached.step);
 
+        const benchmark = b.addSystemCommand(&.{"/usr/bin/python3"});
+        benchmark.addFileArg(b.path("scripts/benchmark.py"));
+        benchmark.addArg(exe_path);
+        benchmark.step.dependOn(&sign_exe.step);
+        b.step("benchmark", "Measure the signed Rift binary with cached Alpine").dependOn(&benchmark.step);
+
         const probe = b.addExecutable(.{
             .name = "rift-vm-probe",
             .root_module = b.createModule(.{
