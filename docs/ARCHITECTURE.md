@@ -12,6 +12,8 @@ The layer installer handles OCI tar, gzip, and zstd layers, including regular-fi
 
 Image character and block device entries below `/dev` are ignored because the guest replaces `/dev` with a fresh restricted tmpfs. Device entries elsewhere and FIFOs remain unsupported.
 
+The local process check verifies that a UID 0 workload sees `NoNewPrivs: 1` and cannot mount a new tmpfs.
+
 ## Runtime shape
 
 Linux containers need a Linux kernel. On macOS, Rift will run workloads inside a small Linux virtual machine managed by Apple's Virtualization.framework. The host CLI will own the VM lifecycle; the Linux guest will own container namespaces and process execution.

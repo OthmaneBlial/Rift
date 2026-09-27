@@ -60,6 +60,21 @@ def main() -> int:
             image_config["rootfs"]["diff_ids"].append(f"sha256:{digest}")
 
         env = dict(os.environ, HOME=home)
+        select_user("0:0")
+        no_new_privs = subprocess.run(
+            [binary, "run", "alpine", "/bin/busybox", "grep", "-q", "^NoNewPrivs:[[:space:]]*1$", "/proc/self/status"],
+            env=env, capture_output=True, text=True, timeout=60,
+        )
+        if no_new_privs.returncode != 0:
+            raise RuntimeError(f"container root did not inherit no_new_privs: {no_new_privs!r}")
+        mount_attempt = subprocess.run(
+            [binary, "run", "alpine", "/bin/busybox", "sh", "-c", "mkdir -p /tmp/rift-mount-check && /bin/busybox mount -t tmpfs tmpfs /tmp/rift-mount-check"],
+            env=env, capture_output=True, text=True, timeout=60,
+        )
+        mount_output = (mount_attempt.stdout + mount_attempt.stderr).lower()
+        if mount_attempt.returncode == 0 or not ("permission denied" in mount_output or "operation not permitted" in mount_output):
+            raise RuntimeError(f"container root was not denied a new filesystem mount: {mount_attempt!r}")
+
         select_user("1000:1000")
         cases = (
             (["run", "alpine", "/bin/pwd"], "/tmp"),
@@ -151,7 +166,7 @@ def main() -> int:
             raise RuntimeError(f"fixture still contains a working shell: {removed_shell!r}")
         if list((data / "runtime").iterdir()):
             raise RuntimeError("process settings run left runtime staging behind")
-    print("Rift process and ownership check passed: users, groups, OCI-owned files, writable /tmp, shell-free image")
+    print("Rift process and ownership check passed: no_new_privs, root mount denial, users, groups, OCI ownership, writable /tmp, shell-free image")
     return 0
 
 

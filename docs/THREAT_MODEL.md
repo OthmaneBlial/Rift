@@ -32,6 +32,8 @@ Untrusted inputs include registry challenges and responses, image indexes and ma
 - **Networking:** Guest networking uses Apple's NAT attachment. Rift forwards at most one requested TCP port and binds the host listener to `127.0.0.1`. This limits remote network exposure; other processes on the same Mac can still connect to that local port.
 - **Guest assets and control:** The first-run Alpine ISO, kernel, and initramfs are pinned and checked with SHA-256. Guest control files use a separate VirtioFS share outside the container root. `rift exec` accepts a bounded NUL-delimited request and starts it in the existing container namespaces and filesystem.
 
+The local `run-process-check` verifies that a UID 0 workload sees `NoNewPrivs: 1` and cannot mount a new tmpfs. This checks those two controls only; it is not an adversarial VM-escape test.
+
 ## Known limits and review status
 
 - There is no user namespace, seccomp filter, configurable capability profile, or complete OCI resource-control implementation. UID 0 in a workload is root in the guest's initial user namespace, with the fixed reduced capability set above; the VM remains the host boundary.
