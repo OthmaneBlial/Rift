@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#f1efe8">
+    <meta name="description" content="Rift pulls OCI images and runs Linux containers on Apple Silicon Macs with Zig and Apple's Virtualization.framework.">
+    <link rel="canonical" href="https://othmaneblial.github.io/Rift/">
+    <meta property="og:type" content="website">
+    <meta property="og:title" content="Rift — Linux containers for macOS">
+    <meta property="og:description" content="A small Zig runtime that pulls OCI images and runs Linux containers in disposable macOS VMs.">
+    <meta property="og:url" content="https://othmaneblial.github.io/Rift/">
+    <title>Rift — Linux containers for macOS</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Barlow+Semi+Condensed:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="styles.css">
+    <script src="app.js" defer></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#main">Skip to content</a>
+    <header class="topbar">
+      <a class="brand" href="#top" aria-label="Rift home">
+        <svg class="brand-mark" viewBox="0 0 34 34" aria-hidden="true">
+          <path d="M7 4h20L17 15h10L7 30l5-11H4L7 4Z" fill="currentColor"/>
+        </svg>
+        <span>RIFT<span class="brand-period">.</span></span>
+      </a>
+      <span class="topbar-note">A small Linux runtime for macOS</span>
+      <nav aria-label="Main navigation">
+        <a href="#how-it-works">How it works</a>
+        <a href="#build">Build</a>
+        <a class="nav-github" href="https://github.com/OthmaneBlial/Rift" target="_blank" rel="noreferrer">GitHub <span aria-hidden="true">↗</span></a>
+      </nav>
+    </header>
+
+    <main id="main">
+      <section class="hero section-wrap" id="top">
+        <div class="hero-copy">
+          <p class="eyebrow"><span class="status-dot"></span> OPEN SOURCE · APPLE SILICON · ZIG</p>
+          <h1>Linux containers.<br><span>At home on macOS.</span></h1>
+          <p class="hero-lede">Rift pulls OCI images and runs them in lightweight Linux VMs managed by Apple’s Virtualization.framework. No Docker installation. No permanent daemon.</p>
+          <div class="hero-actions">
+            <a class="button button-dark" href="https://github.com/OthmaneBlial/Rift" target="_blank" rel="noreferrer">Explore the source <span aria-hidden="true">↗</span></a>
+            <a class="text-link" href="#build">Build it locally <span aria-hidden="true">↓</span></a>
+          </div>
+          <p class="hero-note">Early preview · Builds from source · macOS · Apple Silicon</p>
+        </div>
+
+        <div class="terminal-card" aria-label="Example Rift session">
+          <div class="terminal-topline">
+            <div class="window-dots" aria-hidden="true"><i></i><i></i><i></i></div>
+            <span>local / rift</span>
+            <span class="terminal-tag">CHECKED</span>
+          </div>
+          <div class="terminal-body">
+            <p class="terminal-comment"># pull an OCI image directly</p>
+            <p><span class="prompt">$</span> rift pull alpine</p>
+            <p class="terminal-result">linux/arm64 · digest verified</p>
+            <p class="terminal-comment terminal-gap"># run a command in Linux</p>
+            <p><span class="prompt">$</span> rift run --rm alpine echo hello</p>
+            <p class="terminal-output">hello</p>
+            <p class="terminal-cursor" aria-hidden="true"><span></span></p>
+          </div>
+          <div class="terminal-foot"><span>REAL IMAGE · REAL VM</span><span>NO DOCKER CLI</span></div>
+        </div>
+        <div class="hero-index" aria-hidden="true">01 / 04</div>
+      </section>
+
+      <section class="spec-strip" aria-label="Runtime configuration">
+        <div class="spec-item"><span class="spec-value">256 <small>MiB</small></span><span class="spec-label">Guest memory configured per VM</span></div>
+        <div class="spec-item"><span class="spec-value">2 <small>vCPU</small></span><span class="spec-label">Guest processors configured per VM</span></div>
+        <div class="spec-item"><span class="spec-value">1 <small>port</small></span><span class="spec-label">Localhost TCP mapping per run</span></div>
+        <p class="spec-caveat">Configuration values; total host resource use varies. <a href="https://github.com/OthmaneBlial/Rift/blob/main/docs/BENCHMARKS.md">See benchmark method ↗</a></p>
+      </section>
+
+      <section class="architecture section-wrap" id="how-it-works">
+        <div class="section-heading">
+          <p class="eyebrow">02 / UNDER THE SURFACE</p>
+          <h2>One command.<br><span>One disposable Linux VM.</span></h2>
+          <p>macOS supplies the virtualization layer. Rift assembles a read-only image root, adds a temporary writable layer, then shuts down the guest when the command finishes.</p>
+        </div>
+        <div class="architecture-map" role="img" aria-label="Rift CLI on macOS starts a Linux guest VM with a read-only OCI root filesystem and temporary writable overlay">
+          <div class="map-host">
+            <div class="map-host-label"><span class="map-symbol">⌘</span><span>macOS host</span><span class="map-small">RIFT · ZIG</span></div>
+            <div class="map-command"><span>rift run alpine</span><span class="map-arrow">→</span><span>Virtualization.framework</span></div>
+          </div>
+          <div class="map-connector"><span></span><small>direct boot</small><span></span></div>
+          <div class="map-guest">
+            <div class="map-guest-label"><span class="guest-chip">LINUX GUEST</span><span>private namespaces</span></div>
+            <div class="map-filesystems">
+              <div class="filesystem fs-image"><span class="fs-mark">RO</span><strong>OCI root</strong><small>VirtioFS share</small></div>
+              <span class="fs-plus">+</span>
+              <div class="filesystem fs-overlay"><span class="fs-mark">RW</span><strong>tmpfs overlay</strong><small>discarded at exit</small></div>
+            </div>
+            <div class="map-exec"><span class="exec-pulse"></span><span>container process</span><code>PID · mount · chroot</code></div>
+          </div>
+          <div class="map-caption"><span>NO SHARED DAEMON</span><span>NO HOST PATHS UNLESS MOUNTED</span></div>
+        </div>
+      </section>
+
+      <section class="capabilities section-wrap">
+        <div class="cap-head">
+          <p class="eyebrow">03 / WHAT WORKS TODAY</p>
+          <h2>A real runtime,<br><span>with its edges in view.</span></h2>
+        </div>
+        <div class="cap-grid">
+          <article class="cap-item"><span class="cap-number">A</span><div><h3>OCI, direct from registries</h3><p>ARM64 manifest selection, Bearer auth, verified blobs and local image storage.</p></div></article>
+          <article class="cap-item"><span class="cap-number">B</span><div><h3>Linux process execution</h3><p>Entrypoint, command, environment, working directory, user and groups; private PID and mount namespaces.</p></div></article>
+          <article class="cap-item"><span class="cap-number">C</span><div><h3>Networking and shares</h3><p>Outbound networking, one localhost TCP port, and explicit read-only or writable file and directory volumes.</p></div></article>
+          <article class="cap-item"><span class="cap-number">D</span><div><h3>Detached lifecycle</h3><p>Run, list containers, read logs, stop or kill a container, and reclaim unreferenced image data.</p></div></article>
+        </div>
+        <div class="scope-note"><span class="scope-mark">!</span><p><strong>Early-stage software.</strong> OCI ownership, PAX metadata, extended attributes, special files and broader process isolation are still incomplete. Rift is not a Docker replacement yet.</p><a href="https://github.com/OthmaneBlial/Rift#status">Full status ↗</a></div>
+      </section>
+
+      <section class="build-section" id="build">
+        <div class="build-inner section-wrap">
+          <div class="build-copy">
+            <p class="eyebrow">04 / TRY THE SOURCE BUILD</p>
+            <h2>Make the binary<br><span>on your Mac.</span></h2>
+            <p>Rift is written in Zig. A public Developer ID signed and notarized download is not available yet, so the supported path is a local build.</p>
+            <a class="text-link light-link" href="https://github.com/OthmaneBlial/Rift/blob/main/README.md">Read the full build notes <span aria-hidden="true">↗</span></a>
+          </div>
+          <div class="code-card">
+            <div class="code-head"><span>TERMINAL</span><button class="copy-button" type="button" data-copy="build-commands" aria-label="Copy build commands">Copy</button></div>
+            <pre id="build-commands"><code>brew install zig
+git clone https://github.com/OthmaneBlial/Rift.git
+cd Rift
+zig build -Doptimize=ReleaseSafe
+mkdir -p "$HOME/.local/bin"
+install -m 755 zig-out/bin/rift "$HOME/.local/bin/rift"</code></pre>
+            <div class="code-foot"><span>ZIG 0.16.0+</span><span>APPLE SILICON · macOS</span></div>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <footer class="footer section-wrap">
+      <a class="brand footer-brand" href="#top">
+        <svg class="brand-mark" viewBox="0 0 34 34" aria-hidden="true"><path d="M7 4h20L17 15h10L7 30l5-11H4L7 4Z" fill="currentColor"/></svg>
+        <span>RIFT<span class="brand-period">.</span></span>
+      </a>
+      <p>Small runtime. Real Linux. Still being built.</p>
+      <nav aria-label="Footer navigation">
+        <a href="https://github.com/OthmaneBlial/Rift">Source</a>
+        <a href="https://github.com/OthmaneBlial/Rift/blob/main/docs/ARCHITECTURE.md">Architecture</a>
+        <a href="https://github.com/OthmaneBlial/Rift/blob/main/LICENSE">Apache 2.0</a>
+      </nav>
+      <span class="footer-mark">RIFT / 2026</span>
+      <p class="copy-status" aria-live="polite"></p>
+    </footer>
+  </body>
+</html>
