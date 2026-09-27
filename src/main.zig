@@ -9,6 +9,7 @@ const reference = @import("oci/reference.zig");
 const storage = @import("storage.zig");
 const registry = @import("oci/registry.zig");
 const runtime = @import("run.zig");
+const containers = @import("containers.zig");
 
 fn printHelp(writer: *Io.Writer) Io.Writer.Error!void {
     try writer.writeAll(
@@ -20,7 +21,11 @@ fn printHelp(writer: *Io.Writer) Io.Writer.Error!void {
             "  system info        Show host information\n" ++
             "  images             List locally pulled images\n" ++
             "  pull <image>       Pull an OCI image for this host\n" ++
-            "  run [--rm] [-p HOST:GUEST] <image> [command] [args...] Run a pulled image\n",
+            "  run [-d] [--rm] [-p HOST:GUEST] <image> [command] [args...] Run a pulled image\n" ++
+            "  ps                 List detached containers\n" ++
+            "  logs <id>          Show a detached container's output\n" ++
+            "  stop <id>          Stop a detached container\n" ++
+            "  rm <id>            Remove a stopped container\n",
     );
 }
 
@@ -58,7 +63,31 @@ fn dispatch(args: []const []const u8, writer: *Io.Writer, init: ?std.process.Ini
     }
 
     if (args.len > 0 and std.mem.eql(u8, args[0], "run")) {
-        return runtime.execute(init orelse return error.CommandUnavailable, args[1..]);
+        if (args.len > 1 and std.mem.eql(u8, args[1], "-d")) {
+            try containers.spawn(init orelse return error.CommandUnavailable, args[2..], writer);
+            return 0;
+        }
+        return runtime.execute(init orelse return error.CommandUnavailable, args[1..], null);
+    }
+
+    if (args.len == 1 and std.mem.eql(u8, args[0], "ps")) {
+        try containers.list(init orelse return error.CommandUnavailable, writer);
+        return 0;
+    }
+    if (args.len == 2 and std.mem.eql(u8, args[0], "logs")) {
+        try containers.logs(init orelse return error.CommandUnavailable, args[1], writer);
+        return 0;
+    }
+    if (args.len == 2 and std.mem.eql(u8, args[0], "stop")) {
+        try containers.stop(init orelse return error.CommandUnavailable, args[1], writer);
+        return 0;
+    }
+    if (args.len == 2 and std.mem.eql(u8, args[0], "rm")) {
+        try containers.remove(init orelse return error.CommandUnavailable, args[1], writer);
+        return 0;
+    }
+    if (args.len >= 2 and std.mem.eql(u8, args[0], "_worker")) {
+        return containers.worker(init orelse return error.CommandUnavailable, args[1], args[2..]);
     }
 
     return error.CommandUnavailable;
@@ -158,6 +187,12 @@ pub fn main(init: std.process.Init) void {
             error.GuestAssetsCorrupt => std.debug.print("rift: guest assets failed SHA-256 verification\n", .{}),
             error.GuestStatusMissing, error.GuestStatusInvalid => std.debug.print("rift: guest did not report a valid exit status\n", .{}),
             error.HostPortUnavailable => std.debug.print("rift: requested localhost port is unavailable\n", .{}),
+            error.InvalidContainerId => std.debug.print("rift: invalid container ID\n", .{}),
+            error.ContainerNotFound => std.debug.print("rift: container not found\n", .{}),
+            error.ContainerNotRunning => std.debug.print("rift: container is not running\n", .{}),
+            error.ContainerRunning => std.debug.print("rift: stop the container before removing it\n", .{}),
+            error.ContainerStopTimedOut => std.debug.print("rift: timed out waiting for the container to stop\n", .{}),
+            error.DetachedAutoRemoveUnsupported => std.debug.print("rift: --rm is not available with detached runs yet\n", .{}),
             error.InvalidImageConfig => std.debug.print("rift: image configuration is invalid or mismatches its layers\n", .{}),
             error.ImageHasNoCommand => std.debug.print("rift: image has no default command; specify one after the image\n", .{}),
             error.UnsupportedImageUser => std.debug.print("rift: this image requests a non-root user, which is not supported yet\n", .{}),
@@ -209,5 +244,6 @@ test {
     _ = @import("oci/rootfs.zig");
     _ = @import("oci/config.zig");
     _ = @import("guest.zig");
+    _ = @import("containers.zig");
     _ = @import("storage.zig");
 }

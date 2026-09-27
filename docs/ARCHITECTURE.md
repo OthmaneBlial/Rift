@@ -2,11 +2,11 @@
 
 ## Current state
 
-`help`, `version`, `system info`, public `pull`, `images`, and a basic foreground `run` work. Pull downloads and verifies OCI metadata and blobs for the host architecture, then records the resolved reference locally. `run` currently requires a previously pulled image on Apple Silicon. It applies image entrypoint, command, and environment defaults. Images requesting a non-root user or working directory other than `/` are rejected until those settings can be honored. Outbound NAT, DNS, and one localhost TCP port mapping work; volumes and detached containers remain unfinished.
+`help`, `version`, `system info`, public `pull`, `images`, foreground and detached `run`, `ps`, `logs`, `stop`, and `rm` work. Pull downloads and verifies OCI metadata and blobs for the host architecture, then records the resolved reference locally. `run` currently requires a previously pulled image on Apple Silicon. It applies image entrypoint, command, and environment defaults. Images requesting a non-root user or working directory other than `/` are rejected until those settings can be honored. Outbound NAT, DNS, and one localhost TCP port mapping work; volumes remain unfinished.
 
 Rift's Zig/Objective-C VM bridge boots an Alpine ARM64 kernel and initramfs to a shell, runs a command, and shuts down through the local `zig build vm-check` gate. `scripts/prepare_guest.py` reproduces those guest files from a pinned, SHA-256-verified Alpine ISO. Alpine packages its ARM64 kernel as a compressed EFI zboot image; the script extracts the uncompressed `Image` needed for direct boot. `rift run` uses verified copies installed under the user's Application Support directory.
 
-The layer installer handles OCI tar, gzip, and zstd layers, including regular-file hardlinks. It applies whiteouts before entries from the same layer and refuses archive paths or parent symlinks that could redirect host writes. Root filesystem assembly reads a verified platform manifest, checks each cached layer digest and size again, and applies layers to a private staging directory. Rift exposes that directory read-only through VirtioFS. The guest mounts a writable tmpfs overlay above it, obtains a DHCP lease on a Virtualization.framework NAT adapter, copies DNS settings into the overlay, executes the command with `chroot`, writes an exit status to a separate disposable control share, and powers off. The CLI relays console output and returns that status. For `-p`, a host TCP listener on `127.0.0.1` forwards one port to the DHCP address reported by the guest. Local checks have proved output, exit code 37, shell argument quoting, normal temporary directory cleanup, a DNS lookup from pulled Alpine, and an HTTP 200 nginx welcome page through the forwarded port. Complete OCI ownership, directory modes, timestamps, extended attributes, and special files remain unfinished.
+The layer installer handles OCI tar, gzip, and zstd layers, including regular-file hardlinks. It applies whiteouts before entries from the same layer and refuses archive paths or parent symlinks that could redirect host writes. Root filesystem assembly reads a verified platform manifest, checks each cached layer digest and size again, and applies layers to a private staging directory. Rift exposes that directory read-only through VirtioFS. The guest mounts a writable tmpfs overlay above it, obtains a DHCP lease on a Virtualization.framework NAT adapter, copies DNS settings into the overlay, executes the command with `chroot`, writes an exit status to a separate disposable control share, and powers off. The CLI relays console output and returns that status. For `-p`, a host TCP listener on `127.0.0.1` forwards one port to the DHCP address reported by the guest. Detached runs spawn one background Rift process with a private state directory, a file lock for liveness, plain output logs, and a stop request file. `stop` currently forces the VM off, then normal host cleanup runs. Local checks have proved output, exit code 37, shell argument quoting, normal temporary directory cleanup, a DNS lookup from pulled Alpine, an HTTP 200 nginx welcome page through the forwarded port, and detached lifecycle commands. Complete OCI ownership, directory modes, timestamps, extended attributes, and special files remain unfinished.
 
 ## Runtime shape
 
@@ -34,7 +34,7 @@ Image downloads and guest execution are separate steps. A pull alone does not pr
 
 ## Process model
 
-Foreground commands own their VM for the duration of the command. A detached container needs a process to keep its VM alive. The current proposal is one host process per running VM, with state files for discovery and control; Rift should not require a shared, always-on daemon. This lifecycle still needs a working prototype before the CLI promises detached containers.
+Foreground commands own their VM for the duration of the command. A detached container has one host process that owns its VM, with state files for discovery and stop requests. A file lock tracks whether that process is still alive without relying on a reused PID. Rift does not require a shared, always-on daemon. Detached state and logs remain until `rift rm`.
 
 Warm VM reuse is a measured optimization, not a prerequisite for correctness. Any reuse must preserve workload isolation and provide explicit shutdown and cleanup behavior.
 
@@ -63,6 +63,6 @@ Boot time, memory, binary size, image storage, and cleanup behavior will be meas
 3. **Done:** Public registry pulls, authentication, and local image metadata.
 4. Initial secure image layer extraction, regular-file hardlinks, and image listing; image removal remains.
 5. A bootable Linux guest and a minimal command result path, proven locally.
-6. One real Alpine command through the public CLI, followed by full OCI process settings, lifecycle, logs, and cleanup.
+6. Alpine and nginx run through the public CLI; basic detached lifecycle and plain logs work. Full OCI process settings and broader cleanup remain.
 7. Outbound networking and one localhost TCP port mapping are proven locally; explicit volumes remain.
 8. Reproducible runtime benchmarks and signed release distribution.

@@ -57,6 +57,12 @@ pub fn build(b: *std.Build) void {
         check_port.step.dependOn(&sign_exe.step);
         b.step("run-port-check", "Forward a localhost port to a pulled Alpine container").dependOn(&check_port.step);
 
+        const check_detached = b.addSystemCommand(&.{"/usr/bin/python3"});
+        check_detached.addFileArg(b.path("scripts/check_detached.py"));
+        check_detached.addArg(exe_path);
+        check_detached.step.dependOn(&sign_exe.step);
+        b.step("run-detached-check", "Start, inspect, stop, and remove a detached Alpine container").dependOn(&check_detached.step);
+
         const probe = b.addExecutable(.{
             .name = "rift-vm-probe",
             .root_module = b.createModule(.{

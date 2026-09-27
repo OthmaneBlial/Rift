@@ -12,20 +12,11 @@ const vm = @import("vm.zig");
 const kernel_sha256 = "e698a107e4d04117db1a7b0daee99bdae5f0647fba2af50f3cd020a666950ab9";
 const initramfs_sha256 = "5b9de8ff7b4f3055f6cf940e1ff869790415cf81b7ea1e399ee60448bc1a2c4d";
 
-pub fn execute(init: std.process.Init, arguments: []const []const u8) !u8 {
+pub fn execute(init: std.process.Init, arguments: []const []const u8, stop_path: ?[]const u8) !u8 {
     if (builtin.os.tag != .macos or builtin.cpu.arch != .aarch64) return error.UnsupportedHost;
-    var offset: usize = 0;
-    var port: ?vm.PortMapping = null;
-    while (offset < arguments.len) {
-        if (std.mem.eql(u8, arguments[offset], "--rm")) {
-            offset += 1;
-        } else if (std.mem.eql(u8, arguments[offset], "-p")) {
-            if (port != null or offset + 1 >= arguments.len) return error.InvalidArguments;
-            port = try parsePort(arguments[offset + 1]);
-            offset += 2;
-        } else break;
-    }
-    if (arguments.len < offset + 1) return error.InvalidArguments;
+    const options = try parseOptions(arguments);
+    const offset = options.image_index;
+    const port = options.port;
     const allocator = init.arena.allocator();
     var image = try reference.parse(allocator, arguments[offset]);
     defer image.deinit(allocator);
@@ -104,7 +95,7 @@ pub fn execute(init: std.process.Init, arguments: []const []const u8) !u8 {
     const kernel_path = try std.fmt.allocPrint(allocator, "{s}/Image", .{guest_path});
     const initramfs_path = try std.fmt.allocPrint(allocator, "{s}/initramfs", .{run_path});
 
-    try vm.run(allocator, kernel_path, initramfs_path, "console=hvc0 quiet loglevel=0 rdinit=/rift-init", root_path, control_path, true, port, 0, 1);
+    try vm.run(allocator, kernel_path, initramfs_path, "console=hvc0 quiet loglevel=0 rdinit=/rift-init", root_path, control_path, stop_path, true, port, 0, 1);
     const status_file = control.openFile(init.io, "exit", .{ .mode = .read_only, .allow_directory = false, .follow_symlinks = false }) catch |err| switch (err) {
         error.FileNotFound => return error.GuestStatusMissing,
         else => return err,
@@ -119,6 +110,27 @@ pub fn execute(init: std.process.Init, arguments: []const []const u8) !u8 {
     const code = std.fmt.parseInt(u16, std.mem.trim(u8, status_buffer[0..@intCast(status_size)], "\r\n"), 10) catch return error.GuestStatusInvalid;
     if (code > 255) return error.GuestStatusInvalid;
     return @intCast(code);
+}
+
+pub const Options = struct { image_index: usize, port: ?vm.PortMapping, remove_after_exit: bool };
+
+pub fn parseOptions(arguments: []const []const u8) !Options {
+    var offset: usize = 0;
+    var port: ?vm.PortMapping = null;
+    var remove_after_exit = false;
+    while (offset < arguments.len) {
+        if (std.mem.eql(u8, arguments[offset], "--rm")) {
+            if (remove_after_exit) return error.InvalidArguments;
+            remove_after_exit = true;
+            offset += 1;
+        } else if (std.mem.eql(u8, arguments[offset], "-p")) {
+            if (port != null or offset + 1 >= arguments.len) return error.InvalidArguments;
+            port = try parsePort(arguments[offset + 1]);
+            offset += 2;
+        } else break;
+    }
+    if (arguments.len < offset + 1) return error.InvalidArguments;
+    return .{ .image_index = offset, .port = port, .remove_after_exit = remove_after_exit };
 }
 
 fn parsePort(text: []const u8) !vm.PortMapping {

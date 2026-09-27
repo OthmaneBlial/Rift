@@ -2,6 +2,7 @@
 #import <Virtualization/Virtualization.h>
 #include <stdio.h>
 #include <stdint.h>
+#include <unistd.h>
 
 typedef struct RiftForwarder RiftForwarder;
 extern RiftForwarder *rift_forward_start(const char *control_path, uint16_t host_port, uint16_t guest_port);
@@ -26,7 +27,7 @@ extern void rift_forward_stop(RiftForwarder *forwarder);
 @end
 
 int rift_vm_run(const char *kernel_path, const char *initramfs_path, const char *command_line,
-                const char *share_path, const char *control_path, int network_enabled,
+                const char *share_path, const char *control_path, const char *stop_path, int network_enabled,
                 int host_port, int guest_port, int input_fd, int output_fd) {
     @autoreleasepool {
         if (![NSThread isMainThread] || ![VZVirtualMachine isSupported]) return 2;
@@ -104,12 +105,25 @@ int rift_vm_run(const char *kernel_path, const char *initramfs_path, const char 
                 delegate.result = 1;
             }
         }];
+        BOOL stopRequested = NO;
+        __block BOOL stopFailed = NO;
         while (!delegate.finished) {
+            if (stop_path && !stopRequested && access(stop_path, F_OK) == 0 && machine.state == VZVirtualMachineStateRunning) {
+                stopRequested = YES;
+                [machine stopWithCompletionHandler:^(NSError *stop_error) {
+                    if (stop_error) {
+                        fprintf(stderr, "rift-vm: stop failed: %s\n", stop_error.description.UTF8String);
+                        stopFailed = YES;
+                    }
+                    delegate.finished = YES;
+                    delegate.result = stop_error ? 1 : 0;
+                }];
+            }
             [[NSRunLoop mainRunLoop] runMode:NSDefaultRunLoopMode
                                  beforeDate:[NSDate dateWithTimeIntervalSinceNow:0.1]];
         }
         machine.delegate = nil;
         rift_forward_stop(forwarder);
-        return delegate.result;
+        return stopRequested && !stopFailed && delegate.result == 0 ? 4 : delegate.result;
     }
 }

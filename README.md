@@ -4,7 +4,7 @@
 
 **No Docker, daemon, or Docker Desktop. One binary is the distribution target.**
 
-Rift is an early-stage Zig container runtime for Apple Silicon Macs. It can pull public OCI images and run a command in a short-lived Linux VM. The current build needs separately installed, verified guest boot files. Outbound networking and one localhost TCP port mapping work; volumes and detached containers remain unfinished.
+Rift is an early-stage Zig container runtime for Apple Silicon Macs. It pulls public OCI images and runs commands in Linux VMs, including detached servers with one localhost TCP port mapping. The current build needs separately installed, verified guest boot files. Volumes and complete OCI process isolation remain unfinished.
 
 ## Current commands
 
@@ -16,10 +16,14 @@ rift pull alpine
 rift images
 rift run --rm alpine echo hello
 rift pull nginx
-rift run -p 8080:80 nginx
+rift run -d -p 8080:80 nginx
+rift ps
+rift logs <container-id>
+rift stop <container-id>
+rift rm <container-id>
 ```
 
-Image pulls use anonymous registry access and save SHA-256-verified OCI blobs and reference metadata under `~/Library/Application Support/Rift`. `run` requires an image pulled earlier, including `nginx` in the example above. It uses the image's `Entrypoint`, `Cmd`, and `Env` defaults, or your command arguments. Each run gets a disposable writable overlay inside its own Linux VM. `-p` accepts one `HOST:GUEST` TCP mapping bound to `127.0.0.1`. Images requesting a non-root user or working directory other than `/` are rejected for now. Private registry credentials are not implemented.
+Image pulls use anonymous registry access and save SHA-256-verified OCI blobs and reference metadata under `~/Library/Application Support/Rift`. `run` requires an image pulled earlier, including `nginx` in the example above. It uses the image's `Entrypoint`, `Cmd`, and `Env` defaults, or your command arguments. Each run gets a disposable writable overlay inside its own Linux VM. `-p` accepts one `HOST:GUEST` TCP mapping bound to `127.0.0.1`. `run -d` starts one background Rift process per VM and prints its container ID. `stop` currently forces the VM off; `--rm` is unavailable with `-d`. Images requesting a non-root user or working directory other than `/` are rejected for now. Private registry credentials are not implemented.
 
 ## Build
 
@@ -34,6 +38,7 @@ zig build run -- pull alpine
 zig build run-check
 zig build run-network-check
 zig build run-port-check
+zig build run-detached-check
 zig build run -- system info
 ```
 
@@ -49,7 +54,7 @@ zig build vm-network-check
 zig build oci-vm-check
 ```
 
-These checks boot Alpine, mount a read-only host directory, obtain a guest DHCP lease, and run `/bin/echo` from a pulled Alpine root filesystem inside the VM. Run `rift pull alpine` before `oci-vm-check`, `run-check`, `run-network-check`, or `run-port-check`. The DNS check requires external DNS access.
+These checks boot Alpine, mount a read-only host directory, obtain a guest DHCP lease, and run `/bin/echo` from a pulled Alpine root filesystem inside the VM. Run `rift pull alpine` before `oci-vm-check`, `run-check`, `run-network-check`, `run-port-check`, or `run-detached-check`. The DNS check requires external DNS access.
 
 To assemble a pulled Alpine root filesystem locally, use the manifest digest shown by `rift images`:
 
@@ -61,7 +66,7 @@ zig run src/rootfs_probe.zig -- "$HOME/Library/Application Support/Rift" sha256:
 
 macOS uses a Linux VM to run Linux containers. Rift is being designed around Apple's Virtualization.framework, an OCI image store, and a small Linux guest agent. See [the architecture](docs/ARCHITECTURE.md) for the proposed boundaries, execution path, security constraints, and current status.
 
-No Docker Engine, Docker CLI, Docker Desktop, or container daemon is part of the design. A detached container will need a process to own its VM; the plan is one process per VM, without a shared always-on manager.
+No Docker Engine, Docker CLI, Docker Desktop, or container daemon is part of the design. Each detached container has one background Rift process that owns its VM; there is no shared always-on manager.
 
 ## Status
 
@@ -82,9 +87,10 @@ No Docker Engine, Docker CLI, Docker Desktop, or container daemon is part of the
 - [ ] Non-root user and non-root working directory support
 - [x] Outbound NAT and DNS for foreground commands
 - [x] One localhost TCP port mapping for foreground commands
-- [ ] Detached lifecycle, structured logs, volumes, and broader cleanup
+- [x] Detached run, process listing, plain logs, stop, and remove
+- [ ] Structured logs, volumes, and broader cleanup
 
-Each `run` is temporary on normal completion, including runs without `--rm`. The CLI relays console output and returns the guest command's exit status. Local checks have served the nginx welcome page over a forwarded localhost port. Interrupting a run can leave temporary staging until cleanup is implemented. There is no release artifact yet. Do not use Rift as a Docker replacement today.
+Foreground runs remove their temporary state on normal completion, including runs without `--rm`. Detached runs keep their logs and status until `rift rm`; the VM and temporary root filesystem are removed on stop or exit. Local checks have served the nginx welcome page over a forwarded localhost port, including with `run -d`. Interrupting a foreground run can leave temporary staging until cleanup is implemented. There is no release artifact yet. Do not use Rift as a Docker replacement today.
 
 ## License
 
