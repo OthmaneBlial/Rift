@@ -48,7 +48,7 @@ Rift forwards one TCP port per run. Detached containers keep their logs and stat
 
 ## What works
 
-- Pull `linux/arm64` images from Docker Hub and Amazon ECR Public; optional credentials support private Bearer-token registries, verified against a local fixture.
+- Pull `linux/arm64` images from Docker Hub, Amazon ECR Public, and `registry.k8s.io`; optional credentials support private Bearer-token registries, verified against a local fixture.
 - Run foreground and detached containers with image entrypoint, command, environment, working directory, user, and supplementary groups.
 - Use outbound networking, DNS, one localhost port mapping, and explicit file or directory volumes.
 - Inspect and manage detached containers with `ps`, `inspect`, `logs`, non-interactive `exec`, `stop`, `kill`, and `rm`.
