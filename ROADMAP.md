@@ -100,7 +100,7 @@ This roadmap carries the original plan forward from the first project commit. `[
 ## 7. Ship a straightforward public release
 
 - [ ] Sign and notarize macOS binaries; publish release assets and checksums.
-- [ ] Provide a simple signed install and upgrade path, including Homebrew distribution.
+- [x] Provide a Homebrew source-build install path for Apple Silicon; verify clean-HOME installation and use without Docker.
 - [ ] Refresh and verify the GitHub Pages site when all roadmap work is complete.
 
 Rift remains an early source preview. Local checks do not establish registry-wide compatibility, a complete Docker replacement, or a signed and notarized release.
