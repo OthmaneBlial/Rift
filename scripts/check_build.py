@@ -52,8 +52,33 @@ def main() -> int:
         repeated_digest = repeated_build.stdout.split(" (")[0].rsplit(" ", 1)[-1]
         if digest != repeated_digest:
             raise RuntimeError(f"same Dockerfile produced different image digests: {digest} != {repeated_digest}")
+
+        config_context = Path(home) / "config-context"
+        config_context.mkdir()
+        (config_context / "Dockerfile").write_text(
+            r'''FROM alpine
+ENV RIFT_BUILD_MESSAGE="hello world"
+USER 65534
+WORKDIR /tmp
+WORKDIR /tmp/rift-build-work/
+ENTRYPOINT ["/bin/sh", "-c"]
+CMD ["printf '%s|%s|%s|%s\\n' \"$RIFT_BUILD_MESSAGE\" \"$(pwd)\" \"$(id -u)\" \"$(/bin/stat -c %a /tmp)\""]
+'''
+        )
+        config_build = call(binary, env, "build", "-t", "rift-build-config:local", str(config_context))
+        if config_build.returncode != 0 or "Built " not in config_build.stdout:
+            raise RuntimeError(f"image config build failed: {config_build!r}")
+        config_run = call(binary, env, "run", "--rm", "rift-build-config:local")
+        if config_run.returncode != 0 or config_run.stdout != "hello world|/tmp/rift-build-work|65534|1777\n":
+            raise RuntimeError(f"built image process configuration was not applied: {config_run!r}")
+
         listed = call(binary, env, "images")
-        if listed.returncode != 0 or "rift-build-check:local" not in listed.stdout or "rift-build-repeat:local" not in listed.stdout:
+        if (
+            listed.returncode != 0
+            or "rift-build-check:local" not in listed.stdout
+            or "rift-build-repeat:local" not in listed.stdout
+            or "rift-build-config:local" not in listed.stdout
+        ):
             raise RuntimeError(f"built image was not recorded: {listed!r}")
         run = call(
             binary,
@@ -82,7 +107,7 @@ def main() -> int:
         invalid_context.mkdir()
         (invalid_context / "Dockerfile").write_text("FROM alpine\nRUN false\n")
         rejected = call(binary, env, "build", "-t", "rift-build-rejected:local", str(invalid_context))
-        if rejected.returncode == 0 or "file or directory COPY instructions only" not in rejected.stderr:
+        if rejected.returncode == 0 or "supported build instructions are one FROM" not in rejected.stderr:
             raise RuntimeError(f"unsupported Dockerfile instruction was not clearly rejected: {rejected!r}")
 
         ignore_context = Path(home) / "ignore-context"
@@ -121,11 +146,14 @@ def main() -> int:
         removed_repeat = call(binary, env, "rmi", "rift-build-repeat:local")
         if removed_repeat.returncode != 0:
             raise RuntimeError(f"repeated image cleanup failed: {removed_repeat!r}")
+        removed_config = call(binary, env, "rmi", "rift-build-config:local")
+        if removed_config.returncode != 0:
+            raise RuntimeError(f"configured image cleanup failed: {removed_config!r}")
         runtime = data / "runtime"
         if runtime.exists() and any(runtime.iterdir()):
             raise RuntimeError("image build or run left runtime staging behind")
 
-    print("Rift build check passed: reproducible OCI image build, file and directory COPY, VM execution, safe rejection, and cleanup")
+    print("Rift build check passed: reproducible OCI layers, COPY and process config, VM execution, safe rejection, and cleanup")
     return 0
 
 

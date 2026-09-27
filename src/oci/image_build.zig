@@ -14,10 +14,35 @@ const copy_depth_limit = 128;
 
 pub const Copy = struct { source: []const u8, target: []const u8, target_is_directory: bool };
 
+pub const BuildConfig = struct {
+    env: []const []const u8 = &.{},
+    user: ?[]const u8 = null,
+    working_dir: ?[]const u8 = null,
+    entrypoint: ?[]const []const u8 = null,
+    cmd: ?[]const []const u8 = null,
+};
+
 pub const Plan = struct {
     context_path: []const u8,
     base_reference: []const u8,
     copies: []const Copy,
+    config: BuildConfig,
+
+    pub fn deinit(self: Plan, allocator: std.mem.Allocator) void {
+        allocator.free(self.context_path);
+        allocator.free(self.base_reference);
+        for (self.copies) |copy| {
+            allocator.free(copy.source);
+            allocator.free(copy.target);
+        }
+        allocator.free(self.copies);
+        for (self.config.env) |entry| allocator.free(entry);
+        allocator.free(self.config.env);
+        if (self.config.user) |value| allocator.free(value);
+        if (self.config.working_dir) |value| allocator.free(value);
+        if (self.config.entrypoint) |value| freeArguments(allocator, value);
+        if (self.config.cmd) |value| freeArguments(allocator, value);
+    }
 };
 
 pub const Result = struct { digest: []const u8, layer_count: usize };
@@ -98,6 +123,20 @@ pub fn parseDockerfile(allocator: std.mem.Allocator, context_path: []const u8, b
         }
         copies.deinit(allocator);
     }
+    var environment: std.ArrayList([]const u8) = .empty;
+    errdefer {
+        for (environment.items) |entry| allocator.free(entry);
+        environment.deinit(allocator);
+    }
+    var user: ?[]const u8 = null;
+    errdefer if (user) |value| allocator.free(value);
+    var working_dir: ?[]const u8 = null;
+    errdefer if (working_dir) |value| allocator.free(value);
+    var entrypoint: ?[]const []const u8 = null;
+    errdefer if (entrypoint) |value| freeArguments(allocator, value);
+    var command: ?[]const []const u8 = null;
+    errdefer if (command) |value| freeArguments(allocator, value);
+
     var lines = std.mem.splitScalar(u8, body, '\n');
     while (lines.next()) |raw_line| {
         const line = std.mem.trim(u8, raw_line, " \t\r");
@@ -133,19 +172,171 @@ pub fn parseDockerfile(allocator: std.mem.Allocator, context_path: []const u8, b
                 allocator.free(target);
                 return err;
             };
+        } else if (std.ascii.eqlIgnoreCase(instruction, "ENV")) {
+            if (base_reference == null) return error.InvalidDockerfile;
+            var found_assignment = false;
+            while (try nextEnvironmentAssignment(allocator, line, &offset)) |assignment| {
+                found_assignment = true;
+                const key = environmentKey(assignment);
+                var replaced = false;
+                for (environment.items) |*existing| {
+                    if (!std.mem.eql(u8, environmentKey(existing.*), key)) continue;
+                    allocator.free(existing.*);
+                    existing.* = assignment;
+                    replaced = true;
+                    break;
+                }
+                if (!replaced) {
+                    environment.append(allocator, assignment) catch |err| {
+                        allocator.free(assignment);
+                        return err;
+                    };
+                }
+            }
+            if (!found_assignment) return error.InvalidDockerfile;
+        } else if (std.ascii.eqlIgnoreCase(instruction, "USER")) {
+            if (base_reference == null) return error.InvalidDockerfile;
+            const value = try nextWord(line, &offset) orelse return error.InvalidDockerfile;
+            if (try nextWord(line, &offset) != null) return error.InvalidDockerfile;
+            const owned = try allocator.dupe(u8, value);
+            if (user) |previous| allocator.free(previous);
+            user = owned;
+        } else if (std.ascii.eqlIgnoreCase(instruction, "WORKDIR")) {
+            if (base_reference == null) return error.InvalidDockerfile;
+            const raw_path = try nextWord(line, &offset) orelse return error.InvalidDockerfile;
+            if (try nextWord(line, &offset) != null) return error.InvalidDockerfile;
+            const path = normalizeWorkingDirectory(raw_path) orelse return error.UnsupportedBuildWorkingDirectory;
+            const config_path = try allocator.dupe(u8, path);
+            if (working_dir) |previous| allocator.free(previous);
+            working_dir = config_path;
+        } else if (std.ascii.eqlIgnoreCase(instruction, "ENTRYPOINT")) {
+            if (base_reference == null) return error.InvalidDockerfile;
+            const value = try parseCommand(allocator, line[offset..]) orelse return error.InvalidDockerfile;
+            if (entrypoint) |previous| freeArguments(allocator, previous);
+            entrypoint = value;
+        } else if (std.ascii.eqlIgnoreCase(instruction, "CMD")) {
+            if (base_reference == null) return error.InvalidDockerfile;
+            const value = try parseCommand(allocator, line[offset..]) orelse return error.InvalidDockerfile;
+            if (command) |previous| freeArguments(allocator, previous);
+            command = value;
         } else {
             return error.UnsupportedDockerfileInstruction;
         }
     }
-    if (base_reference == null or copies.items.len == 0) return error.InvalidDockerfile;
+    if (base_reference == null) return error.InvalidDockerfile;
     const owned_context_path = try allocator.dupe(u8, context_path);
     errdefer allocator.free(owned_context_path);
     const owned_copies = try copies.toOwnedSlice(allocator);
+    errdefer {
+        for (owned_copies) |copy| {
+            allocator.free(copy.source);
+            allocator.free(copy.target);
+        }
+        allocator.free(owned_copies);
+    }
+    const owned_environment = try environment.toOwnedSlice(allocator);
+    errdefer {
+        for (owned_environment) |entry| allocator.free(entry);
+        allocator.free(owned_environment);
+    }
     return .{
         .context_path = owned_context_path,
         .base_reference = base_reference.?,
         .copies = owned_copies,
+        .config = .{
+            .env = owned_environment,
+            .user = user,
+            .working_dir = working_dir,
+            .entrypoint = entrypoint,
+            .cmd = command,
+        },
     };
+}
+
+fn freeArguments(allocator: std.mem.Allocator, arguments: []const []const u8) void {
+    for (arguments) |argument| allocator.free(argument);
+    allocator.free(arguments);
+}
+
+fn environmentKey(assignment: []const u8) []const u8 {
+    return assignment[0..std.mem.indexOfScalar(u8, assignment, '=').?];
+}
+
+fn nextEnvironmentAssignment(allocator: std.mem.Allocator, line: []const u8, offset: *usize) !?[]const u8 {
+    while (offset.* < line.len and (line[offset.*] == ' ' or line[offset.*] == '\t')) : (offset.* += 1) {}
+    if (offset.* == line.len) return null;
+
+    var value: std.ArrayList(u8) = .empty;
+    errdefer value.deinit(allocator);
+    var quote: u8 = 0;
+    while (offset.* < line.len) : (offset.* += 1) {
+        const character = line[offset.*];
+        if (quote == 0 and (character == ' ' or character == '\t')) break;
+        if (character == '\'' or character == '"') {
+            if (quote == 0) {
+                quote = character;
+                continue;
+            }
+            if (quote == character) {
+                quote = 0;
+                continue;
+            }
+        }
+        try value.append(allocator, character);
+    }
+    if (quote != 0) return error.InvalidDockerfile;
+    const assignment = try value.toOwnedSlice(allocator);
+    errdefer allocator.free(assignment);
+    const separator = std.mem.indexOfScalar(u8, assignment, '=') orelse return error.InvalidDockerfile;
+    if (!validEnvironmentKey(assignment[0..separator])) return error.InvalidDockerfile;
+    return assignment;
+}
+
+fn validEnvironmentKey(key: []const u8) bool {
+    if (key.len == 0 or !std.ascii.isAlphabetic(key[0]) and key[0] != '_') return false;
+    for (key[1..]) |character| {
+        if (!std.ascii.isAlphanumeric(character) and character != '_') return false;
+    }
+    return true;
+}
+
+fn normalizeWorkingDirectory(path: []const u8) ?[]const u8 {
+    if (path.len == 0 or path[0] != '/') return null;
+    if (std.mem.eql(u8, path, "/")) return path;
+    var end = path.len;
+    while (end > 1 and path[end - 1] == '/') : (end -= 1) {}
+    const normalized = path[0..end];
+    return if (validTarget(normalized)) normalized else null;
+}
+
+fn parseCommand(allocator: std.mem.Allocator, raw: []const u8) !?[]const []const u8 {
+    const value = std.mem.trim(u8, raw, " \t\r");
+    if (value.len == 0) return null;
+    if (value[0] == '[') {
+        var arena = std.heap.ArenaAllocator.init(allocator);
+        defer arena.deinit();
+        const parsed = std.json.parseFromSliceLeaky([]const []const u8, arena.allocator(), value, .{}) catch return error.InvalidDockerfile;
+        const result = try allocator.alloc([]const u8, parsed.len);
+        var copied: usize = 0;
+        errdefer {
+            for (result[0..copied]) |argument| allocator.free(argument);
+            allocator.free(result);
+        }
+        for (parsed) |argument| {
+            if (std.mem.indexOfScalar(u8, argument, 0) != null) return error.InvalidDockerfile;
+            result[copied] = try allocator.dupe(u8, argument);
+            copied += 1;
+        }
+        return result;
+    }
+    const result = try allocator.alloc([]const u8, 3);
+    errdefer allocator.free(result);
+    result[0] = try allocator.dupe(u8, "/bin/sh");
+    errdefer allocator.free(result[0]);
+    result[1] = try allocator.dupe(u8, "-c");
+    errdefer allocator.free(result[1]);
+    result[2] = try allocator.dupe(u8, value);
+    return result;
 }
 
 pub fn build(
@@ -216,7 +407,7 @@ pub fn build(
     const base_config_body = try store.readVerifiedAlloc(scratch, base_manifest.config.digest, 4 * 1024 * 1024);
     if (base_config_body.len != base_manifest.config.size) return error.InvalidImageConfig;
     _ = try config.parse(scratch, base_config_body, base_manifest.layers.len);
-    const new_config = try appendDiffId(scratch, base_config_body, layer_digest);
+    const new_config = try appendDiffId(scratch, base_config_body, layer_digest, plan.config);
     const config_descriptor = try storeBytes(allocator, store, "application/vnd.oci.image.config.v1+json", new_config);
 
     var layers: std.ArrayList(manifest.Descriptor) = .empty;
@@ -514,14 +705,65 @@ fn storeBytes(allocator: std.mem.Allocator, store: storage.BlobStore, media_type
     return .{ .mediaType = media_type, .digest = digest, .size = body.len };
 }
 
-fn appendDiffId(allocator: std.mem.Allocator, body: []const u8, digest: []const u8) ![]u8 {
+fn appendDiffId(allocator: std.mem.Allocator, body: []const u8, digest: []const u8, changes: BuildConfig) ![]u8 {
     var image = try std.json.parseFromSliceLeaky(std.json.Value, allocator, body, .{});
     if (image != .object) return error.InvalidImageConfig;
+
+    var image_config: *std.json.Value = undefined;
+    if (image.object.getPtr("config")) |existing| {
+        image_config = existing;
+    } else {
+        try image.object.put(allocator, "config", .{ .object = .{} });
+        image_config = image.object.getPtr("config").?;
+    }
+    if (image_config.* == .null) image_config.* = .{ .object = .{} };
+    if (image_config.* != .object) return error.InvalidImageConfig;
+
     const rootfs = image.object.getPtr("rootfs") orelse return error.InvalidImageConfig;
     if (rootfs.* != .object) return error.InvalidImageConfig;
     const diff_ids = rootfs.object.getPtr("diff_ids") orelse return error.InvalidImageConfig;
     if (diff_ids.* != .array) return error.InvalidImageConfig;
     try diff_ids.array.append(.{ .string = digest });
+
+    if (changes.env.len != 0) {
+        var environment: std.ArrayList([]const u8) = .empty;
+        defer environment.deinit(allocator);
+        if (image_config.object.get("Env")) |existing| {
+            if (existing == .array) {
+                for (existing.array.items) |entry| {
+                    if (entry != .string) return error.InvalidImageConfig;
+                    try environment.append(allocator, entry.string);
+                }
+            } else if (existing != .null) return error.InvalidImageConfig;
+        }
+        for (changes.env) |assignment| {
+            const key = environmentKey(assignment);
+            var index: usize = 0;
+            while (index < environment.items.len) {
+                if (std.mem.eql(u8, environmentKey(environment.items[index]), key)) {
+                    _ = environment.orderedRemove(index);
+                } else {
+                    index += 1;
+                }
+            }
+            try environment.append(allocator, assignment);
+        }
+        var values = std.json.Array.init(allocator);
+        for (environment.items) |entry| try values.append(.{ .string = entry });
+        try image_config.object.put(allocator, "Env", .{ .array = values });
+    }
+    if (changes.user) |value| try image_config.object.put(allocator, "User", .{ .string = value });
+    if (changes.working_dir) |value| try image_config.object.put(allocator, "WorkingDir", .{ .string = value });
+    if (changes.entrypoint) |value| {
+        var arguments = std.json.Array.init(allocator);
+        for (value) |argument| try arguments.append(.{ .string = argument });
+        try image_config.object.put(allocator, "Entrypoint", .{ .array = arguments });
+    }
+    if (changes.cmd) |value| {
+        var arguments = std.json.Array.init(allocator);
+        for (value) |argument| try arguments.append(.{ .string = argument });
+        try image_config.object.put(allocator, "Cmd", .{ .array = arguments });
+    }
     return std.json.Stringify.valueAlloc(allocator, image, .{});
 }
 
@@ -572,15 +814,7 @@ fn validTarget(path: []const u8) bool {
 
 test "parses a single-base Dockerfile with quoted local file copies" {
     const plan = try parseDockerfile(std.testing.allocator, "/tmp/context", "FROM alpine:3.21\nCOPY 'hello world' /app/hello\nCOPY folder/ /opt/app/\n");
-    defer std.testing.allocator.free(plan.base_reference);
-    defer std.testing.allocator.free(plan.context_path);
-    defer {
-        for (plan.copies) |copy| {
-            std.testing.allocator.free(copy.source);
-            std.testing.allocator.free(copy.target);
-        }
-        std.testing.allocator.free(plan.copies);
-    }
+    defer plan.deinit(std.testing.allocator);
     try std.testing.expectEqualStrings("registry-1.docker.io/library/alpine:3.21", plan.base_reference);
     try std.testing.expectEqual(@as(usize, 2), plan.copies.len);
     try std.testing.expectEqualStrings("hello world", plan.copies[0].source);
@@ -590,9 +824,59 @@ test "parses a single-base Dockerfile with quoted local file copies" {
     try std.testing.expect(plan.copies[1].target_is_directory);
 }
 
+test "parses and owns common process config instructions" {
+    var plan = try parseDockerfile(
+        std.testing.allocator,
+        "/tmp/context",
+        "FROM alpine\nENV BUILD_MESSAGE=\"hello world\" BUILD_MODE=preview\nENV BUILD_MODE=local\nUSER 65534\nWORKDIR /tmp/rift-app/\nENTRYPOINT [\"/bin/sh\",\"-c\"]\nCMD [\"printf '%s:%s:%s\\\\n' \\\"$BUILD_MESSAGE\\\" \\\"$PWD\\\" \\\"$(id -u)\\\"\"]\n",
+    );
+    defer plan.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 0), plan.copies.len);
+    try std.testing.expectEqualStrings("BUILD_MESSAGE=hello world", plan.config.env[0]);
+    try std.testing.expectEqualStrings("BUILD_MODE=local", plan.config.env[1]);
+    try std.testing.expectEqualStrings("65534", plan.config.user.?);
+    try std.testing.expectEqualStrings("/tmp/rift-app", plan.config.working_dir.?);
+    try std.testing.expectEqualStrings("/bin/sh", plan.config.entrypoint.?[0]);
+    try std.testing.expectEqualStrings("-c", plan.config.entrypoint.?[1]);
+    try std.testing.expectEqual(@as(usize, 1), plan.config.cmd.?.len);
+}
+
+test "applies build process settings while preserving base image config" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const body =
+        \\{"architecture":"arm64","os":"linux","config":{"Env":["PATH=/bin","BUILD_MODE=base"],"Labels":{"example":"kept"}},"rootfs":{"type":"layers","diff_ids":[]}}
+    ;
+    const changes: BuildConfig = .{
+        .env = &.{ "BUILD_MODE=local", "BUILD_MESSAGE=hello" },
+        .user = "65534",
+        .working_dir = "/tmp/rift-app",
+        .entrypoint = &.{ "/bin/sh", "-c" },
+        .cmd = &.{"printf ready"},
+    };
+    const updated = try appendDiffId(arena.allocator(), body, "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", changes);
+    const image = try config.parse(arena.allocator(), updated, 1);
+    const process = image.config.?;
+    try std.testing.expectEqualStrings("65534", process.User.?);
+    try std.testing.expectEqualStrings("/tmp/rift-app", process.WorkingDir.?);
+    try std.testing.expectEqualStrings("/bin/sh", process.Entrypoint.?[0]);
+    try std.testing.expectEqualStrings("printf ready", process.Cmd.?[0]);
+    try std.testing.expectEqual(@as(usize, 3), process.Env.?.len);
+    try std.testing.expectEqualStrings("PATH=/bin", process.Env.?[0]);
+    try std.testing.expectEqualStrings("BUILD_MODE=local", process.Env.?[1]);
+    try std.testing.expectEqualStrings("BUILD_MESSAGE=hello", process.Env.?[2]);
+
+    const dynamic = try std.json.parseFromSliceLeaky(std.json.Value, arena.allocator(), updated, .{});
+    const config_value = dynamic.object.get("config").?.object;
+    try std.testing.expectEqualStrings("kept", config_value.get("Labels").?.object.get("example").?.string);
+}
+
 test "rejects unsupported instructions, stages, and unsafe paths" {
     try std.testing.expectError(error.UnsupportedDockerfileInstruction, parseDockerfile(std.testing.allocator, "/tmp", "FROM alpine\nRUN echo unsafe\nCOPY a /a\n"));
     try std.testing.expectError(error.UnsupportedBuildStages, parseDockerfile(std.testing.allocator, "/tmp", "FROM alpine\nFROM alpine\nCOPY a /a\n"));
     try std.testing.expectError(error.InvalidBuildSource, parseDockerfile(std.testing.allocator, "/tmp", "FROM alpine\nCOPY ../secret /secret\n"));
     try std.testing.expectError(error.InvalidBuildTarget, parseDockerfile(std.testing.allocator, "/tmp", "FROM alpine\nCOPY file /../../secret\n"));
+    try std.testing.expectError(error.UnsupportedBuildWorkingDirectory, parseDockerfile(std.testing.allocator, "/tmp", "FROM alpine\nWORKDIR relative\n"));
+    try std.testing.expectError(error.InvalidDockerfile, parseDockerfile(std.testing.allocator, "/tmp", "FROM alpine\nENV broken\n"));
+    try std.testing.expectError(error.InvalidDockerfile, parseDockerfile(std.testing.allocator, "/tmp", "FROM alpine\nCMD [1]\n"));
 }

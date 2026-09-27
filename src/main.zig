@@ -25,7 +25,7 @@ fn printHelp(writer: *Io.Writer) Io.Writer.Error!void {
             "  clean [--yes]      Preview or remove stale staging and unused image blobs\n" ++
             "  images             List locally pulled images\n" ++
             "  pull <image>       Pull an OCI image for this host\n" ++
-            "  build -t IMAGE [context] Build a Dockerfile (one FROM; regular-file COPY)\n" ++
+            "  build -t IMAGE [context] Build an OCI image from a Dockerfile\n" ++
             "  rmi <image>        Remove a local image reference\n" ++
             "  run [options] <image> [command] [args...] Run in the foreground\n" ++
             "  run -d [options] <image> [command] [args...] Run detached\n" ++
@@ -286,7 +286,8 @@ fn parseBuildArguments(arguments: []const []const u8) !BuildArguments {
 fn buildImage(init: std.process.Init, options: BuildArguments, writer: *Io.Writer) !void {
     if (builtin.os.tag != .macos or builtin.cpu.arch != .aarch64) return error.UnsupportedHost;
     const allocator = init.arena.allocator();
-    const plan = try image_build.readPlan(allocator, init.io, options.context);
+    var plan = try image_build.readPlan(allocator, init.io, options.context);
+    defer plan.deinit(allocator);
     var output_image = reference.parse(allocator, options.tag) catch return error.InvalidBuildTag;
     defer output_image.deinit(allocator);
     if (output_image.digest != null) return error.InvalidBuildTag;
@@ -470,10 +471,11 @@ pub fn main(init: std.process.Init) void {
             error.InvalidBuildArguments, error.InvalidBuildTag => std.debug.print("rift: build syntax is 'rift build -t IMAGE [context]'\n", .{}),
             error.InvalidBuildContext => std.debug.print("rift: build context must contain a readable Dockerfile\n", .{}),
             error.UnsupportedDockerIgnore => std.debug.print("rift: .dockerignore files are not supported by this build preview\n", .{}),
-            error.InvalidDockerfile => std.debug.print("rift: invalid Dockerfile; expected FROM and one or more COPY instructions\n", .{}),
-            error.UnsupportedDockerfileInstruction, error.UnsupportedBuildStages, error.UnsupportedCopyForm => std.debug.print("rift: this build preview supports one FROM and file or directory COPY instructions only\n", .{}),
+            error.InvalidDockerfile => std.debug.print("rift: invalid Dockerfile; check its instructions and JSON command arrays\n", .{}),
+            error.UnsupportedDockerfileInstruction, error.UnsupportedBuildStages, error.UnsupportedCopyForm => std.debug.print("rift: supported build instructions are one FROM, COPY, ENV, USER, WORKDIR, ENTRYPOINT, and CMD\n", .{}),
             error.InvalidBuildSource => std.debug.print("rift: COPY accepts regular files and directories inside the build context; links and special files are unsupported\n", .{}),
             error.InvalidBuildTarget => std.debug.print("rift: COPY target must be an absolute path without . or .. components\n", .{}),
+            error.UnsupportedBuildWorkingDirectory => std.debug.print("rift: WORKDIR must be an absolute path without . or .. components\n", .{}),
             error.UnsupportedBuildDirectoryPermissions => std.debug.print("rift: copied directories must be readable and searchable by their owner\n", .{}),
             error.BuildTooManyEntries => std.debug.print("rift: build context exceeds the 100,000-entry, 64 MiB path-list, or 128-directory-depth limit\n", .{}),
             error.BuildLayerTooLarge => std.debug.print("rift: built image layer exceeds the 8 GiB limit\n", .{}),
@@ -489,6 +491,7 @@ pub fn main(init: std.process.Init) void {
             err == error.InvalidBuildArguments or err == error.InvalidBuildTag or err == error.InvalidBuildContext or err == error.InvalidDockerfile or
             err == error.UnsupportedDockerIgnore or
             err == error.UnsupportedDockerfileInstruction or err == error.UnsupportedBuildStages or err == error.UnsupportedCopyForm or err == error.InvalidBuildSource or err == error.InvalidBuildTarget or
+            err == error.UnsupportedBuildWorkingDirectory or
             err == error.UnsupportedBuildDirectoryPermissions or err == error.BuildTooManyEntries) 2 else 1);
     };
     stdout.interface.flush() catch |err| {

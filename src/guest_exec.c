@@ -1053,6 +1053,42 @@ static int apply_image_ownership(const char *root_path) {
     return 0;
 }
 
+static int ensure_working_directory(const char *path) {
+    int directory = open("/", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (directory < 0) return -1;
+    char *components = strdup(path[0] == '/' ? path + 1 : path);
+    if (!components) {
+        close(directory);
+        return -1;
+    }
+
+    char *save = NULL;
+    for (char *component = strtok_r(components, "/", &save); component; component = strtok_r(NULL, "/", &save)) {
+        int created = mkdirat(directory, component, 0755) == 0;
+        if (!created && errno != EEXIST) goto failed;
+        int next = openat(directory, component, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+        if (next < 0) goto failed;
+        if (created && fchmod(next, 0755) != 0) {
+            close(next);
+            goto failed;
+        }
+        close(directory);
+        directory = next;
+    }
+
+    free(components);
+    close(directory);
+    return 0;
+
+failed: {
+        int saved_errno = errno;
+        free(components);
+        close(directory);
+        errno = saved_errno;
+        return -1;
+    }
+}
+
 static int run_container(char **argv, unsigned long volume_count, int ready_descriptor) {
     if (apply_image_ownership(argv[1]) != 0) return 125;
     if (chroot(argv[1]) != 0) return fail("chroot");
@@ -1070,6 +1106,7 @@ static int run_container(char **argv, unsigned long volume_count, int ready_desc
         if (status != 0) return status;
     }
     if (mount_standard_filesystems() != 0) return 125;
+    if (ensure_working_directory(argv[2]) != 0) return fail("create working directory");
     if (restrict_capabilities() != 0) return 125;
     if (username[0]) {
         if (initgroups(username, gid) != 0) return fail("set supplementary groups");
