@@ -74,10 +74,18 @@ static int numeric_id(const char *text, unsigned int *result) {
     return 1;
 }
 
-static int resolve_user(const char *spec, uid_t *uid, gid_t *gid) {
+static int resolve_user(const char *spec, uid_t *uid, gid_t *gid, char username[256]) {
     *uid = 0;
     *gid = 0;
-    if (!*spec) return 0;
+    username[0] = 0;
+    if (!*spec) {
+        struct passwd *entry = getpwuid(*uid);
+        if (!entry) return 0;
+        *gid = entry->pw_gid;
+        if (strlen(entry->pw_name) >= 256) return -1;
+        strcpy(username, entry->pw_name);
+        return 0;
+    }
     if (strlen(spec) > 255) return -1;
     char value[256];
     strcpy(value, spec);
@@ -86,20 +94,30 @@ static int resolve_user(const char *spec, uid_t *uid, gid_t *gid) {
         *group++ = 0;
         if (!*group || strchr(group, ':')) return -1;
     }
+    struct passwd *entry = NULL;
     if (*value && strcmp(value, "root") != 0) {
         unsigned int number;
         int numeric = numeric_id(value, &number);
         if (numeric < 0) return -1;
         if (numeric) {
             *uid = (uid_t)number;
+            entry = getpwuid(*uid);
+            if (entry) *gid = entry->pw_gid;
         } else {
-            struct passwd *entry = getpwnam(value);
+            entry = getpwnam(value);
             if (!entry) return -1;
             *uid = entry->pw_uid;
             *gid = entry->pw_gid;
         }
+    } else {
+        entry = getpwuid(*uid);
+        if (entry) *gid = entry->pw_gid;
     }
-    if (group && strcmp(group, "root") != 0) {
+    if (entry) {
+        if (strlen(entry->pw_name) >= 256) return -1;
+        strcpy(username, entry->pw_name);
+    }
+    if (group) {
         unsigned int number;
         int numeric = numeric_id(group, &number);
         if (numeric < 0) return -1;
@@ -332,7 +350,8 @@ static int run_container(char **argv, unsigned long volume_count) {
 
     uid_t uid;
     gid_t gid;
-    if (resolve_user(argv[3], &uid, &gid) != 0) {
+    char username[256];
+    if (resolve_user(argv[3], &uid, &gid, username) != 0) {
         fputs("rift-exec: image user or group was not found\n", stderr);
         return 125;
     }
@@ -342,7 +361,11 @@ static int run_container(char **argv, unsigned long volume_count) {
     }
     if (mount_standard_filesystems() != 0) return 125;
     if (restrict_capabilities() != 0) return 125;
-    if (setgroups(0, NULL) != 0) return fail("clear supplementary groups");
+    if (username[0]) {
+        if (initgroups(username, gid) != 0) return fail("set supplementary groups");
+    } else if (setgroups(0, NULL) != 0) {
+        return fail("clear supplementary groups");
+    }
     if (setgid(gid) != 0) return fail("setgid");
     if (setuid(uid) != 0) return fail("setuid");
     if (chdir(argv[2]) != 0) return fail("chdir working directory");

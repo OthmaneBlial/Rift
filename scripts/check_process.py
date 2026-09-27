@@ -53,6 +53,12 @@ def main() -> int:
             manifest_digest, _ = store_blob(blobs, manifest)
             record.write_text(f"v1\n{reference}\n{manifest_digest}\nlinux/arm64\n{len(manifest['layers'])}")
 
+        def append_layer(body: bytes) -> None:
+            digest = hashlib.sha256(body).hexdigest()
+            (blobs / digest).write_bytes(body)
+            manifest["layers"].append({"mediaType": "application/vnd.oci.image.layer.v1.tar", "digest": f"sha256:{digest}", "size": len(body)})
+            image_config["rootfs"]["diff_ids"].append(f"sha256:{digest}")
+
         env = dict(os.environ, HOME=home)
         select_user("1000:1000")
         cases = (
@@ -69,6 +75,26 @@ def main() -> int:
         named = subprocess.run([binary, "run", "alpine", "/bin/busybox", "id", "-u"], env=env, capture_output=True, text=True, timeout=60)
         if named.returncode != 0 or named.stdout.strip() != "65534":
             raise RuntimeError(f"named image user check failed: {named!r}")
+        select_user("65534")
+        numeric_user = subprocess.run([binary, "run", "alpine", "/bin/busybox", "id", "-g"], env=env, capture_output=True, text=True, timeout=60)
+        if numeric_user.returncode != 0 or numeric_user.stdout.strip() != "65534":
+            raise RuntimeError(f"numeric image user did not inherit its passwd primary group: {numeric_user!r}")
+        group_body = b"root:x:0:root\nnobody:x:65534:nobody\nrift-extra:x:1001:nobody\n"
+        group_archive = io.BytesIO()
+        with tarfile.open(fileobj=group_archive, mode="w") as layer:
+            entry = tarfile.TarInfo("etc/group")
+            entry.mode = 0o644
+            entry.size = len(group_body)
+            layer.addfile(entry, io.BytesIO(group_body))
+        append_layer(group_archive.getvalue())
+        select_user("nobody:root")
+        explicit_group = subprocess.run([binary, "run", "alpine", "/bin/busybox", "id", "-g"], env=env, capture_output=True, text=True, timeout=60)
+        if explicit_group.returncode != 0 or explicit_group.stdout.strip() != "0":
+            raise RuntimeError(f"explicit image group did not override the passwd primary group: {explicit_group!r}")
+        select_user("nobody:nobody")
+        supplementary = subprocess.run([binary, "run", "alpine", "/bin/busybox", "id", "-G"], env=env, capture_output=True, text=True, timeout=60)
+        if supplementary.returncode != 0 or "1001" not in supplementary.stdout.split():
+            raise RuntimeError(f"named image user's supplementary group was not applied: {supplementary!r}")
         writable_tmp = subprocess.run(
             [binary, "run", "alpine", "/bin/busybox", "sh", "-c", "touch /tmp/rift-user-write && test -f /tmp/rift-user-write && echo RIFT_TMP_WRITABLE"],
             env=env, capture_output=True, text=True, timeout=60,
@@ -83,11 +109,7 @@ def main() -> int:
         archive = io.BytesIO()
         with tarfile.open(fileobj=archive, mode="w") as layer:
             layer.addfile(tarfile.TarInfo("bin/.wh.sh"))
-        body = archive.getvalue()
-        digest = hashlib.sha256(body).hexdigest()
-        (blobs / digest).write_bytes(body)
-        manifest["layers"].append({"mediaType": "application/vnd.oci.image.layer.v1.tar", "digest": f"sha256:{digest}", "size": len(body)})
-        image_config["rootfs"]["diff_ids"].append(f"sha256:{digest}")
+        append_layer(archive.getvalue())
         select_user("1000:1000")
         shell_free = subprocess.run([binary, "run", "alpine", "/bin/pwd"], env=env, capture_output=True, text=True, timeout=60)
         if shell_free.returncode != 0 or shell_free.stdout.strip() != "/tmp":
