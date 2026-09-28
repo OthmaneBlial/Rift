@@ -29,12 +29,28 @@ def main() -> int:
         nested_output.mkdir()
         (source / "nested").mkdir()
         (source / "message").write_text("FROM_HOST\n")
+        (source / "inside-target").write_text("INSIDE_SHARE\n")
+        (source / "inside-link").symlink_to("inside-target")
+        outside_secret = Path(temporary) / "outside-secret"
+        outside_secret.write_text("HOST_ONLY_SECRET\n")
+        (source / "absolute-escape").symlink_to(outside_secret)
+        (source / "relative-escape").symlink_to("../outside-secret")
         file_source = Path(temporary) / "config with space"
         file_source.write_text("FILE_FROM_HOST\n")
 
         read = run(binary, "-v", f"{source}:/input", "alpine", "cat", "/input/message")
         if read.returncode != 0 or read.stdout.strip() != "FROM_HOST":
             raise RuntimeError(f"read-only volume was not readable: {read!r}")
+        linked_read = run(binary, "-v", f"{source}:/input", "alpine", "cat", "/input/inside-link")
+        if linked_read.returncode != 0 or linked_read.stdout.strip() != "INSIDE_SHARE":
+            raise RuntimeError(f"symlink inside directory volume was not readable: {linked_read!r}")
+        for link in ("absolute-escape", "relative-escape"):
+            escaped_read = run(binary, "-v", f"{source}:/input", "alpine", "cat", f"/input/{link}")
+            if "HOST_ONLY_SECRET" in escaped_read.stdout or "HOST_ONLY_SECRET" in escaped_read.stderr:
+                raise RuntimeError(f"directory volume symlink exposed a host file: {link}: {escaped_read!r}")
+            escaped_write = run(binary, "-v", f"{source}:/input:rw", "alpine", "sh", "-c", f"printf 'GUEST_WRITE\\n' > /input/{link}")
+            if outside_secret.read_text() != "HOST_ONLY_SECRET\n":
+                raise RuntimeError(f"directory volume symlink modified a host file: {link}: {escaped_write!r}")
         denied = run(binary, "-v", f"{source}:/input", "alpine", "sh", "-c", "echo changed > /input/message")
         if denied.returncode == 0 or (source / "message").read_text() != "FROM_HOST\n":
             raise RuntimeError(f"read-only volume was writable: {denied!r}")
@@ -117,7 +133,7 @@ def main() -> int:
     after = set(runtime.iterdir()) if runtime.exists() else set()
     if after != before:
         raise RuntimeError(f"volume runs left runtime staging behind: {after - before}")
-    print("Rift volume check passed: read-only and writable file/directory shares, nested mounts, detached, 16 shares, and symlink-target rejection")
+    print("Rift volume check passed: read-only/writable file and directory shares, symlink boundaries, nested mounts, detached, and 16 shares")
     return 0
 
 
