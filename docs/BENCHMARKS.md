@@ -48,6 +48,19 @@ Apple M2, macOS 26.6, `ReleaseSafe`, runtime commit `7e7480f`, three independent
 
 The detached-ready samples vary substantially even though VM control readiness stays near 0.43 seconds; this benchmark does not isolate the source of that later variation. Shutdown clusters near the guest script's one-second stop-file polling interval, plus guest and VM teardown. This is a three-sample baseline, not a cross-machine performance claim.
 
+## Graceful shutdown after stop-polling change
+
+Apple M2, macOS 26.6, `ReleaseSafe`, runtime commit `2d66fc8`, benchmark script commit `6f3acb3`; three independent invocations on 2026-09-28 between 07:08 and 07:11 UTC. The guest C executor checks for the stop file in its existing 50 ms control loop and forwards the configured stop signal; the init shell no longer starts a one-second polling watcher. The benchmark measures `rift stop` on a ready detached Alpine VM and excludes removal.
+
+| Sample | VM start to guest control ready | Detached run to ready | Graceful `rift stop` |
+| --- | ---: | ---: | ---: |
+| 1 | 429.592 ms | 952.7 ms | 322.9 ms |
+| 2 | 432.584 ms | 952.1 ms | 320.0 ms |
+| 3 | 426.504 ms | 929.5 ms | 319.8 ms |
+| Median | 429.592 ms | 952.1 ms | 320.0 ms |
+
+The graceful-stop median fell by 828.3 ms (72.1%) from the three-sample baseline above on this Mac. The result includes guest and Virtualization.framework teardown; it does not predict shutdown time on other Macs. VM startup behavior was not changed.
+
 ## Latest cached benchmark
 
 Apple M2, macOS 26.6, Zig 0.16.0, `ReleaseSafe`, runtime commit `3ad3b27`, benchmark script commit `fc4c3e5`, three runs from 2026-09-28 04:38:49 to 04:39:11 UTC. Each run used the same cached store:
