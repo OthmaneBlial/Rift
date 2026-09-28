@@ -88,7 +88,7 @@ This roadmap carries the original plan forward from the first project commit. `[
 - [x] Expose OCI root-directory xattrs at `/` by copying them into the private upper layer; verify in Alpine.
 - [x] Extract OCI FIFO entries as named pipes with preserved mode and ownership.
 - [ ] Support other special files outside runtime-managed `/dev`.
-- [ ] Reduce guest disk footprint and optimize startup and shutdown using measurements.
+- [ ] Reduce guest disk footprint and optimize startup and shutdown using measurements; networkless runs now skip the virtio-net module and DHCP setup.
 - [ ] Evaluate guest reuse while preserving workload isolation and cleanup.
 
 ## 6. Verify reliability, security, and performance
