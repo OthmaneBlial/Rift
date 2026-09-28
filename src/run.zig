@@ -258,8 +258,10 @@ pub fn resolveVolumes(init: std.process.Init, volumes: []const vm.Volume) ![]con
             .file => {
                 var file = Io.Dir.openFileAbsolute(init.io, volume.source, .{ .mode = .read_only, .allow_directory = false, .follow_symlinks = false }) catch return error.InvalidVolumeSource;
                 defer file.close(init.io);
+                const opened = try file.stat(init.io);
+                if (opened.kind != .file or opened.inode != info.inode) return error.InvalidVolumeSource;
                 const length = try file.realPath(init.io, &buffer);
-                resolved[index] = .{ .source = try allocator.dupe(u8, buffer[0..length]), .target = volume.target, .read_only = volume.read_only, .is_file = true };
+                resolved[index] = .{ .source = try allocator.dupe(u8, buffer[0..length]), .target = volume.target, .read_only = volume.read_only, .is_file = true, .file_inode = opened.inode };
             },
             else => return error.InvalidVolumeSource,
         }
@@ -280,6 +282,12 @@ pub fn resolveVolumes(init: std.process.Init, volumes: []const vm.Volume) ![]con
 
 fn stageFileVolumes(allocator: std.mem.Allocator, io: Io, run_dir: Io.Dir, volumes: []const vm.Volume) ![]const vm.Volume {
     const staged = try allocator.dupe(vm.Volume, volumes);
+    errdefer {
+        for (volumes, staged) |original, current| {
+            if (current.source.ptr != original.source.ptr) allocator.free(current.source);
+        }
+        allocator.free(staged);
+    }
     var has_file = false;
     for (volumes) |volume| has_file = has_file or volume.is_file;
     if (!has_file) return staged;
@@ -289,12 +297,18 @@ fn stageFileVolumes(allocator: std.mem.Allocator, io: Io, run_dir: Io.Dir, volum
     defer root.close(io);
     for (volumes, 0..) |volume, index| {
         if (!volume.is_file) continue;
+        const expected_inode = volume.file_inode orelse return error.InvalidVolumeSource;
+        var source_file = Io.Dir.openFileAbsolute(io, volume.source, .{ .mode = .read_only, .allow_directory = false, .follow_symlinks = false }) catch return error.InvalidVolumeSource;
+        defer source_file.close(io);
+        const source_info = source_file.stat(io) catch return error.InvalidVolumeSource;
+        if (source_info.kind != .file or source_info.inode != expected_inode) return error.InvalidVolumeSource;
         const separator = std.mem.lastIndexOfScalar(u8, volume.source, '/') orelse return error.InvalidVolumeSource;
         const parent_path = if (separator == 0) "/" else volume.source[0..separator];
         const basename = volume.source[separator + 1 ..];
         var source_dir = try Io.Dir.openDirAbsolute(io, parent_path, .{ .follow_symlinks = false });
         defer source_dir.close(io);
         const stage_name = try std.fmt.allocPrint(allocator, "{d}", .{index});
+        defer allocator.free(stage_name);
         try root.createDir(io, stage_name, .fromMode(0o700));
         var share = try root.openDir(io, stage_name, .{ .follow_symlinks = false });
         defer share.close(io);
@@ -302,6 +316,8 @@ fn stageFileVolumes(allocator: std.mem.Allocator, io: Io, run_dir: Io.Dir, volum
             error.CrossDevice, error.OperationUnsupported => return error.FileVolumeMustShareFilesystem,
             else => return err,
         };
+        const staged_info = share.statFile(io, "source", .{ .follow_symlinks = false }) catch return error.InvalidVolumeSource;
+        if (staged_info.kind != .file or staged_info.inode != expected_inode) return error.InvalidVolumeSource;
         var buffer: [Io.Dir.max_path_bytes]u8 = undefined;
         const length = try share.realPath(io, &buffer);
         staged[index].source = try allocator.dupe(u8, buffer[0..length]);
@@ -430,4 +446,34 @@ test "volume paths and modes are explicit" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     try std.testing.expectError(error.DuplicateVolumeTarget, parseOptions(arena.allocator(), &.{ "-v", "/tmp/a:/data", "-v", "/tmp/b:/data", "alpine" }));
+}
+
+test "file-volume staging rejects a source replaced by a symlink" {
+    const io = std.testing.io;
+    var temp = std.testing.tmpDir(.{});
+    defer temp.cleanup();
+    try temp.dir.createDir(io, "run", .fromMode(0o700));
+    try temp.dir.writeFile(io, .{ .sub_path = "source", .data = "selected" });
+    try temp.dir.writeFile(io, .{ .sub_path = "secret", .data = "outside" });
+    var selected_file = try temp.dir.openFile(io, "source", .{ .mode = .read_only, .follow_symlinks = false });
+    defer selected_file.close(io);
+    const selected = try selected_file.stat(io);
+    try temp.dir.deleteFile(io, "source");
+    try temp.dir.symLink(io, "secret", "source", .{});
+
+    var root_path_buffer: [Io.Dir.max_path_bytes]u8 = undefined;
+    const root_path = root_path_buffer[0..try temp.dir.realPath(io, &root_path_buffer)];
+    const source_path = try std.fmt.allocPrint(std.testing.allocator, "{s}/source", .{root_path});
+    defer std.testing.allocator.free(source_path);
+    var run_dir = try temp.dir.openDir(io, "run", .{});
+    defer run_dir.close(io);
+    const volumes = [_]vm.Volume{.{ .source = source_path, .target = "/input", .read_only = true, .is_file = true, .file_inode = selected.inode }};
+    try std.testing.expectError(error.InvalidVolumeSource, stageFileVolumes(std.testing.allocator, io, run_dir, &volumes));
+
+    try temp.dir.deleteFile(io, "source");
+    try temp.dir.writeFile(io, .{ .sub_path = "source", .data = "replacement" });
+    try temp.dir.createDir(io, "run-again", .fromMode(0o700));
+    var run_again = try temp.dir.openDir(io, "run-again", .{});
+    defer run_again.close(io);
+    try std.testing.expectError(error.InvalidVolumeSource, stageFileVolumes(std.testing.allocator, io, run_again, &volumes));
 }

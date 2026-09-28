@@ -29,7 +29,7 @@ extern fn rift_vm_run(
 ) c_int;
 
 pub const PortMapping = struct { host: u16, guest: u16 };
-pub const Volume = struct { source: []const u8, target: []const u8, read_only: bool, is_file: bool = false };
+pub const Volume = struct { source: []const u8, target: []const u8, read_only: bool, is_file: bool = false, file_inode: ?std.Io.File.INode = null };
 
 pub fn validateResources(cpu_count: u16, memory_size: u64) !void {
     if (cpu_count == 0 or memory_size == 0 or memory_size % memory_granularity_bytes != 0) return error.InvalidVMResources;
