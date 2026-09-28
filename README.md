@@ -72,13 +72,15 @@ External base images are pulled automatically when needed. Directory copies are 
 
 Multi-stage builds can name stages with `FROM image AS name`, inherit a previous stage with `FROM name`, and copy files with `COPY --from=name` or its earlier stage index. Only the final stage receives the output tag.
 
+Detached containers honor image `StopSignal`. Dockerfile `STOPSIGNAL` accepts canonical Linux signal names or numbers; `SIGKILL`, `SIGSTOP`, and real-time signals are unsupported.
+
 ## What works
 
 - Pull `linux/arm64` images from Docker Hub, Amazon ECR Public, `registry.k8s.io`, GitHub Container Registry, Quay, and Google GCR. [Registry checks](docs/REGISTRIES.md) list the tested image samples; private Bearer-token support is verified against a local fixture.
 - Run foreground and detached containers with image entrypoint, command, environment, working directory, user, and supplementary groups.
 - Use outbound networking, DNS, one localhost port mapping, and explicit file or directory volumes.
 - Inspect and manage detached containers with `ps`, `inspect`, `logs`, `exec`, `stop`, `kill`, and `rm`. `exec -i` streams stdin; `exec -it` adds a resizable TTY and forwards SIGINT, SIGTERM, SIGHUP, and SIGQUIT.
-- Build OCI images from multiple `FROM` stages, file or directory `COPY` (including `COPY --from`), ordered single-line `RUN`, and the `ENV`, `USER`, `WORKDIR`, `ENTRYPOINT`, and `CMD` process settings. Each successful `RUN` squashes the prior filesystem into one layer. `.dockerignore`, globs, symlinks, special files, and other Dockerfile instructions remain unsupported.
+- Build OCI images from multiple `FROM` stages, file or directory `COPY` (including `COPY --from`), ordered single-line `RUN`, `STOPSIGNAL`, and the `ENV`, `USER`, `WORKDIR`, `ENTRYPOINT`, and `CMD` process settings. Each successful `RUN` squashes the prior filesystem into one layer. `.dockerignore`, globs, symlinks, special files, and other Dockerfile instructions remain unsupported.
 - Check storage with `system df` and preview or remove unused data with `clean`.
 
 For private registries, set `RIFT_REGISTRY_USERNAME` and `RIFT_REGISTRY_PASSWORD` for the pull. Rift does not store them.
@@ -118,7 +120,7 @@ The image and guest files were cached. Warm `exec` timing includes the host CLI,
 - Zig 0.16 or newer for manual source builds; Homebrew installs the build dependency automatically.
 - One lightweight Linux VM per run; the current guest limit is 2 CPUs and 256 MiB RAM.
 - One TCP port mapping per run; up to 16 explicit file or directory volumes.
-- `rift build` supports up to 128 stages, one source per `COPY` (from the local context or an earlier named or indexed stage), single-line shell or JSON-array `RUN`, and `ENV`, `USER`, `WORKDIR`, `ENTRYPOINT`, and `CMD`. Each `RUN` boots a temporary Linux VM, applies the preceding image state, and stores the successful result as a squashed OCI layer; failed commands stop the build without recording its tag. Each build VM has 256 MiB RAM and a 256 MiB writable overlay. `ENV` values are literal and `WORKDIR` must be absolute. Targets must be absolute. `.dockerignore`, globs, symlinks, special files, line continuations, and other Dockerfile instructions are unsupported.
+- `rift build` supports up to 128 stages, one source per `COPY` (from the local context or an earlier named or indexed stage), single-line shell or JSON-array `RUN`, `STOPSIGNAL`, and `ENV`, `USER`, `WORKDIR`, `ENTRYPOINT`, and `CMD`. Each `RUN` boots a temporary Linux VM, applies the preceding image state, and stores the successful result as a squashed OCI layer; failed commands stop the build without recording its tag. Each build VM has 256 MiB RAM and a 256 MiB writable overlay. `ENV` values are literal and `WORKDIR` must be absolute. Targets must be absolute. Stop signals accept canonical names or numbers except for `SIGKILL`, `SIGSTOP`, and real-time signals. `.dockerignore`, globs, symlinks, special files, line continuations, and other Dockerfile instructions are unsupported.
 - Each pull is capped at 16 GiB of distinct image blobs not already verified in the local cache.
 - Each layer is capped at 8 GiB decompressed; all image layers together are capped at 32 GiB per extraction pass.
 - `rift exec -i` streams stdin. Use `rift exec -it` from a terminal for a resizable guest TTY; Rift restores host terminal settings when the command ends.

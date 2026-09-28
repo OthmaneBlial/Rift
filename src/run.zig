@@ -39,6 +39,7 @@ pub fn execute(init: std.process.Init, arguments: []const []const u8, stop_path:
     } else return error.ImageNotFound;
     const image_config = try config.load(allocator, store, manifest_digest);
     const process = image_config.config orelse config.Process{};
+    const stop_signal = config.stopSignalNumber(process.StopSignal orelse "SIGTERM") orelse return error.InvalidImageConfig;
     const requested_working_dir = options.working_dir orelse process.WorkingDir orelse "/";
     const working_dir = if (requested_working_dir.len == 0) "/" else requested_working_dir;
     if (!validWorkingDirectory(working_dir)) return error.UnsupportedWorkingDirectory;
@@ -99,7 +100,7 @@ pub fn execute(init: std.process.Init, arguments: []const []const u8, stop_path:
     cache_locked = false;
     const interactive = try Io.File.stdin().isTty(init.io);
     const measure_guest_boot = if (init.environ_map.get("RIFT_BENCHMARK_GUEST_BOOT")) |value| std.mem.eql(u8, value, "1") else false;
-    try guest.writeInitramfs(allocator, init.io, base_initramfs, run_dir, command, environment, working_dir, process.User orelse "", staged_volumes, interactive, port != null, measure_guest_boot, false);
+    try guest.writeInitramfs(allocator, init.io, base_initramfs, run_dir, command, environment, working_dir, process.User orelse "", stop_signal, staged_volumes, interactive, port != null, measure_guest_boot, false);
 
     var root_path_buffer: [Io.Dir.max_path_bytes]u8 = undefined;
     var control_path_buffer: [Io.Dir.max_path_bytes]u8 = undefined;

@@ -61,6 +61,7 @@ This roadmap carries the original plan forward from the first project commit. `[
 - [x] Apply `ENV`, `USER`, `WORKDIR`, `ENTRYPOINT`, and `CMD` to built image configuration; create a missing configured working directory in the disposable run overlay at launch.
 - [x] Execute single-stage Dockerfile `RUN` commands in order against preceding image state; fail builds when a command exits nonzero.
 - [x] Support multiple Dockerfile build stages, named or indexed `COPY --from`, and `FROM` inheritance from earlier stages.
+- [x] Honor validated OCI image `StopSignal` values for detached shutdown, with Dockerfile `STOPSIGNAL` support.
 - [ ] Implement broader OCI process and resource settings.
 - [x] Review help and error messages across supported commands for clear, predictable use.
 - [ ] Add structured log output.

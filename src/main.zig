@@ -482,7 +482,7 @@ pub fn main(init: std.process.Init) void {
             error.InvalidBuildContext => std.debug.print("rift: build context must contain a readable Dockerfile\n", .{}),
             error.UnsupportedDockerIgnore => std.debug.print("rift: .dockerignore files are not supported by this build preview\n", .{}),
             error.InvalidDockerfile => std.debug.print("rift: invalid Dockerfile; check its instructions and JSON command arrays\n", .{}),
-            error.UnsupportedDockerfileInstruction, error.UnsupportedBuildStages, error.UnsupportedCopyForm => std.debug.print("rift: supported build instructions are FROM, COPY [--from=stage], RUN, ENV, USER, WORKDIR, ENTRYPOINT, and CMD\n", .{}),
+            error.UnsupportedDockerfileInstruction, error.UnsupportedBuildStages, error.UnsupportedCopyForm => std.debug.print("rift: supported build instructions are FROM, COPY [--from=stage], RUN, ENV, USER, WORKDIR, ENTRYPOINT, CMD, and STOPSIGNAL\n", .{}),
             error.UnknownBuildStage => std.debug.print("rift: COPY --from must name an earlier stage or its numeric index\n", .{}),
             error.DuplicateBuildStage => std.debug.print("rift: Dockerfile stage aliases must be unique\n", .{}),
             error.BuildStageLimitExceeded => std.debug.print("rift: Dockerfile supports at most 128 build stages\n", .{}),

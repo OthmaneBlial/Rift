@@ -31,6 +31,7 @@ static int write_all(int descriptor, const void *contents, size_t length);
 static volatile sig_atomic_t child_pid = -1;
 static volatile sig_atomic_t exec_pid = -1;
 static volatile sig_atomic_t pending_signal = 0;
+static int configured_stop_signal = SIGTERM;
 
 static void forward_stop_signal(int signal_number) {
     int saved_errno = errno;
@@ -42,11 +43,13 @@ static void forward_stop_signal(int signal_number) {
 }
 
 static int install_stop_signal_handler(void) {
-    struct sigaction action = {.sa_handler = forward_stop_signal};
+    struct sigaction action = {.sa_handler = SIG_IGN};
     sigemptyset(&action.sa_mask);
+    if (sigaction(SIGPIPE, &action, NULL) != 0) return -1;
+    action.sa_handler = forward_stop_signal;
     if (sigaction(SIGTERM, &action, NULL) != 0) return -1;
-    action.sa_handler = SIG_IGN;
-    return sigaction(SIGPIPE, &action, NULL);
+    if (configured_stop_signal != SIGTERM && sigaction(configured_stop_signal, &action, NULL) != 0) return -1;
+    return 0;
 }
 
 static void restore_default_stop_signal(void) {
@@ -55,6 +58,17 @@ static void restore_default_stop_signal(void) {
     const int signals[] = {SIGHUP, SIGINT, SIGQUIT, SIGTERM, SIGPIPE, SIGTSTP, SIGTTIN, SIGTTOU};
     for (size_t index = 0; index < sizeof(signals) / sizeof(signals[0]); ++index)
         sigaction(signals[index], &action, NULL);
+    if (configured_stop_signal != SIGTERM && configured_stop_signal != SIGPIPE)
+        sigaction(configured_stop_signal, &action, NULL);
+}
+
+static int parse_stop_signal(const char *value, int *signal_number) {
+    errno = 0;
+    char *end;
+    long parsed = strtol(value, &end, 10);
+    if (errno || end == value || *end || parsed <= 0 || parsed >= 32 || parsed == SIGKILL || parsed == SIGSTOP) return 0;
+    *signal_number = (int)parsed;
+    return 1;
 }
 
 static int read_exec_control_text(int directory, const char *name, char *contents, size_t capacity) {
@@ -1102,7 +1116,7 @@ static int run_container(char **argv, unsigned long volume_count, int ready_desc
         return 125;
     }
     for (unsigned long index = 0; index < volume_count; ++index) {
-        int status = mount_volume(argv[5 + index * 4], argv[6 + index * 4], argv[7 + index * 4], argv[8 + index * 4]);
+        int status = mount_volume(argv[6 + index * 4], argv[7 + index * 4], argv[8 + index * 4], argv[9 + index * 4]);
         if (status != 0) return status;
     }
     if (mount_standard_filesystems() != 0) return 125;
@@ -1125,7 +1139,7 @@ static int run_container(char **argv, unsigned long volume_count, int ready_desc
         pending_signal = 0;
         restore_default_stop_signal();
         if (syscall(SYS_close_range, 3U, ~0U, 0U) != 0) _exit(fail("close inherited descriptors"));
-        execvp(argv[5 + volume_count * 4], argv + 5 + volume_count * 4);
+        execvp(argv[6 + volume_count * 4], argv + 6 + volume_count * 4);
         _exit(fail("exec"));
     }
     child_pid = workload;
@@ -1141,14 +1155,18 @@ static int run_container(char **argv, unsigned long volume_count, int ready_desc
 }
 
 int main(int argc, char **argv) {
-    if (argc < 6) {
+    if (argc < 7) {
         fputs("rift-exec: missing command\n", stderr);
         return 125;
     }
     char *end;
+    if (!parse_stop_signal(argv[4], &configured_stop_signal)) {
+        fputs("rift-exec: invalid stop signal\n", stderr);
+        return 125;
+    }
     errno = 0;
-    unsigned long volume_count = strtoul(argv[4], &end, 10);
-    if (errno || *end || volume_count > 16 || argc < 6 + (int)volume_count * 4 || !argv[5 + volume_count * 4][0]) {
+    unsigned long volume_count = strtoul(argv[5], &end, 10);
+    if (errno || *end || volume_count > 16 || argc < 7 + (int)volume_count * 4 || !argv[6 + volume_count * 4][0]) {
         fputs("rift-exec: invalid volume count or missing command\n", stderr);
         return 125;
     }

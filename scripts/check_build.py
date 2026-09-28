@@ -6,6 +6,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import time
 
 from benchmark import copy_cache
 
@@ -106,6 +107,7 @@ WORKDIR /tmp/final-stage
 COPY --from=build /tmp/payload /opt/payload
 COPY --from=0 /tmp/payload /opt/numeric-payload
 FROM final AS output
+STOPSIGNAL SIGUSR1
 '''
         )
         (stages_context / "payload").write_text("RIFT_STAGE_COPY_OK|")
@@ -126,6 +128,37 @@ FROM final AS output
             "final|/tmp/final-stage|RIFT_STAGE_COPY_OK|RUN_OK\nRIFT_STAGE_COPY_OK|RUN_OK\n"
         ):
             raise RuntimeError(f"multi-stage COPY, RUN, or inherited configuration failed: {stages_run!r}")
+
+        custom_signal = call(
+            binary,
+            env,
+            "run",
+            "-d",
+            "rift-build-stages:local",
+            "/bin/sh",
+            "-c",
+            "trap 'echo RIFT_CUSTOM_STOP_SIGNAL; exit 0' USR1; echo RIFT_STOP_READY; while :; do sleep 1; done",
+        )
+        signal_id = custom_signal.stdout.strip()
+        try:
+            if custom_signal.returncode != 0 or len(signal_id) != 32:
+                raise RuntimeError(f"image with STOPSIGNAL did not start: {custom_signal!r}")
+            deadline = time.monotonic() + 15
+            while time.monotonic() < deadline:
+                signal_logs = call(binary, env, "logs", signal_id)
+                if "RIFT_STOP_READY" in signal_logs.stdout:
+                    break
+                time.sleep(0.2)
+            else:
+                raise RuntimeError("STOPSIGNAL container did not reach running state")
+            stopped = call(binary, env, "stop", signal_id)
+            signal_logs = call(binary, env, "logs", signal_id)
+            if stopped.returncode != 0 or "RIFT_CUSTOM_STOP_SIGNAL" not in signal_logs.stdout:
+                raise RuntimeError(f"image STOPSIGNAL was not delivered: {stopped!r} {signal_logs!r}")
+        finally:
+            if signal_id:
+                call(binary, env, "kill", signal_id)
+                call(binary, env, "rm", signal_id)
 
         unknown_stage_context = Path(home) / "unknown-stage-context"
         unknown_stage_context.mkdir()

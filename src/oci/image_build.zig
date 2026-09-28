@@ -29,6 +29,7 @@ pub const BuildConfig = struct {
     working_dir: ?[]const u8 = null,
     entrypoint: ?[]const []const u8 = null,
     cmd: ?[]const []const u8 = null,
+    stop_signal: ?[]const u8 = null,
 };
 
 pub const Run = struct {
@@ -138,6 +139,7 @@ const StageDraft = struct {
     working_dir: ?[]const u8 = null,
     entrypoint: ?[]const []const u8 = null,
     command: ?[]const []const u8 = null,
+    stop_signal: ?[]const u8 = null,
 
     fn deinit(self: *StageDraft, allocator: std.mem.Allocator) void {
         if (self.base) |base| switch (base) {
@@ -151,6 +153,7 @@ const StageDraft = struct {
         if (self.working_dir) |value| allocator.free(value);
         if (self.entrypoint) |value| freeArguments(allocator, value);
         if (self.command) |value| freeArguments(allocator, value);
+        if (self.stop_signal) |value| allocator.free(value);
         self.* = .{};
     }
 
@@ -161,6 +164,7 @@ const StageDraft = struct {
             .working_dir = self.working_dir,
             .entrypoint = self.entrypoint,
             .cmd = self.command,
+            .stop_signal = self.stop_signal,
         };
     }
 };
@@ -316,6 +320,13 @@ pub fn parseDockerfile(allocator: std.mem.Allocator, context_path: []const u8, b
             const value = try parseCommand(allocator, line[offset..]) orelse return error.InvalidDockerfile;
             if (draft.command) |previous| freeArguments(allocator, previous);
             draft.command = value;
+        } else if (std.ascii.eqlIgnoreCase(instruction, "STOPSIGNAL")) {
+            if (draft.base == null) return error.InvalidDockerfile;
+            const value = try nextWord(line, &offset) orelse return error.InvalidDockerfile;
+            if (try nextWord(line, &offset) != null or config.stopSignalNumber(value) == null) return error.InvalidDockerfile;
+            const owned = try allocator.dupe(u8, value);
+            if (draft.stop_signal) |previous| allocator.free(previous);
+            draft.stop_signal = owned;
         } else {
             return error.UnsupportedDockerfileInstruction;
         }
@@ -388,7 +399,9 @@ fn duplicateBuildConfig(allocator: std.mem.Allocator, source: BuildConfig) !Buil
     errdefer if (entrypoint) |value| freeArguments(allocator, value);
     const cmd = if (source.cmd) |value| try duplicateArguments(allocator, value) else null;
     errdefer if (cmd) |value| freeArguments(allocator, value);
-    return .{ .env = environment, .user = user, .working_dir = working_dir, .entrypoint = entrypoint, .cmd = cmd };
+    const stop_signal = if (source.stop_signal) |value| try allocator.dupe(u8, value) else null;
+    errdefer if (stop_signal) |value| allocator.free(value);
+    return .{ .env = environment, .user = user, .working_dir = working_dir, .entrypoint = entrypoint, .cmd = cmd, .stop_signal = stop_signal };
 }
 
 fn findStage(stages: []const Stage, name: []const u8, allow_index: bool) ?usize {
@@ -437,6 +450,7 @@ fn deinitBuildConfig(allocator: std.mem.Allocator, value: BuildConfig) void {
     if (value.working_dir) |entry| allocator.free(entry);
     if (value.entrypoint) |entry| freeArguments(allocator, entry);
     if (value.cmd) |entry| freeArguments(allocator, entry);
+    if (value.stop_signal) |entry| allocator.free(entry);
 }
 
 fn deinitRun(allocator: std.mem.Allocator, run: Run) void {
@@ -823,7 +837,7 @@ fn runBuildInstruction(
     defer allocator.free(initramfs_asset_path);
     const initramfs_asset = try Io.Dir.openFileAbsolute(io, initramfs_asset_path, .{ .mode = .read_only, .follow_symlinks = false });
     defer initramfs_asset.close(io);
-    try guest.writeInitramfs(allocator, io, initramfs_asset, run_stage, run.command, environment, working_dir, user, &.{}, false, false, false, true);
+    try guest.writeInitramfs(allocator, io, initramfs_asset, run_stage, run.command, environment, working_dir, user, 15, &.{}, false, false, false, true);
 
     var root_path_buffer: [Io.Dir.max_path_bytes]u8 = undefined;
     var control_path_buffer: [Io.Dir.max_path_bytes]u8 = undefined;
@@ -1253,6 +1267,7 @@ fn updateConfig(allocator: std.mem.Allocator, body: []const u8, diff_update: Dif
         for (value) |argument| try arguments.append(.{ .string = argument });
         try image_config.object.put(allocator, "Cmd", .{ .array = arguments });
     }
+    if (changes.stop_signal) |value| try image_config.object.put(allocator, "StopSignal", .{ .string = value });
     return std.json.Stringify.valueAlloc(allocator, image, .{});
 }
 
@@ -1325,7 +1340,7 @@ test "parses and owns common process config instructions" {
     var plan = try parseDockerfile(
         std.testing.allocator,
         "/tmp/context",
-        "FROM alpine\nENV BUILD_MESSAGE=\"hello world\" BUILD_MODE=preview\nENV BUILD_MODE=local\nUSER 65534\nWORKDIR /tmp/rift-app/\nENTRYPOINT [\"/bin/sh\",\"-c\"]\nCMD [\"printf '%s:%s:%s\\\\n' \\\"$BUILD_MESSAGE\\\" \\\"$PWD\\\" \\\"$(id -u)\\\"\"]\n",
+        "FROM alpine\nENV BUILD_MESSAGE=\"hello world\" BUILD_MODE=preview\nENV BUILD_MODE=local\nUSER 65534\nWORKDIR /tmp/rift-app/\nENTRYPOINT [\"/bin/sh\",\"-c\"]\nCMD [\"printf '%s:%s:%s\\\\n' \\\"$BUILD_MESSAGE\\\" \\\"$PWD\\\" \\\"$(id -u)\\\"\"]\nSTOPSIGNAL SIGUSR1\n",
     );
     defer plan.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(usize, 0), plan.instructions.len);
@@ -1336,6 +1351,7 @@ test "parses and owns common process config instructions" {
     try std.testing.expectEqualStrings("/bin/sh", plan.stages[0].config.entrypoint.?[0]);
     try std.testing.expectEqualStrings("-c", plan.stages[0].config.entrypoint.?[1]);
     try std.testing.expectEqual(@as(usize, 1), plan.stages[0].config.cmd.?.len);
+    try std.testing.expectEqualStrings("SIGUSR1", plan.stages[0].config.stop_signal.?);
 }
 
 test "parses named and indexed stage copies and inherited FROM stages" {
@@ -1392,6 +1408,7 @@ test "applies build process settings while preserving base image config" {
         .working_dir = "/tmp/rift-app",
         .entrypoint = &.{ "/bin/sh", "-c" },
         .cmd = &.{"printf ready"},
+        .stop_signal = "SIGUSR1",
     };
     const updated = try appendDiffId(arena.allocator(), body, "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", changes);
     const image = try config.parse(arena.allocator(), updated, 1);
@@ -1400,6 +1417,7 @@ test "applies build process settings while preserving base image config" {
     try std.testing.expectEqualStrings("/tmp/rift-app", process.WorkingDir.?);
     try std.testing.expectEqualStrings("/bin/sh", process.Entrypoint.?[0]);
     try std.testing.expectEqualStrings("printf ready", process.Cmd.?[0]);
+    try std.testing.expectEqual(@as(?u8, 10), config.stopSignalNumber(process.StopSignal.?));
     try std.testing.expectEqual(@as(usize, 3), process.Env.?.len);
     try std.testing.expectEqualStrings("PATH=/bin", process.Env.?[0]);
     try std.testing.expectEqualStrings("BUILD_MODE=local", process.Env.?[1]);
@@ -1416,6 +1434,7 @@ test "rejects unsupported instructions, stages, and unsafe paths" {
     try std.testing.expectError(error.UnknownBuildStage, parseDockerfile(std.testing.allocator, "/tmp", "FROM alpine\nCOPY --from=future /a /a\nFROM alpine AS future\n"));
     try std.testing.expectError(error.DuplicateBuildStage, parseDockerfile(std.testing.allocator, "/tmp", "FROM alpine AS build\nFROM alpine AS BUILD\n"));
     try std.testing.expectError(error.InvalidBuildSource, parseDockerfile(std.testing.allocator, "/tmp", "FROM alpine AS build\nFROM alpine\nCOPY --from=build ../../etc/passwd /passwd\n"));
+    try std.testing.expectError(error.InvalidDockerfile, parseDockerfile(std.testing.allocator, "/tmp", "FROM alpine\nSTOPSIGNAL SIGKILL\n"));
     try std.testing.expectError(error.InvalidBuildSource, parseDockerfile(std.testing.allocator, "/tmp", "FROM alpine\nCOPY ../secret /secret\n"));
     try std.testing.expectError(error.InvalidBuildTarget, parseDockerfile(std.testing.allocator, "/tmp", "FROM alpine\nCOPY file /../../secret\n"));
     try std.testing.expectError(error.UnsupportedBuildWorkingDirectory, parseDockerfile(std.testing.allocator, "/tmp", "FROM alpine\nWORKDIR relative\n"));

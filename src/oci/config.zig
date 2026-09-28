@@ -16,6 +16,40 @@ pub const Process = struct {
     Entrypoint: ?[]const []const u8 = null,
     Cmd: ?[]const []const u8 = null,
     WorkingDir: ?[]const u8 = null,
+    StopSignal: ?[]const u8 = null,
+};
+
+const StopSignalName = struct { name: []const u8, number: u8 };
+const stop_signal_names = [_]StopSignalName{
+    .{ .name = "HUP", .number = 1 },
+    .{ .name = "INT", .number = 2 },
+    .{ .name = "QUIT", .number = 3 },
+    .{ .name = "ILL", .number = 4 },
+    .{ .name = "TRAP", .number = 5 },
+    .{ .name = "ABRT", .number = 6 },
+    .{ .name = "BUS", .number = 7 },
+    .{ .name = "FPE", .number = 8 },
+    .{ .name = "USR1", .number = 10 },
+    .{ .name = "SEGV", .number = 11 },
+    .{ .name = "USR2", .number = 12 },
+    .{ .name = "PIPE", .number = 13 },
+    .{ .name = "ALRM", .number = 14 },
+    .{ .name = "TERM", .number = 15 },
+    .{ .name = "STKFLT", .number = 16 },
+    .{ .name = "CHLD", .number = 17 },
+    .{ .name = "CONT", .number = 18 },
+    .{ .name = "TSTP", .number = 20 },
+    .{ .name = "TTIN", .number = 21 },
+    .{ .name = "TTOU", .number = 22 },
+    .{ .name = "URG", .number = 23 },
+    .{ .name = "XCPU", .number = 24 },
+    .{ .name = "XFSZ", .number = 25 },
+    .{ .name = "VTALRM", .number = 26 },
+    .{ .name = "PROF", .number = 27 },
+    .{ .name = "WINCH", .number = 28 },
+    .{ .name = "IO", .number = 29 },
+    .{ .name = "PWR", .number = 30 },
+    .{ .name = "SYS", .number = 31 },
 };
 
 pub const Rootfs = struct {
@@ -52,7 +86,20 @@ pub fn parse(allocator: std.mem.Allocator, body: []const u8, layer_count: usize)
     if (process.User) |user| {
         if (std.mem.indexOfScalar(u8, user, 0) != null) return error.InvalidImageConfig;
     }
+    if (process.StopSignal) |signal| {
+        if (stopSignalNumber(signal) == null) return error.InvalidImageConfig;
+    }
     return image;
+}
+
+pub fn stopSignalNumber(value: []const u8) ?u8 {
+    const name = if (value.len >= 3 and std.ascii.eqlIgnoreCase(value[0..3], "SIG")) value[3..] else value;
+    for (stop_signal_names) |signal| {
+        if (std.ascii.eqlIgnoreCase(name, signal.name)) return signal.number;
+    }
+    const signal = std.fmt.parseInt(u8, value, 10) catch return null;
+    if (signal == 0 or signal >= 32 or signal == 9 or signal == 19) return null;
+    return signal;
 }
 
 pub fn command(allocator: std.mem.Allocator, process: Process, override: []const []const u8) ![]const []const u8 {
@@ -99,4 +146,22 @@ test "accepts null optional process settings" {
     ;
     const image = try parse(arena.allocator(), body, 0);
     try std.testing.expectError(error.ImageHasNoCommand, command(arena.allocator(), image.config.?, &.{}));
+}
+
+test "parses catchable Docker stop signals for Linux ARM64" {
+    try std.testing.expectEqual(@as(?u8, 10), stopSignalNumber("SIGUSR1"));
+    try std.testing.expectEqual(@as(?u8, 15), stopSignalNumber("term"));
+    try std.testing.expectEqual(@as(?u8, 2), stopSignalNumber("2"));
+    try std.testing.expectEqual(@as(?u8, null), stopSignalNumber("SIGKILL"));
+    try std.testing.expectEqual(@as(?u8, null), stopSignalNumber("SIGSTOP"));
+    try std.testing.expectEqual(@as(?u8, null), stopSignalNumber("RTMIN+2"));
+}
+
+test "rejects image stop signals the guest cannot forward" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const body =
+        \\{"architecture":"arm64","os":"linux","config":{"StopSignal":"SIGKILL"},"rootfs":{"type":"layers","diff_ids":[]}}
+    ;
+    try std.testing.expectError(error.InvalidImageConfig, parse(arena.allocator(), body, 0));
 }
