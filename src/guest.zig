@@ -41,6 +41,7 @@ fn makeScript(allocator: std.mem.Allocator, command: []const []const u8, environ
     try writer.writeAll(
         "  if /usr/bin/busybox mount -t tmpfs -o size=256m tmpfs /mnt/state &&\n" ++
             "     /usr/bin/busybox mkdir -p /mnt/state/upper /mnt/state/work &&\n" ++
+            "     /rift-exec --copy-root-xattrs /mnt/rift /mnt/state/upper &&\n" ++
             "     /usr/bin/busybox mount -t overlay overlay -o metacopy=on,lowerdir=/mnt/rift,upperdir=/mnt/state/upper,workdir=/mnt/state/work /mnt/root; then\n" ++
             "    /usr/bin/busybox --install -s /usr/bin >/dev/null 2>&1\n" ++
             "    /usr/bin/busybox ip link set eth0 up >/dev/null 2>&1\n" ++
@@ -168,6 +169,7 @@ test "shell arguments remain quoted" {
     defer std.testing.allocator.free(bare);
     try std.testing.expect(std.mem.indexOf(u8, bare, "/rift-exec /mnt/root '/' '' 15 0 'echo' 'hello'") != null);
     try std.testing.expect(std.mem.indexOf(u8, bare, "mount -t overlay overlay -o metacopy=on,lowerdir=/mnt/rift") != null);
+    try std.testing.expect(std.mem.indexOf(u8, bare, "--copy-root-xattrs /mnt/rift /mnt/state/upper") != null);
     try std.testing.expect(std.mem.indexOf(u8, bare, "if [ -e /mnt/control/stop ]; then") != null);
     try std.testing.expect(std.mem.indexOf(u8, bare, "guest-boot-ready") == null);
     try std.testing.expect(std.mem.indexOf(u8, bare, "/usr/bin/busybox kill -s 15 \"$workload_pid\"") != null);

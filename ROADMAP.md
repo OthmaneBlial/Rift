@@ -84,7 +84,7 @@ This roadmap carries the original plan forward from the first project commit. `[
 - [x] Preserve OCI file ownership and groups from tar headers and local/global PAX `uid`/`gid`; verify non-root file access in a VM.
 - [x] Preserve global PAX `path`, `linkpath`, and `size` overrides, including local precedence and empty-value resets.
 - [x] Restore PAX xattrs on files and nested directories, including binary values, local/global precedence, and legacy `security.capability`; verify in Alpine.
-- [ ] Expose OCI root-directory xattrs at `/` inside the overlay-backed container.
+- [x] Expose OCI root-directory xattrs at `/` by copying them into the private upper layer; verify in Alpine.
 - [x] Extract OCI FIFO entries as named pipes with preserved mode and ownership.
 - [ ] Support other special files outside runtime-managed `/dev`.
 - [ ] Reduce guest disk footprint and optimize startup and shutdown using measurements.

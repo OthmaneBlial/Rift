@@ -21,6 +21,7 @@
 #include <sys/sysmacros.h>
 #include <sys/types.h>
 #include <sys/wait.h>
+#include <sys/xattr.h>
 #include <termios.h>
 #include <unistd.h>
 
@@ -1154,7 +1155,103 @@ static int run_container(char **argv, unsigned long volume_count, int ready_desc
     return child_status(workload);
 }
 
+static int supported_root_xattr(const char *name) {
+    return strncmp(name, "user.", 5) == 0 || strncmp(name, "trusted.", 8) == 0 ||
+           strncmp(name, "security.", 9) == 0 || strncmp(name, "system.", 7) == 0;
+}
+
+static int copy_root_xattrs(const char *source, const char *target) {
+    const size_t max_list_bytes = 1024 * 1024;
+    const size_t max_value_bytes = 64 * 1024;
+    const size_t max_total_bytes = 64 * 1024 * 1024;
+    const size_t max_count = 4096;
+    ssize_t listed = listxattr(source, NULL, 0);
+    if (listed < 0) return fail("list image root xattrs");
+    if ((size_t)listed > max_list_bytes) {
+        errno = E2BIG;
+        return fail("image root xattr list too large");
+    }
+    if (listed == 0) return 0;
+
+    char *names = malloc((size_t)listed);
+    if (!names) return fail("allocate image root xattr list");
+    int status = 125;
+    ssize_t actual = listxattr(source, names, (size_t)listed);
+    if (actual < 0 || actual > listed) {
+        if (actual >= 0) errno = EAGAIN;
+        fail("read image root xattr list");
+        goto done;
+    }
+
+    size_t offset = 0;
+    size_t count = 0;
+    size_t total = 0;
+    while (offset < (size_t)actual) {
+        char *name = names + offset;
+        size_t remaining = (size_t)actual - offset;
+        char *terminator = memchr(name, '\0', remaining);
+        if (!terminator || terminator == name) {
+            errno = EINVAL;
+            fail("parse image root xattr list");
+            goto done;
+        }
+        size_t name_size = (size_t)(terminator - name);
+        offset += name_size + 1;
+        if (!supported_root_xattr(name)) continue;
+        if (strncmp(name, "user.overlay.", 13) == 0 || strncmp(name, "trusted.overlay.", 16) == 0) {
+            errno = EPERM;
+            fail("reject OverlayFS control xattr");
+            goto done;
+        }
+        if (++count > max_count) {
+            errno = E2BIG;
+            fail("image root xattr count too large");
+            goto done;
+        }
+
+        ssize_t value_size = getxattr(source, name, NULL, 0);
+        if (value_size < 0) {
+            fail("size image root xattr");
+            goto done;
+        }
+        if ((size_t)value_size > max_value_bytes ||
+            total > max_total_bytes - 16 - name_size ||
+            (size_t)value_size > max_total_bytes - total - 16 - name_size) {
+            errno = E2BIG;
+            fail("image root xattr data too large");
+            goto done;
+        }
+        total += 16 + name_size + (size_t)value_size;
+
+        void *value = malloc(value_size == 0 ? 1 : (size_t)value_size);
+        if (!value) {
+            fail("allocate image root xattr value");
+            goto done;
+        }
+        ssize_t read_size = getxattr(source, name, value, (size_t)value_size);
+        if (read_size != value_size) {
+            if (read_size >= 0) errno = EAGAIN;
+            free(value);
+            fail("read image root xattr");
+            goto done;
+        }
+        if (setxattr(target, name, value, (size_t)value_size, 0) != 0) {
+            free(value);
+            fail("apply image root xattr");
+            goto done;
+        }
+        free(value);
+    }
+    status = 0;
+
+done:
+    free(names);
+    return status;
+}
+
 int main(int argc, char **argv) {
+    if (argc == 4 && strcmp(argv[1], "--copy-root-xattrs") == 0)
+        return copy_root_xattrs(argv[2], argv[3]);
     if (argc < 7) {
         fputs("rift-exec: missing command\n", stderr);
         return 125;

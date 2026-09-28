@@ -87,6 +87,7 @@ int main(void) {
     if (!matches("/opt/rift-xattrs/payload", "security.capability", capability, sizeof(capability))) return 16;
     if (!matches("/opt/rift-xattrs", "user.rift.directory", (const unsigned char *)"dir-value", 9)) return 17;
     if (!matches("/opt/rift-xattrs/payload", "user.rift.literal%25", (const unsigned char *)"percent", 7)) return 18;
+    if (!matches("/", "user.rift.root", (const unsigned char *)"root-value", 10)) return 19;
     puts("RIFT_XATTR_OK");
     return 0;
 }
@@ -106,6 +107,11 @@ int main(void) {
         }
         xattr_archive = io.BytesIO()
         with tarfile.open(fileobj=xattr_archive, mode="w", format=tarfile.PAX_FORMAT, pax_headers=global_xattrs, encoding="latin-1") as layer:
+            root = tarfile.TarInfo(".")
+            root.type = tarfile.DIRTYPE
+            root.mode = 0o755
+            root.pax_headers = {"SCHILY.xattr.user.rift.root": "root-value"}
+            layer.addfile(root)
             directory = tarfile.TarInfo("opt/rift-xattrs")
             directory.type = tarfile.DIRTYPE
             directory.mode = 0o755
