@@ -35,6 +35,8 @@ static volatile sig_atomic_t exec_pid = -1;
 static volatile sig_atomic_t pending_signal = 0;
 static int configured_stop_signal = SIGTERM;
 static int capability_profile_none = 0;
+static uint64_t capability_add_mask = 0;
+static uint64_t capability_drop_mask = 0;
 
 static void forward_stop_signal(int signal_number) {
     int saved_errno = errno;
@@ -451,8 +453,11 @@ static int mount_standard_filesystems(void) {
     return 0;
 }
 
-static int allowed_capability(int capability) {
-    if (capability_profile_none) return 0;
+static int allowed_capability(int capability, int root_user) {
+    uint64_t bit = UINT64_C(1) << capability;
+    if (capability_drop_mask & bit) return 0;
+    if (capability_add_mask & bit) return 1;
+    if (capability_profile_none || !root_user) return 0;
     switch (capability) {
         case CAP_CHOWN:
         case CAP_DAC_OVERRIDE:
@@ -468,18 +473,19 @@ static int allowed_capability(int capability) {
     }
 }
 
-static int prepare_capabilities(void) {
+static int prepare_capabilities(int root_user) {
+    if (geteuid() != 0) return 0;
     struct __user_cap_header_struct header = {.version = _LINUX_CAPABILITY_VERSION_3, .pid = 0};
     struct __user_cap_data_struct data[2] = {{0}, {0}};
     for (int capability = 0; capability < 64; ++capability) {
-        if (allowed_capability(capability) || capability == CAP_SETUID || capability == CAP_SETGID || capability == CAP_SETPCAP) {
+        if (allowed_capability(capability, root_user) || capability == CAP_SETUID || capability == CAP_SETGID || capability == CAP_SETPCAP) {
             data[capability / 32].effective |= 1U << (capability % 32);
             data[capability / 32].permitted |= 1U << (capability % 32);
         }
     }
     if (syscall(SYS_capset, &header, data) != 0) return fail("prepare capabilities");
     for (int capability = 0; capability < 64; ++capability) {
-        if (!allowed_capability(capability) && prctl(PR_CAPBSET_DROP, capability, 0, 0, 0) != 0 && errno != EINVAL)
+        if (!allowed_capability(capability, root_user) && prctl(PR_CAPBSET_DROP, capability, 0, 0, 0) != 0 && errno != EINVAL)
             return fail("drop capability bound");
     }
     errno = 0;
@@ -495,14 +501,64 @@ static int finish_capabilities(void) {
     struct __user_cap_data_struct data[2] = {{0}, {0}};
     if (geteuid() == 0) {
         for (int capability = 0; capability < 64; ++capability) {
-            if (allowed_capability(capability)) {
+            if (allowed_capability(capability, 1)) {
                 data[capability / 32].effective |= 1U << (capability % 32);
                 data[capability / 32].permitted |= 1U << (capability % 32);
             }
         }
+    } else {
+        for (int capability = 0; capability < 64; ++capability) {
+            if (capability_add_mask & (UINT64_C(1) << capability)) {
+                data[capability / 32].effective |= 1U << (capability % 32);
+                data[capability / 32].permitted |= 1U << (capability % 32);
+                data[capability / 32].inheritable |= 1U << (capability % 32);
+            }
+        }
     }
     if (syscall(SYS_capset, &header, data) != 0) return fail("apply capability profile");
+    if (geteuid() != 0) {
+        for (int capability = 0; capability < 64; ++capability) {
+            if ((capability_add_mask & (UINT64_C(1) << capability)) &&
+                prctl(PR_CAP_AMBIENT, PR_CAP_AMBIENT_RAISE, capability, 0, 0) != 0)
+                return fail("raise ambient capability");
+        }
+        if (prctl(PR_SET_KEEPCAPS, 0, 0, 0, 0) != 0) return fail("clear keep capabilities");
+    }
     if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0) return fail("disable privilege escalation");
+    return 0;
+}
+
+static int parse_capability_mask(const char *value, uint64_t *mask) {
+    if (!value[0]) return 0;
+    for (const char *cursor = value; *cursor; ++cursor)
+        if (*cursor < '0' || *cursor > '9') return 0;
+    errno = 0;
+    char *end;
+    unsigned long long parsed = strtoull(value, &end, 10);
+    if (errno || *end) return 0;
+    uint64_t supported = (UINT64_C(1) << (CAP_LAST_CAP + 1)) - 1;
+    if (((uint64_t)parsed & ~supported) != 0) return 0;
+    *mask = (uint64_t)parsed;
+    return 1;
+}
+
+static int switch_image_user(uid_t uid, gid_t gid, const char *username) {
+    if (geteuid() != 0) {
+        if (getuid() != uid || getgid() != gid) {
+            errno = EPERM;
+            return fail("switch image user");
+        }
+        return 0;
+    }
+    if (username[0]) {
+        if (initgroups(username, gid) != 0) return fail("set supplementary groups");
+    } else if (setgroups(0, NULL) != 0) {
+        return fail("clear supplementary groups");
+    }
+    if (setgid(gid) != 0) return fail("setgid");
+    if (uid != 0 && capability_add_mask && prctl(PR_SET_KEEPCAPS, 1, 0, 0, 0) != 0)
+        return fail("keep added capabilities");
+    if (setuid(uid) != 0) return fail("setuid");
     return 0;
 }
 
@@ -637,14 +693,8 @@ static int run_exec(char *root, char *working_directory, char *user, char **comm
         fputs("rift-exec: image user or group was not found\n", stderr);
         return 125;
     }
-    if (prepare_capabilities() != 0) return 125;
-    if (username[0]) {
-        if (initgroups(username, gid) != 0) return fail("set supplementary groups");
-    } else if (setgroups(0, NULL) != 0) {
-        return fail("clear supplementary groups");
-    }
-    if (setgid(gid) != 0) return fail("setgid");
-    if (setuid(uid) != 0) return fail("setuid");
+    if (prepare_capabilities(uid == 0) != 0) return 125;
+    if (switch_image_user(uid, gid, username) != 0) return 125;
     if (finish_capabilities() != 0) return 125;
     if (chdir(working_directory) != 0) return fail("chdir working directory");
     if (syscall(SYS_close_range, 3U, ~0U, 0U) != 0) return fail("close inherited descriptors");
@@ -1238,14 +1288,8 @@ static int run_container(char **argv, unsigned long volume_count, int cgroup_ena
     }
     if (mount_standard_filesystems() != 0) return 125;
     if (ensure_working_directory(argv[2]) != 0) return fail("create working directory");
-    if (prepare_capabilities() != 0) return 125;
-    if (username[0]) {
-        if (initgroups(username, gid) != 0) return fail("set supplementary groups");
-    } else if (setgroups(0, NULL) != 0) {
-        return fail("clear supplementary groups");
-    }
-    if (setgid(gid) != 0) return fail("setgid");
-    if (setuid(uid) != 0) return fail("setuid");
+    if (prepare_capabilities(uid == 0) != 0) return 125;
+    if (switch_image_user(uid, gid, username) != 0) return 125;
     if (finish_capabilities() != 0) return 125;
     if (chdir(argv[2]) != 0) return fail("chdir working directory");
     if (pending_signal) return 128 + pending_signal;
@@ -1371,6 +1415,8 @@ int main(int argc, char **argv) {
         return copy_root_xattrs(argv[2], argv[3]);
     int cgroup_enabled = 0;
     int capability_profile_set = 0;
+    int capability_add_mask_set = 0;
+    int capability_drop_mask_set = 0;
     int option_end = 1;
     while (option_end < argc) {
         if (strcmp(argv[option_end], "--resource-cgroup") == 0) {
@@ -1393,9 +1439,23 @@ int main(int argc, char **argv) {
             }
             capability_profile_set = 1;
             option_end += 2;
+        } else if (strcmp(argv[option_end], "--cap-add-mask") == 0 || strcmp(argv[option_end], "--cap-drop-mask") == 0) {
+            int is_add = strcmp(argv[option_end], "--cap-add-mask") == 0;
+            int *set = is_add ? &capability_add_mask_set : &capability_drop_mask_set;
+            uint64_t *mask = is_add ? &capability_add_mask : &capability_drop_mask;
+            if (*set || option_end + 1 >= argc || !parse_capability_mask(argv[option_end + 1], mask)) {
+                fputs("rift-exec: invalid or duplicate capability mask\n", stderr);
+                return 125;
+            }
+            *set = 1;
+            option_end += 2;
         } else {
             break;
         }
+    }
+    if (capability_add_mask & capability_drop_mask) {
+        fputs("rift-exec: conflicting capability masks\n", stderr);
+        return 125;
     }
     if (option_end > 1) {
         memmove(&argv[1], &argv[option_end], (size_t)(argc - option_end) * sizeof(argv[0]));

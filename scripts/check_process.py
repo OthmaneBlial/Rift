@@ -181,7 +181,35 @@ int main(int argc, char **argv) {
         if mount_attempt.returncode == 0 or not ("permission denied" in mount_output or "operation not permitted" in mount_output):
             raise RuntimeError(f"container root was not denied a new filesystem mount: {mount_attempt!r}")
 
+        dropped_chown = subprocess.run(
+            [binary, "run", "--cap-drop", "CHOWN", "alpine", "/bin/busybox", "sh", "-c",
+             'grep -q "^CapEff:[[:space:]]*00000000000004fa$" /proc/self/status && '
+             'touch /tmp/rift-cap-drop-check && chown 123:456 /tmp/rift-cap-drop-check'],
+            env=env, capture_output=True, text=True, timeout=60,
+        )
+        if dropped_chown.returncode == 0 or "operation not permitted" not in (dropped_chown.stdout + dropped_chown.stderr).lower():
+            raise RuntimeError(f"--cap-drop CHOWN did not remove the capability: {dropped_chown!r}")
+
+        added_sys_admin = subprocess.run(
+            [binary, "run", "--cap-profile", "none", "--cap-add", "SYS_ADMIN", "alpine", "/bin/busybox", "sh", "-c",
+             'grep -q "^CapEff:[[:space:]]*0000000000200000$" /proc/self/status && '
+             'mkdir -p /tmp/rift-cap-add-check && mount -t tmpfs tmpfs /tmp/rift-cap-add-check'],
+            env=env, capture_output=True, text=True, timeout=60,
+        )
+        if added_sys_admin.returncode != 0:
+            raise RuntimeError(f"--cap-add SYS_ADMIN did not permit a guest mount: {added_sys_admin!r}")
+
         select_user("1000:1000")
+        nonroot_added_sys_admin = subprocess.run(
+            [binary, "run", "--cap-profile", "none", "--cap-add", "SYS_ADMIN", "alpine", "/bin/busybox", "sh", "-c",
+             'test "$(id -u)" = 1000 && '
+             'grep -q "^CapEff:[[:space:]]*0000000000200000$" /proc/self/status && '
+             'mkdir -p /tmp/rift-nonroot-cap-add-check && mount -t tmpfs tmpfs /tmp/rift-nonroot-cap-add-check'],
+            env=env, capture_output=True, text=True, timeout=60,
+        )
+        if nonroot_added_sys_admin.returncode != 0:
+            raise RuntimeError(f"--cap-add SYS_ADMIN did not reach a non-root image user: {nonroot_added_sys_admin!r}")
+
         cases = (
             (["run", "alpine", "/bin/pwd"], "/tmp"),
             (["run", "-w", "/", "alpine", "/bin/pwd"], "/"),

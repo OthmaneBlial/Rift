@@ -30,7 +30,7 @@ fn printHelp(writer: *Io.Writer) Io.Writer.Error!void {
             "  run [options] <image> [command] [args...] Run in the foreground\n" ++
             "  run -d [options] <image> [command] [args...] Run detached\n" ++
             "    Options: --rm (foreground only), --cpus N, --memory SIZE, --cpu-limit N.NNN, --memory-limit SIZE,\n" ++
-            "             --pids-limit N, --cap-profile default|none,\n" ++
+            "             --pids-limit N, --cap-profile default|none, --cap-add CAP, --cap-drop CAP,\n" ++
             "             --network none, -p HOST:GUEST, -w DIR, -e KEY=VALUE, -v HOST:TARGET[:ro|rw]\n" ++
             "  ps                 List detached containers\n" ++
             "  inspect <id>       Show detached container details\n" ++
@@ -487,6 +487,7 @@ pub fn main(init: std.process.Init) void {
             error.InvalidMemoryLimit => std.debug.print("rift: --memory-limit must be a positive byte size no larger than --memory\n", .{}),
             error.InvalidPidsLimit => std.debug.print("rift: --pids-limit must be a positive whole number no greater than 4294967295\n", .{}),
             error.InvalidCapabilityProfile => std.debug.print("rift: --cap-profile must be 'default' or 'none'\n", .{}),
+            error.InvalidCapabilityName => std.debug.print("rift: capability must be a known Linux name such as SYS_ADMIN or CAP_NET_RAW\n", .{}),
             error.InvalidNetworkMode => std.debug.print("rift: --network currently supports only 'none'\n", .{}),
             error.NetworkRequiredForPort => std.debug.print("rift: -p port forwarding requires networking; remove --network none\n", .{}),
             error.InvalidVMResources => std.debug.print("rift: requested VM CPU or memory size is outside this Mac's supported range\n", .{}),
@@ -549,6 +550,7 @@ test "help is available without a command" {
     try std.testing.expect(std.mem.indexOf(u8, output.written(), "--cpu-limit N.NNN") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.written(), "--memory-limit SIZE") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.written(), "--cap-profile default|none") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output.written(), "--cap-add CAP, --cap-drop CAP") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.written(), "--network none") != null);
 }
 

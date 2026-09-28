@@ -339,7 +339,48 @@ def main() -> int:
         if call(rift, "stop", profile_identifier).returncode != 0 or call(rift, "rm", profile_identifier).returncode != 0:
             raise RuntimeError("could not clean up none-profile container")
         profile_identifier = ""
-        print("Rift exec check passed: streaming input/output, TTY, resize, terminal restore, signal forwarding, arguments, environment, working directory, PID namespace, filesystem, capability profile, exit status, lifecycle")
+        added = call(
+            rift,
+            "run",
+            "-d",
+            "--cap-profile",
+            "none",
+            "--cap-add",
+            "SYS_ADMIN",
+            "alpine",
+            "/bin/sh",
+            "-c",
+            "grep '^CapEff:' /proc/self/status; echo RIFT_CAP_ADD_READY; exec sleep 60",
+        )
+        profile_identifier = added.stdout.strip()
+        if added.returncode != 0 or re.fullmatch(r"[0-9a-f]{32}", profile_identifier) is None:
+            raise RuntimeError(f"SYS_ADMIN container failed to start: {added!r}")
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            logs = call(rift, "logs", profile_identifier)
+            if logs.returncode == 0 and "RIFT_CAP_ADD_READY" in logs.stdout:
+                break
+            time.sleep(0.2)
+        else:
+            raise RuntimeError("SYS_ADMIN container did not become ready")
+        if re.search(r"^CapEff:\s+0000000000200000$", logs.stdout, re.MULTILINE) is None:
+            raise RuntimeError(f"workload did not inherit SYS_ADMIN: {logs!r}")
+        capability_exec = call(
+            rift,
+            "exec",
+            profile_identifier,
+            "/bin/busybox",
+            "sh",
+            "-c",
+            'grep -q "^CapEff:[[:space:]]*0000000000200000$" /proc/self/status && '
+            'mkdir -p /tmp/rift-exec-cap-add-check && mount -t tmpfs tmpfs /tmp/rift-exec-cap-add-check',
+        )
+        if capability_exec.returncode != 0:
+            raise RuntimeError(f"rift exec did not retain SYS_ADMIN: {capability_exec!r}")
+        if call(rift, "stop", profile_identifier).returncode != 0 or call(rift, "rm", profile_identifier).returncode != 0:
+            raise RuntimeError("could not clean up SYS_ADMIN container")
+        profile_identifier = ""
+        print("Rift exec check passed: streaming input/output, TTY, resize, terminal restore, signal forwarding, arguments, environment, working directory, PID namespace, filesystem, capability profiles and add, exit status, lifecycle")
         return 0
     except Exception as error:
         print(f"Rift exec check failed: {error}", file=sys.stderr)

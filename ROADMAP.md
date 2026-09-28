@@ -67,7 +67,7 @@ This roadmap carries the original plan forward from the first project commit. `[
 - [x] Apply an optional cgroup v2 task cap with `--pids-limit`; reserve one task for the PID namespace supervisor.
 - [x] Provide reduced and empty capability profiles with `--cap-profile default|none`.
 - [x] Apply optional cgroup v2 CPU and memory quotas per container with `--cpu-limit` and `--memory-limit`, including `exec` processes.
-- [ ] Add per-capability add/drop controls.
+- [x] Add repeatable per-capability `--cap-add` and `--cap-drop` controls for Linux capability names; verify default-profile removal, explicit root and non-root grants, and detached `exec` propagation.
 - [x] Review help and error messages across supported commands for clear, predictable use.
 - [x] Add binary-safe JSON Lines for detached logs with container ID, combined stream, and byte offsets; preserve output bytes as base64 data.
 
