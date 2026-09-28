@@ -145,6 +145,7 @@ def measure_worker(binary: Path, env: dict[str, str]) -> dict[str, object]:
         raise RuntimeError(f"invalid detached container ID: {identifier!r}")
     boot_measurement = Path(env["HOME"]) / "Library/Application Support/Rift/runtime" / f"run-{identifier}" / "control/guest-boot-ms"
     guest_boot_ms = None
+    stop_complete = False
     try:
         deadline = time.monotonic() + 30
         while time.monotonic() < deadline:
@@ -188,9 +189,14 @@ def measure_worker(binary: Path, env: dict[str, str]) -> dict[str, object]:
                                 combined_footprints.append(combined)
                                 vm_footprints.append(per_process[vm_pid])
                     time.sleep(0.1)
+                stop_started_ns = time.perf_counter_ns()
+                stopped = run(binary, env, "stop", identifier)
+                detached_stop_ms = round((time.perf_counter_ns() - stop_started_ns) / 1_000_000, 1)
+                stop_complete = True
                 return {
                     "vm_start_to_guest_control_ready_ms": guest_boot_ms,
                     "detached_run_to_guest_ready_ms": detached_ready_ms,
+                    "detached_graceful_stop_ms": detached_stop_ms,
                     "warm_detached_exec_true_ms": [round(sample, 1) for sample in exec_samples],
                     "warm_detached_exec_true_median_ms": round(statistics.median(exec_samples), 1),
                     "detached_worker_rss_kib": int(statistics.median(worker_rss)),
@@ -204,10 +210,11 @@ def measure_worker(binary: Path, env: dict[str, str]) -> dict[str, object]:
             time.sleep(0.1)
         raise RuntimeError(f"detached Alpine did not become ready: {run(binary, env, 'ps').stdout}")
     finally:
-        stopped = subprocess.run([str(binary), "stop", identifier], env=env, capture_output=True, text=True, timeout=15)
+        stopped = None if stop_complete else subprocess.run([str(binary), "stop", identifier], env=env, capture_output=True, text=True, timeout=15)
         removed = subprocess.run([str(binary), "rm", identifier], env=env, capture_output=True, text=True, timeout=15)
-        if stopped.returncode or removed.returncode:
-            raise RuntimeError(f"could not clean up benchmark container: {stopped.stderr} {removed.stderr}")
+        if (stopped is not None and stopped.returncode) or removed.returncode:
+            stop_error = stopped.stderr if stopped is not None else ""
+            raise RuntimeError(f"could not clean up benchmark container: {stop_error} {removed.stderr}")
 
 
 def main() -> None:

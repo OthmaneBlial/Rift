@@ -17,7 +17,7 @@ The benchmark copies local image blobs, image records, and guest boot files into
 
 Warm `exec` timing starts a fresh host CLI process for each call against the already-ready detached VM. It includes host request creation, guest control-share polling and dispatch, `/bin/true` startup, and result collection. It is end-to-end command overhead, not an isolated VirtioFS latency measurement. The five calls run before the idle-guest memory samples.
 
-The detached timer starts before `rift run -d` and stops when the first `rift logs` poll returns the workload-ready marker. It includes host rootfs setup, VM startup, workload execution, and log polling; it excludes the later RSS and footprint sampling. Each launch starts a new VM.
+The detached timer starts before `rift run -d` and stops when the first `rift logs` poll returns the workload-ready marker. It includes host rootfs setup, VM startup, workload execution, and log polling; it excludes the later RSS and footprint sampling. Each launch starts a new VM. Graceful shutdown timing starts immediately before `rift stop` on that ready VM and ends when the command returns; it includes guest stop delivery and teardown plus the Virtualization.framework stop callback, but excludes `rift rm`.
 
 The script records the worker RSS and, when process identification is unambiguous, Virtualization.framework VM-service RSS and process footprints. It also samples system memory immediately before VM launch and three times after the idle guest reports ready. These whole-Mac snapshots use `hw.memsize`, the free-page count from `vm_stat`, and `memory_pressure -Q` when available. They include every macOS process and the VM, so they are contextual system measurements, not memory attributable to Rift.
 
@@ -33,7 +33,20 @@ On APFS, Rift uses `fclonefileat` to clone the immutable installed `initramfs-vi
 
 To measure the base-file storage effect, 12 temporary clones of the installed 10,161,578-byte initramfs reduced free space by 12,288 bytes. After removing those clones, 12 full copies reduced free space by 121,958,400 bytes for 121,938,936 logical bytes. Both groups were created under `~/Library/Application Support/Rift`; the temporary directory was removed. `shutil.disk_usage` reports free space for the whole volume, so the 12 KiB clone delta includes filesystem metadata and measurement noise. Each actual run also appends its own script and guest executor CPIO entries, which consume space in both cases. Treat this as evidence that cloning avoids roughly 122 MB of duplicate base data across these 12 files on this volume, not an exact per-file allocation guarantee.
 
-The cached runtime benchmark showed no startup improvement: one pre-change sample measured 1,100.0 ms for subsequent Alpine launches and 433.828 ms to guest control readiness; one post-change sample measured 1,109.4 ms and 435.95 ms. One sample per revision is insufficient to infer a difference. Guest shutdown was not changed or measured here.
+The cached runtime benchmark showed no startup improvement: one pre-change sample measured 1,100.0 ms for subsequent Alpine launches and 433.828 ms to guest control readiness; one post-change sample measured 1,109.4 ms and 435.95 ms. One sample per revision is insufficient to infer a difference. Guest shutdown was not changed in those samples.
+
+## Graceful shutdown baseline
+
+Apple M2, macOS 26.6, `ReleaseSafe`, runtime commit `7e7480f`, three independent benchmark invocations on 2026-09-28 between 07:02 and 07:04 UTC. The benchmark measured `rift stop` after the detached Alpine workload and VM were ready; it did not include removal.
+
+| Sample | VM start to guest control ready | Detached run to ready | Graceful `rift stop` |
+| --- | ---: | ---: | ---: |
+| 1 | 431.736 ms | 3,727.7 ms | 1,053.4 ms |
+| 2 | 444.817 ms | 949.0 ms | 1,153.0 ms |
+| 3 | 426.132 ms | 3,611.3 ms | 1,148.3 ms |
+| Median | 431.736 ms | 3,611.3 ms | 1,148.3 ms |
+
+The detached-ready samples vary substantially even though VM control readiness stays near 0.43 seconds; this benchmark does not isolate the source of that later variation. Shutdown clusters near the guest script's one-second stop-file polling interval, plus guest and VM teardown. This is a three-sample baseline, not a cross-machine performance claim.
 
 ## Latest cached benchmark
 
