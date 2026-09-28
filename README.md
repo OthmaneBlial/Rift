@@ -109,21 +109,21 @@ Host environment variables are not copied into containers. Volumes are read-only
 
 ## Benchmarks
 
-One cached run on an Apple M2 with macOS 26.6 and Zig 0.16.0 (`ReleaseSafe`, runtime `3ad3b27`, benchmark `fc4c3e5`):
+Three cached benchmark runs on an Apple M2 with macOS 26.6 and Zig 0.16.0 (`ReleaseSafe`, runtime `3ad3b27`, benchmark `fc4c3e5`):
 
 | Metric | Result |
 | --- | ---: |
-| First cached Alpine launch | 1,197 ms |
-| Subsequent launches, median of 5 | 1,140 ms |
-| VM start to guest control ready | 429 ms |
-| Detached start to workload-ready marker | 971 ms |
-| Warm detached `rift exec <id> /bin/true`, median of 5 | 77 ms |
+| First cached Alpine launch, median of 3 | 1,178 ms |
+| Subsequent launches, median of 3 run medians | 1,144 ms |
+| VM start to guest control ready, median of 3 | 431 ms |
+| Detached start to workload-ready marker, median of 3 | 975 ms |
+| Warm detached `rift exec <id> /bin/true`, median of 3 run medians | 70 ms |
 | Executable size | 2,039,216 bytes |
-| Worker and VM-service process footprint after ready | 155.8 MiB |
+| Worker and VM-service process footprint after ready, median of 3 | 151.3 MiB |
+| Copied store, logical file bytes | 151,145,470 bytes |
 | Whole-Mac physical RAM | 16 GiB |
-| Memory pressure available, before VM / idle VM | 66% / 66% |
 
-The image and guest files were cached. This single sample does not establish a performance change. Warm `exec` timing includes the host CLI, guest control request/response, supervisor dispatch, and `/bin/true`; it is not isolated IPC latency. VM-start timing ends when the guest mounts its rootfs and control shares; it excludes guest overlay setup and workload startup. The memory pressure value covers the whole Mac, including unrelated processes, and is not Rift-attributable. Homebrew v0.1.2's installed keg uses 1,724 KiB; its first-run guest assets use 44.3 MiB separately from the image cache. These are single-machine samples, not a Docker comparison. See [benchmark method and history](docs/BENCHMARKS.md).
+The image and guest files were cached. Each run median covers five launches; the table reports the median across three benchmark runs. The process footprint varied from 150.8 to 159.1 MiB and includes only the Rift worker and VM service. Warm `exec` timing includes the host CLI, guest control request/response, supervisor dispatch, and `/bin/true`; it is not isolated IPC latency. VM-start timing ends when the guest mounts its rootfs and control shares; it excludes guest overlay setup and workload startup. Homebrew v0.1.2's installed keg uses 1,724 KiB; its first-run guest assets use 44.3 MiB separately from the image cache. These are single-machine samples, not a Docker comparison. See [benchmark method and history](docs/BENCHMARKS.md).
 
 ## Requirements and limits
 
