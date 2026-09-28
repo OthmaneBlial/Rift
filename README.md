@@ -133,7 +133,7 @@ The image and guest files were cached. Warm `exec` timing includes the host CLI,
 - Each pull is capped at 16 GiB of distinct image blobs not already verified in the local cache.
 - Each layer is capped at 8 GiB decompressed; all image layers together are capped at 32 GiB per extraction pass.
 - `rift exec -i` streams stdin. Use `rift exec -it` from a terminal for a resizable guest TTY; Rift restores host terminal settings when the command ends.
-- PAX fields beyond local/global `path`, `linkpath`, `size`, `mtime`, `uid`, and `gid`, extended attributes, file capabilities, and special files other than FIFOs remain unsupported. OCI FIFOs are restored as named pipes. Rift preserves tar and PAX `uid`/`gid` ownership in the guest overlay. Image device nodes under `/dev` are ignored because every container gets a fresh restricted `/dev`.
+- Rift restores `SCHILY.xattr.*`, `LIBARCHIVE.xattr.*`, and legacy `security.capability` PAX values, including binary file and nested-directory xattrs. Root-directory xattrs are written during image assembly but are not visible at `/` inside the current overlay-backed container. Image `user.overlay.*` and `trusted.overlay.*` attributes are rejected because OverlayFS reserves them for its own metadata. Workloads run with `no_new_privs`, so file capabilities cannot grant extra process privileges. Other PAX fields and special files except FIFOs remain unsupported. OCI FIFOs are restored as named pipes. Rift preserves tar and PAX `uid`/`gid` ownership in the guest overlay. Image device nodes under `/dev` are ignored because every container gets a fresh restricted `/dev`.
 - No Developer ID signature or notarized download yet. Build from source for now; do not use this preview as a Docker replacement.
 
 Treat images and workloads as untrusted. See the [threat model](docs/THREAT_MODEL.md) for current protections, assumptions, and open security review work.
@@ -146,7 +146,7 @@ GitHub Actions is disabled. Run the local suite on Apple Silicon:
 ./scripts/check-local.sh
 ```
 
-It checks Zig formatting, unit tests, a `ReleaseSafe` build, Python check scripts, guest preparation, and VM/OCI integration including non-root access to OCI-owned files. The integration suite uses the local image cache and network access on first use. Run `zig build -Doptimize=ReleaseSafe benchmark` separately; benchmark results depend on the host and system load.
+It checks Zig formatting, unit tests, a `ReleaseSafe` build, Python check scripts, guest preparation, and VM/OCI integration including xattrs, file capabilities, and non-root access to OCI-owned files. The integration suite uses the local image cache and network access on first use. Run `zig build -Doptimize=ReleaseSafe benchmark` separately; benchmark results depend on the host and system load.
 
 ## Project status
 

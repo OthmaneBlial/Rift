@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Exercise image WorkingDir and User using real Alpine layers and a local config fixture."""
 
+import base64
 import hashlib
 import io
 import json
@@ -61,6 +62,73 @@ def main() -> int:
 
         env = dict(os.environ, HOME=home)
         select_user("0:0")
+        probe_source = Path(home) / "xattr_probe.c"
+        probe = Path(home) / "rift-xattr-probe"
+        probe_source.write_text(r'''#include <stdio.h>
+#include <string.h>
+#include <sys/types.h>
+#include <sys/xattr.h>
+
+static int matches(const char *path, const char *name, const unsigned char *expected, size_t size) {
+    unsigned char actual[256];
+    ssize_t length = getxattr(path, name, actual, sizeof(actual));
+    return length == (ssize_t)size && memcmp(actual, expected, size) == 0;
+}
+
+int main(void) {
+    static const unsigned char binary[] = { 'A', 0, 0xff };
+    static const unsigned char capability[] = { 1, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+    static const unsigned char empty[] = "";
+    if (!matches("/opt/rift-xattrs/payload", "user.rift.inherited", (const unsigned char *)"global", 6)) return 11;
+    if (!matches("/opt/rift-xattrs/payload", "user.rift.override", (const unsigned char *)"local", 5)) return 12;
+    if (!matches("/opt/rift-xattrs/payload", "user.rift.binary", binary, sizeof(binary))) return 13;
+    if (!matches("/opt/rift-xattrs/payload", "user.rift:encoded", (const unsigned char *)"decoded", 7)) return 14;
+    if (!matches("/opt/rift-xattrs/payload", "user.rift.empty", empty, 0)) return 15;
+    if (!matches("/opt/rift-xattrs/payload", "security.capability", capability, sizeof(capability))) return 16;
+    if (!matches("/opt/rift-xattrs", "user.rift.directory", (const unsigned char *)"dir-value", 9)) return 17;
+    if (!matches("/opt/rift-xattrs/payload", "user.rift.literal%25", (const unsigned char *)"percent", 7)) return 18;
+    puts("RIFT_XATTR_OK");
+    return 0;
+}
+''')
+        subprocess.run(["zig", "cc", "-target", "aarch64-linux-musl", "-static", "-Os", str(probe_source), "-o", str(probe)], check=True)
+        global_xattrs = {
+            "SCHILY.xattr.user.rift.inherited": "global",
+            "SCHILY.xattr.user.rift.override": "global",
+        }
+        payload_xattrs = {
+            "SCHILY.xattr.user.rift.override": "local",
+            "SCHILY.xattr.user.rift.binary": b"A\x00\xff".decode("utf-8", "surrogateescape"),
+            "SCHILY.xattr.user.rift.literal%25": "percent",
+            "LIBARCHIVE.xattr.user.rift%3Aencoded": base64.b64encode(b"decoded").decode("ascii"),
+            "SCHILY.xattr.user.rift.empty": "",
+            "security.capability": (bytes([1, 0, 0, 2]) + bytes(16)).decode("latin-1"),
+        }
+        xattr_archive = io.BytesIO()
+        with tarfile.open(fileobj=xattr_archive, mode="w", format=tarfile.PAX_FORMAT, pax_headers=global_xattrs, encoding="latin-1") as layer:
+            directory = tarfile.TarInfo("opt/rift-xattrs")
+            directory.type = tarfile.DIRTYPE
+            directory.mode = 0o755
+            directory.pax_headers = {"SCHILY.xattr.user.rift.directory": "dir-value"}
+            layer.addfile(directory)
+            payload = tarfile.TarInfo("opt/rift-xattrs/payload")
+            payload.mode = 0o644
+            payload.size = len(b"xattrs\n")
+            payload.pax_headers = payload_xattrs
+            layer.addfile(payload, io.BytesIO(b"xattrs\n"))
+            executable = tarfile.TarInfo("usr/bin/rift-xattr-probe")
+            executable.mode = 0o755
+            executable.size = probe.stat().st_size
+            with probe.open("rb") as executable_body:
+                layer.addfile(executable, executable_body)
+        append_layer(xattr_archive.getvalue())
+        select_user("0:0")
+        xattr_check = subprocess.run(
+            [binary, "run", "alpine", "/usr/bin/rift-xattr-probe"],
+            env=env, capture_output=True, text=True, timeout=60,
+        )
+        if xattr_check.returncode != 0 or xattr_check.stdout.strip() != "RIFT_XATTR_OK":
+            raise RuntimeError(f"OCI file and directory xattr check failed: {xattr_check!r}")
         no_new_privs = subprocess.run(
             [binary, "run", "alpine", "/bin/busybox", "grep", "-q", "^NoNewPrivs:[[:space:]]*1$", "/proc/self/status"],
             env=env, capture_output=True, text=True, timeout=60,
@@ -174,7 +242,7 @@ def main() -> int:
             raise RuntimeError(f"fixture still contains a working shell: {removed_shell!r}")
         if list((data / "runtime").iterdir()):
             raise RuntimeError("process settings run left runtime staging behind")
-    print("Rift process and ownership check passed: no_new_privs, root mount denial, users, groups, OCI ownership and FIFOs, writable /tmp, shell-free image")
+    print("Rift process and ownership check passed: no_new_privs, root mount denial, users, groups, OCI ownership, xattrs and capabilities, FIFOs, writable /tmp, shell-free image")
     return 0
 
 

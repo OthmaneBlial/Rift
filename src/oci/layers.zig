@@ -2,11 +2,17 @@ const std = @import("std");
 const Io = std.Io;
 const c = @cImport({
     @cInclude("sys/stat.h");
+    @cInclude("sys/xattr.h");
 });
 
 const max_layer_bytes = 8 * 1024 * 1024 * 1024;
 const max_image_layer_bytes = 32 * 1024 * 1024 * 1024;
 const max_pax_header_bytes = 1024 * 1024;
+const max_pax_xattr_count = 4096;
+const max_pax_xattr_bytes = 1024 * 1024;
+const max_xattr_name_bytes = 127;
+const max_xattr_value_bytes = 64 * 1024;
+pub const max_xattr_metadata_bytes = 64 * 1024 * 1024;
 const max_owner_records = 1_000_000;
 pub const max_owner_manifest_bytes = 64 * 1024 * 1024;
 const max_owner_index_scan_visits = 10_000_000;
@@ -17,11 +23,18 @@ pub const ExpansionBudget = struct {
     entries: u64 = 0,
     owner_manifest_bytes: u64 = "RIFTOWN1".len,
     owner_index_scan_visits: u64 = 0,
+    xattr_metadata_bytes: u64 = 0,
+};
+
+pub const Xattr = struct {
+    name: []const u8,
+    value: []const u8,
 };
 
 pub const DirectoryMetadata = struct {
     mode: u32,
     mtime: Io.Timestamp,
+    xattrs: []const Xattr = &.{},
 };
 
 pub const Ownership = struct {
@@ -39,6 +52,7 @@ pub fn validateUncompressedTar(allocator: std.mem.Allocator, io: Io, blob: Io.Fi
     var clean_buffer: [Io.Dir.max_path_bytes]u8 = undefined;
     var clean_link_buffer: [Io.Dir.max_path_bytes]u8 = undefined;
     var it = LayerTarIterator.init(allocator, &reader.interface, &image_total, &name_buffer, &link_buffer);
+    defer it.deinit();
     var entry_count: usize = 0;
     var layer_total: u64 = 0;
     var discard_buffer: [4096]u8 = undefined;
@@ -96,6 +110,7 @@ const LayerTarEntry = struct {
     kind: LayerTarEntryKind,
     mtime: Io.Timestamp,
     ownership: Ownership,
+    xattrs: []const Xattr,
 };
 
 const PaxOverrides = struct {
@@ -130,6 +145,11 @@ const LayerTarIterator = struct {
     global_mtime: ?Io.Timestamp = null,
     global_uid: ?u32 = null,
     global_gid: ?u32 = null,
+    local_xattrs: std.StringHashMap([]u8),
+    global_xattrs: std.StringHashMap([]u8),
+    entry_arena: std.heap.ArenaAllocator,
+    local_xattr_bytes: usize = 0,
+    global_xattr_bytes: usize = 0,
 
     fn init(allocator: std.mem.Allocator, reader: *Io.Reader, image_total: *u64, file_name_buffer: []u8, link_name_buffer: []u8) LayerTarIterator {
         return .{
@@ -138,7 +158,18 @@ const LayerTarIterator = struct {
             .image_total = image_total,
             .file_name_buffer = file_name_buffer,
             .link_name_buffer = link_name_buffer,
+            .local_xattrs = std.StringHashMap([]u8).init(allocator),
+            .global_xattrs = std.StringHashMap([]u8).init(allocator),
+            .entry_arena = std.heap.ArenaAllocator.init(allocator),
         };
+    }
+
+    fn deinit(self: *LayerTarIterator) void {
+        clearPaxXattrs(self.allocator, &self.local_xattrs);
+        clearPaxXattrs(self.allocator, &self.global_xattrs);
+        self.local_xattrs.deinit();
+        self.global_xattrs.deinit();
+        self.entry_arena.deinit();
     }
 
     fn account(self: *LayerTarIterator, amount: u64) !void {
@@ -151,6 +182,9 @@ const LayerTarIterator = struct {
     }
 
     fn next(self: *LayerTarIterator) !?LayerTarEntry {
+        _ = self.entry_arena.reset(.free_all);
+        clearPaxXattrs(self.allocator, &self.local_xattrs);
+        self.local_xattr_bytes = 0;
         if (self.unread_file_bytes > 0) {
             try self.account(self.unread_file_bytes);
             try self.reader.discardAll64(self.unread_file_bytes);
@@ -168,6 +202,8 @@ const LayerTarIterator = struct {
                 'g' => try self.readPaxHeader(size, &pax, true),
                 'x' => {
                     pax = .{};
+                    clearPaxXattrs(self.allocator, &self.local_xattrs);
+                    self.local_xattr_bytes = 0;
                     gnu_name = null;
                     gnu_link_name = null;
                     try self.readPaxHeader(size, &pax, false);
@@ -199,6 +235,7 @@ const LayerTarIterator = struct {
                         .uid = if (pax.has_uid) pax.uid orelse try tarHeaderId(header[108..116]) else self.global_uid orelse try tarHeaderId(header[108..116]),
                         .gid = if (pax.has_gid) pax.gid orelse try tarHeaderId(header[116..124]) else self.global_gid orelse try tarHeaderId(header[116..124]),
                     };
+                    const xattrs = try self.effectiveXattrs();
                     self.padding = tarBlockPadding(entry_size);
                     self.unread_file_bytes = entry_size;
                     return .{
@@ -209,6 +246,7 @@ const LayerTarIterator = struct {
                         .kind = entry_kind,
                         .mtime = mtime,
                         .ownership = ownership,
+                        .xattrs = xattrs,
                     };
                 },
                 else => return error.TarUnsupportedHeader,
@@ -264,11 +302,13 @@ const LayerTarIterator = struct {
             if (record.len < separator - offset + 4 or record[record.len - 1] != '\n') return error.PaxInvalidAttribute;
             const equals = std.mem.indexOfScalar(u8, record, '=') orelse return error.PaxInvalidAttribute;
             const key_start = separator - offset + 1;
-            if (equals <= key_start or std.mem.indexOfScalar(u8, record, 0) != null) return error.PaxInvalidAttribute;
+            if (equals <= key_start or std.mem.indexOfScalar(u8, record[key_start..equals], 0) != null) return error.PaxInvalidAttribute;
             const key = record[key_start..equals];
             const value = record[equals + 1 .. record.len - 1];
 
-            if (global) {
+            if (parsePaxXattrKey(key)) |xattr| {
+                try self.storePaxXattr(xattr.name, xattr.encoding, xattr.percent_encoded_name, value, global);
+            } else if (global) {
                 if (std.mem.eql(u8, key, "mtime")) {
                     self.global_mtime = if (value.len == 0) null else try parsePaxMtime(value);
                     pax.has_mtime = false;
@@ -304,6 +344,75 @@ const LayerTarIterator = struct {
         }
     }
 
+    fn storePaxXattr(self: *LayerTarIterator, encoded_name: []const u8, encoding: PaxXattrEncoding, percent_encoded_name: bool, raw_value: []const u8, global: bool) !void {
+        var name: ?[]u8 = try decodePaxXattrName(self.allocator, encoded_name, percent_encoded_name);
+        defer if (name) |value| self.allocator.free(value);
+        const name_bytes = name.?;
+        const separator = std.mem.indexOfScalar(u8, name_bytes, '.') orelse return;
+        const namespace = name_bytes[0..separator];
+        if (!std.mem.eql(u8, namespace, "user") and
+            !std.mem.eql(u8, namespace, "trusted") and
+            !std.mem.eql(u8, namespace, "security") and
+            !std.mem.eql(u8, namespace, "system")) return;
+        if (std.mem.startsWith(u8, name_bytes, "trusted.overlay.") or std.mem.startsWith(u8, name_bytes, "user.overlay.")) return error.UnsupportedPaxXattr;
+
+        var value: ?[]u8 = try decodePaxXattrValue(self.allocator, encoding, raw_value);
+        errdefer if (value) |bytes| self.allocator.free(bytes);
+        const attributes = if (global) &self.global_xattrs else &self.local_xattrs;
+        const byte_count = if (global) &self.global_xattr_bytes else &self.local_xattr_bytes;
+        const value_bytes = value.?;
+        const old_len = if (attributes.get(name_bytes)) |old| old.len else 0;
+
+        if (global and value_bytes.len == 0) {
+            if (attributes.fetchRemove(name_bytes)) |removed| {
+                byte_count.* -= removed.value.len;
+                self.allocator.free(removed.key);
+                self.allocator.free(removed.value);
+            }
+            self.allocator.free(name_bytes);
+            self.allocator.free(value_bytes);
+            name = null;
+            value = null;
+            return;
+        }
+
+        if (old_len == 0 and !attributes.contains(name_bytes) and attributes.count() >= max_pax_xattr_count) return error.TooManyPaxXattrs;
+        const updated_bytes = std.math.add(usize, byte_count.* - old_len, value_bytes.len) catch return error.PaxXattrDataTooLarge;
+        if (updated_bytes > max_pax_xattr_bytes) return error.PaxXattrDataTooLarge;
+        if (attributes.fetchRemove(name_bytes)) |removed| {
+            self.allocator.free(removed.key);
+            self.allocator.free(removed.value);
+        }
+        try attributes.put(name_bytes, value_bytes);
+        name = null;
+        value = null;
+        byte_count.* = updated_bytes;
+    }
+
+    fn effectiveXattrs(self: *LayerTarIterator) ![]const Xattr {
+        var count = self.local_xattrs.count();
+        var global = self.global_xattrs.iterator();
+        while (global.next()) |entry| {
+            if (!self.local_xattrs.contains(entry.key_ptr.*)) count += 1;
+        }
+        if (count == 0) return &.{};
+        if (count > max_pax_xattr_count) return error.TooManyPaxXattrs;
+        const result = try self.entry_arena.allocator().alloc(Xattr, count);
+        var index: usize = 0;
+        global = self.global_xattrs.iterator();
+        while (global.next()) |entry| {
+            if (self.local_xattrs.contains(entry.key_ptr.*)) continue;
+            result[index] = .{ .name = entry.key_ptr.*, .value = entry.value_ptr.* };
+            index += 1;
+        }
+        var local = self.local_xattrs.iterator();
+        while (local.next()) |entry| {
+            result[index] = .{ .name = entry.key_ptr.*, .value = entry.value_ptr.* };
+            index += 1;
+        }
+        return result;
+    }
+
     fn readGnuString(self: *LayerTarIterator, size: u64, buffer: []u8) ![]const u8 {
         if (size > buffer.len) return error.TarInsufficientBuffer;
         try self.account(size);
@@ -313,6 +422,74 @@ const LayerTarIterator = struct {
         return std.mem.sliceTo(value, 0);
     }
 };
+
+const PaxXattrEncoding = enum { raw, base64 };
+
+const PaxXattrKey = struct {
+    name: []const u8,
+    encoding: PaxXattrEncoding,
+    percent_encoded_name: bool,
+};
+
+fn parsePaxXattrKey(key: []const u8) ?PaxXattrKey {
+    const schily_prefix = "SCHILY.xattr.";
+    if (std.mem.startsWith(u8, key, schily_prefix)) return .{ .name = key[schily_prefix.len..], .encoding = .raw, .percent_encoded_name = false };
+    const libarchive_prefix = "LIBARCHIVE.xattr.";
+    if (std.mem.startsWith(u8, key, libarchive_prefix)) return .{ .name = key[libarchive_prefix.len..], .encoding = .base64, .percent_encoded_name = true };
+    if (std.mem.eql(u8, key, "security.capability")) return .{ .name = key, .encoding = .raw, .percent_encoded_name = false };
+    return null;
+}
+
+fn decodePaxXattrName(allocator: std.mem.Allocator, encoded: []const u8, percent_encoded: bool) ![]u8 {
+    if (encoded.len == 0 or encoded.len > max_xattr_name_bytes * 3) return error.PaxInvalidXattrName;
+    var decoded: [max_xattr_name_bytes]u8 = undefined;
+    var input: usize = 0;
+    var output: usize = 0;
+    while (input < encoded.len) {
+        var byte = encoded[input];
+        if (percent_encoded and byte == '%') {
+            if (input + 2 >= encoded.len) return error.PaxInvalidXattrName;
+            byte = (try hexNibble(encoded[input + 1])) << 4 | try hexNibble(encoded[input + 2]);
+            input += 2;
+        }
+        if (byte == 0 or output == decoded.len) return error.PaxInvalidXattrName;
+        decoded[output] = byte;
+        output += 1;
+        input += 1;
+    }
+    return try allocator.dupe(u8, decoded[0..output]);
+}
+
+fn hexNibble(value: u8) !u8 {
+    return switch (value) {
+        '0'...'9' => value - '0',
+        'a'...'f' => value - 'a' + 10,
+        'A'...'F' => value - 'A' + 10,
+        else => error.PaxInvalidXattrName,
+    };
+}
+
+fn decodePaxXattrValue(allocator: std.mem.Allocator, encoding: PaxXattrEncoding, encoded: []const u8) ![]u8 {
+    if (encoding == .raw) {
+        if (encoded.len > max_xattr_value_bytes) return error.PaxXattrDataTooLarge;
+        return allocator.dupe(u8, encoded);
+    }
+    const size = std.base64.standard.Decoder.calcSizeForSlice(encoded) catch return error.PaxInvalidXattrValue;
+    if (size > max_xattr_value_bytes) return error.PaxXattrDataTooLarge;
+    const value = try allocator.alloc(u8, size);
+    errdefer allocator.free(value);
+    std.base64.standard.Decoder.decode(value, encoded) catch return error.PaxInvalidXattrValue;
+    return value;
+}
+
+fn clearPaxXattrs(allocator: std.mem.Allocator, attributes: *std.StringHashMap([]u8)) void {
+    var entries = attributes.iterator();
+    while (entries.next()) |entry| {
+        allocator.free(entry.key_ptr.*);
+        allocator.free(entry.value_ptr.*);
+    }
+    attributes.clearRetainingCapacity();
+}
 
 fn copyTarString(buffer: []u8, value: []const u8) ![]const u8 {
     if (value.len > buffer.len) return error.TarInsufficientBuffer;
@@ -427,6 +604,7 @@ fn applyTar(allocator: std.mem.Allocator, io: Io, root: Io.Dir, reader: *Io.Read
     var clean_buffer: [Io.Dir.max_path_bytes]u8 = undefined;
     const image_total = if (phase == .whiteouts) &budget.whiteouts else &budget.entries;
     var it = LayerTarIterator.init(allocator, reader, image_total, &name_buffer, &link_buffer);
+    defer it.deinit();
     var total: u64 = 0;
     var count: usize = 0;
     while (true) {
@@ -464,15 +642,28 @@ fn applyTar(allocator: std.mem.Allocator, io: Io, root: Io.Dir, reader: *Io.Read
             continue;
         }
         if (path.len == 0) {
-            if (phase == .entries and entry.kind == .directory) try setOwnership(ownership, path, entry.ownership, budget);
+            if (phase == .entries and entry.kind == .directory) {
+                try accountXattrMetadata(budget, entry.xattrs);
+                const metadata: DirectoryMetadata = .{
+                    .mode = entry.mode & 0o7777,
+                    .mtime = entry.mtime,
+                    .xattrs = try copyXattrs(directory_metadata.allocator, entry.xattrs),
+                };
+                if (directory_metadata.getPtr(path)) |stored_metadata| {
+                    stored_metadata.* = metadata;
+                } else {
+                    try directory_metadata.put(try directory_metadata.allocator.dupe(u8, path), metadata);
+                }
+                try setOwnership(ownership, path, entry.ownership, budget);
+            }
             continue;
         }
         if (phase == .whiteouts) {
-            if (entry.kind == .hard_link) try applyHardlink(allocator, io, root, path, entry.link_name, entry.size, entry.mtime, entry.ownership, ownership, budget, phase);
+            if (entry.kind == .hard_link) try applyHardlink(allocator, io, root, path, entry.link_name, entry.size, entry.mtime, entry.ownership, entry.xattrs, ownership, budget, phase);
             continue;
         }
         if (entry.kind == .hard_link) {
-            try applyHardlink(allocator, io, root, path, entry.link_name, entry.size, entry.mtime, entry.ownership, ownership, budget, phase);
+            try applyHardlink(allocator, io, root, path, entry.link_name, entry.size, entry.mtime, entry.ownership, entry.xattrs, ownership, budget, phase);
             continue;
         }
 
@@ -481,7 +672,12 @@ fn applyTar(allocator: std.mem.Allocator, io: Io, root: Io.Dir, reader: *Io.Read
         switch (entry.kind) {
             .directory => {
                 const mode: u32 = @intCast(entry.mode & 0o7777);
-                const metadata: DirectoryMetadata = .{ .mode = mode, .mtime = entry.mtime };
+                try accountXattrMetadata(budget, entry.xattrs);
+                const metadata: DirectoryMetadata = .{
+                    .mode = mode,
+                    .mtime = entry.mtime,
+                    .xattrs = try copyXattrs(directory_metadata.allocator, entry.xattrs),
+                };
                 if (directory_metadata.getPtr(path)) |stored_metadata| {
                     stored_metadata.* = metadata;
                 } else {
@@ -516,6 +712,7 @@ fn applyTar(allocator: std.mem.Allocator, io: Io, root: Io.Dir, reader: *Io.Read
                 try writer.interface.flush();
                 try output.setPermissions(io, .fromMode(@intCast(entry.mode & 0o777)));
                 try output.setTimestamps(io, .{ .modify_timestamp = .init(entry.mtime) });
+                try setHostXattrs(allocator, io, root, path, entry.xattrs);
                 try setOwnership(ownership, path, entry.ownership, budget);
             },
             .sym_link => {
@@ -527,6 +724,7 @@ fn applyTar(allocator: std.mem.Allocator, io: Io, root: Io.Dir, reader: *Io.Read
                     .follow_symlinks = false,
                     .modify_timestamp = .init(entry.mtime),
                 });
+                try setHostXattrs(allocator, io, root, path, entry.xattrs);
                 try setOwnership(ownership, path, entry.ownership, budget);
             },
             .fifo => {
@@ -534,6 +732,7 @@ fn applyTar(allocator: std.mem.Allocator, io: Io, root: Io.Dir, reader: *Io.Read
                 try removeOwnerSubtree(allocator, ownership, path, budget);
                 try createFifo(allocator, io, parent, name, entry.mode & 0o777);
                 try parent.setTimestamps(io, name, .{ .modify_timestamp = .init(entry.mtime) });
+                try setHostXattrs(allocator, io, root, path, entry.xattrs);
                 try setOwnership(ownership, path, entry.ownership, budget);
             },
             .hard_link => unreachable,
@@ -560,10 +759,14 @@ pub fn applyDirectoryMetadata(io: Io, root: Io.Dir, directory_metadata: *std.Str
             return lhs.len > rhs.len;
         }
     }.lessThan);
-    for (paths.items) |path| try applyDirectoryMetadataEntry(io, root, path, directory_metadata.get(path).?);
+    for (paths.items) |path| try applyDirectoryMetadataEntry(directory_metadata.allocator, io, root, path, directory_metadata.get(path).?);
 }
 
-fn applyDirectoryMetadataEntry(io: Io, root: Io.Dir, path: []const u8, metadata: DirectoryMetadata) !void {
+fn applyDirectoryMetadataEntry(allocator: std.mem.Allocator, io: Io, root: Io.Dir, path: []const u8, metadata: DirectoryMetadata) !void {
+    if (path.len == 0) {
+        try replaceHostXattrsFd(allocator, root.handle, metadata.xattrs);
+        return;
+    }
     var parent = openParent(io, root, parentPath(path), false) catch |err| switch (err) {
         error.UnsafeLayerPath => return,
         else => return err,
@@ -580,11 +783,86 @@ fn applyDirectoryMetadataEntry(io: Io, root: Io.Dir, path: []const u8, metadata:
         else => return err,
     };
     defer directory.close(io);
+    try clearHostXattrsFd(allocator, directory.handle);
+    try setHostXattrs(allocator, io, root, path, metadata.xattrs);
     try directory.setPermissions(io, .fromMode(@intCast(metadata.mode)));
     try parent.setTimestamps(io, name, .{
         .follow_symlinks = false,
         .modify_timestamp = .init(metadata.mtime),
     });
+}
+
+fn xattrAbsolutePath(allocator: std.mem.Allocator, io: Io, root: Io.Dir, path: []const u8) ![:0]u8 {
+    var buffer: [Io.Dir.max_path_bytes]u8 = undefined;
+    if (path.len == 0) {
+        const length = try root.realPath(io, &buffer);
+        return allocator.dupeZ(u8, buffer[0..length]);
+    }
+    var parent = (try openParent(io, root, parentPath(path), false)) orelse return error.FileNotFound;
+    defer parent.close(io);
+    const length = try parent.realPath(io, &buffer);
+    const absolute = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ buffer[0..length], basename(path) });
+    defer allocator.free(absolute);
+    return allocator.dupeZ(u8, absolute);
+}
+
+fn setHostXattrs(allocator: std.mem.Allocator, io: Io, root: Io.Dir, path: []const u8, xattrs: []const Xattr) !void {
+    if (xattrs.len == 0) return;
+    const absolute = try xattrAbsolutePath(allocator, io, root, path);
+    defer allocator.free(absolute);
+    for (xattrs) |xattr| {
+        const name = try allocator.dupeZ(u8, xattr.name);
+        defer allocator.free(name);
+        if (c.setxattr(absolute.ptr, name.ptr, @ptrCast(xattr.value.ptr), xattr.value.len, 0, c.XATTR_NOFOLLOW) != 0) return error.XattrSetFailed;
+    }
+}
+
+fn readHostXattr(allocator: std.mem.Allocator, io: Io, root: Io.Dir, path: []const u8, attribute: []const u8) ![]u8 {
+    const absolute = try xattrAbsolutePath(allocator, io, root, path);
+    defer allocator.free(absolute);
+    const name = try allocator.dupeZ(u8, attribute);
+    defer allocator.free(name);
+    const length = c.getxattr(absolute.ptr, name.ptr, null, 0, 0, c.XATTR_NOFOLLOW);
+    if (length < 0) return error.XattrReadFailed;
+    const value = try allocator.alloc(u8, @intCast(length));
+    errdefer allocator.free(value);
+    const buffer: ?*anyopaque = if (value.len == 0) null else @ptrCast(value.ptr);
+    if (c.getxattr(absolute.ptr, name.ptr, buffer, value.len, 0, c.XATTR_NOFOLLOW) != length) return error.XattrReadFailed;
+    return value;
+}
+
+fn replaceHostXattrsFd(allocator: std.mem.Allocator, descriptor: c_int, xattrs: []const Xattr) !void {
+    try clearHostXattrsFd(allocator, descriptor);
+    try setHostXattrsFd(allocator, descriptor, xattrs);
+}
+
+fn clearHostXattrsFd(allocator: std.mem.Allocator, descriptor: c_int) !void {
+    const listed_bytes = c.flistxattr(descriptor, null, 0, 0);
+    if (listed_bytes < 0 or listed_bytes > max_pax_header_bytes) return error.XattrListFailed;
+    if (listed_bytes > 0) {
+        const names = try allocator.alloc(u8, @intCast(listed_bytes));
+        defer allocator.free(names);
+        const actual_bytes = c.flistxattr(descriptor, names.ptr, names.len, 0);
+        if (actual_bytes < 0 or actual_bytes > listed_bytes) return error.XattrListFailed;
+        const actual = names[0..@intCast(actual_bytes)];
+        var offset: usize = 0;
+        while (offset < actual.len) {
+            const end = std.mem.indexOfScalarPos(u8, actual, offset, 0) orelse return error.XattrListFailed;
+            if (end == offset) return error.XattrListFailed;
+            const name = try allocator.dupeZ(u8, actual[offset..end]);
+            defer allocator.free(name);
+            if (c.fremovexattr(descriptor, name.ptr, 0) != 0) return error.XattrRemoveFailed;
+            offset = end + 1;
+        }
+    }
+}
+
+fn setHostXattrsFd(allocator: std.mem.Allocator, descriptor: c_int, xattrs: []const Xattr) !void {
+    for (xattrs) |xattr| {
+        const name = try allocator.dupeZ(u8, xattr.name);
+        defer allocator.free(name);
+        if (c.fsetxattr(descriptor, name.ptr, @ptrCast(xattr.value.ptr), xattr.value.len, 0, 0) != 0) return error.XattrSetFailed;
+    }
 }
 
 fn setOwnership(ownership: *std.StringHashMap(Ownership), path: []const u8, value: Ownership, budget: *ExpansionBudget) !void {
@@ -635,7 +913,7 @@ fn removeOwnerEntries(allocator: std.mem.Allocator, ownership: *std.StringHashMa
     }
 }
 
-fn applyHardlink(allocator: std.mem.Allocator, io: Io, root: Io.Dir, path: []const u8, raw_target: []const u8, size: u64, mtime: Io.Timestamp, entry_ownership: Ownership, ownership: *std.StringHashMap(Ownership), budget: *ExpansionBudget, phase: Pass) !void {
+fn applyHardlink(allocator: std.mem.Allocator, io: Io, root: Io.Dir, path: []const u8, raw_target: []const u8, size: u64, mtime: Io.Timestamp, entry_ownership: Ownership, xattrs: []const Xattr, ownership: *std.StringHashMap(Ownership), budget: *ExpansionBudget, phase: Pass) !void {
     if (size != 0) return error.TarUnsupportedHeader;
     var clean_target_buffer: [Io.Dir.max_path_bytes]u8 = undefined;
     const target = try cleanPath(raw_target, &clean_target_buffer);
@@ -655,6 +933,7 @@ fn applyHardlink(allocator: std.mem.Allocator, io: Io, root: Io.Dir, path: []con
         .follow_symlinks = false,
         .modify_timestamp = .init(mtime),
     });
+    try setHostXattrs(allocator, io, root, path, xattrs);
     try setOwnership(ownership, path, target_ownership, budget);
 }
 
@@ -669,6 +948,38 @@ fn accountOwnerIndexScan(budget: *ExpansionBudget, entry_count: usize) !void {
     const total = std.math.add(u64, budget.owner_index_scan_visits, @intCast(entry_count)) catch return error.LayerOwnershipIndexTooComplex;
     if (total > max_owner_index_scan_visits) return error.LayerOwnershipIndexTooComplex;
     budget.owner_index_scan_visits = total;
+}
+
+fn accountXattrMetadata(budget: *ExpansionBudget, xattrs: []const Xattr) !void {
+    var total = budget.xattr_metadata_bytes;
+    for (xattrs) |xattr| {
+        var record = std.math.add(u64, 16, @intCast(xattr.name.len)) catch return error.XattrMetadataTooLarge;
+        record = std.math.add(u64, record, @intCast(xattr.value.len)) catch return error.XattrMetadataTooLarge;
+        total = std.math.add(u64, total, record) catch return error.XattrMetadataTooLarge;
+    }
+    if (total > max_xattr_metadata_bytes) return error.XattrMetadataTooLarge;
+    budget.xattr_metadata_bytes = total;
+}
+
+fn copyXattrs(allocator: std.mem.Allocator, xattrs: []const Xattr) ![]const Xattr {
+    if (xattrs.len == 0) return &.{};
+    const result = try allocator.alloc(Xattr, xattrs.len);
+    var copied: usize = 0;
+    errdefer {
+        for (result[0..copied]) |xattr| {
+            allocator.free(xattr.name);
+            allocator.free(xattr.value);
+        }
+        allocator.free(result);
+    }
+    for (xattrs, 0..) |xattr, index| {
+        const name = try allocator.dupe(u8, xattr.name);
+        errdefer allocator.free(name);
+        const value = try allocator.dupe(u8, xattr.value);
+        result[index] = .{ .name = name, .value = value };
+        copied += 1;
+    }
+    return result;
 }
 
 test "bounds ownership metadata bytes and repeated index scans" {
@@ -1187,6 +1498,138 @@ test "honors local and global PAX modification times" {
     try std.testing.expectEqual(Io.Timestamp.fromNanoseconds(-500_000_000), link_stat.mtime);
     try std.testing.expectEqual(Io.Timestamp.fromNanoseconds(7_123_456_789), try parsePaxMtime("7.1234567899"));
     try std.testing.expectError(error.InvalidLayerTimestamp, parsePaxMtime("7.-5"));
+}
+
+test "applies raw, encoded, global, and capability PAX xattrs" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var temp = std.testing.tmpDir(.{});
+    defer temp.cleanup();
+    try temp.dir.createDirPath(io, "root");
+    var root = try temp.dir.openDir(io, "root", .{});
+    defer root.close(io);
+
+    const binary_value = [_]u8{ 'A', 0, 0xff };
+    const capability_value = [_]u8{ 1, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+    var archive: Io.Writer.Allocating = .init(allocator);
+    defer archive.deinit();
+    var tar: std.tar.Writer = .{ .underlying_writer = &archive.writer };
+    try writeTestPaxHeaderKind(allocator, &archive, &tar, 'g', &.{
+        .{ .key = "SCHILY.xattr.user.rift.inherited", .value = "global" },
+        .{ .key = "SCHILY.xattr.user.rift.override", .value = "global" },
+        .{ .key = "SCHILY.xattr.user.rift.cleared", .value = "remove" },
+    });
+    try writeTestPaxHeader(allocator, &archive, &tar, &.{
+        .{ .key = "SCHILY.xattr.user.rift.override", .value = "local" },
+        .{ .key = "SCHILY.xattr.user.rift.binary", .value = &binary_value },
+        .{ .key = "SCHILY.xattr.user.rift.literal%25", .value = "percent" },
+        .{ .key = "LIBARCHIVE.xattr.user.rift%3Aencoded", .value = "ZGVjb2RlZA==" },
+        .{ .key = "SCHILY.xattr.user.rift.empty", .value = "" },
+        .{ .key = "security.capability", .value = &capability_value },
+    });
+    try tar.writeFileBytes("xattr-file", "data", .{});
+    try writeTestPaxHeaderKind(allocator, &archive, &tar, 'g', &.{.{ .key = "SCHILY.xattr.user.rift.cleared", .value = "" }});
+    try tar.writeFileBytes("cleared-file", "data", .{});
+    try temp.dir.writeFile(io, .{ .sub_path = "pax-xattrs.tar", .data = archive.written() });
+    const blob = try temp.dir.openFile(io, "pax-xattrs.tar", .{ .mode = .read_only });
+    defer blob.close(io);
+    try applyOne(allocator, io, root, blob, "application/vnd.oci.image.layer.v1.tar");
+
+    const inherited = try readHostXattr(allocator, io, root, "xattr-file", "user.rift.inherited");
+    defer allocator.free(inherited);
+    try std.testing.expectEqualStrings("global", inherited);
+    const overridden = try readHostXattr(allocator, io, root, "xattr-file", "user.rift.override");
+    defer allocator.free(overridden);
+    try std.testing.expectEqualStrings("local", overridden);
+    const binary = try readHostXattr(allocator, io, root, "xattr-file", "user.rift.binary");
+    defer allocator.free(binary);
+    try std.testing.expectEqualSlices(u8, &binary_value, binary);
+    const literal_percent = try readHostXattr(allocator, io, root, "xattr-file", "user.rift.literal%25");
+    defer allocator.free(literal_percent);
+    try std.testing.expectEqualStrings("percent", literal_percent);
+    const encoded = try readHostXattr(allocator, io, root, "xattr-file", "user.rift:encoded");
+    defer allocator.free(encoded);
+    try std.testing.expectEqualStrings("decoded", encoded);
+    const empty = try readHostXattr(allocator, io, root, "xattr-file", "user.rift.empty");
+    defer allocator.free(empty);
+    try std.testing.expectEqual(@as(usize, 0), empty.len);
+    const capability = try readHostXattr(allocator, io, root, "xattr-file", "security.capability");
+    defer allocator.free(capability);
+    try std.testing.expectEqualSlices(u8, &capability_value, capability);
+    try std.testing.expectError(error.XattrReadFailed, readHostXattr(allocator, io, root, "cleared-file", "user.rift.cleared"));
+}
+
+test "applies directory PAX xattrs after restrictive mode" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var temp = std.testing.tmpDir(.{});
+    defer temp.cleanup();
+    try temp.dir.createDirPath(io, "root");
+    var root = try temp.dir.openDir(io, "root", .{});
+    defer root.close(io);
+
+    var archive: Io.Writer.Allocating = .init(allocator);
+    defer archive.deinit();
+    var tar: std.tar.Writer = .{ .underlying_writer = &archive.writer };
+    try writeTestPaxHeader(allocator, &archive, &tar, &.{.{ .key = "SCHILY.xattr.user.rift.root", .value = "root-value" }});
+    try tar.writeDir(".", .{ .mode = 0o755 });
+    try writeTestPaxHeader(allocator, &archive, &tar, &.{.{ .key = "SCHILY.xattr.user.rift.directory", .value = "directory-value" }});
+    try tar.writeDir("restricted", .{ .mode = 0o500 });
+    try temp.dir.writeFile(io, .{ .sub_path = "pax-directory-xattr.tar", .data = archive.written() });
+    const blob = try temp.dir.openFile(io, "pax-directory-xattr.tar", .{ .mode = .read_only });
+    defer blob.close(io);
+    try applyOne(allocator, io, root, blob, "application/vnd.oci.image.layer.v1.tar");
+
+    const root_value = try readHostXattr(allocator, io, root, "", "user.rift.root");
+    defer allocator.free(root_value);
+    try std.testing.expectEqualStrings("root-value", root_value);
+    const value = try readHostXattr(allocator, io, root, "restricted", "user.rift.directory");
+    defer allocator.free(value);
+    try std.testing.expectEqualStrings("directory-value", value);
+    try std.testing.expectEqual(@as(u32, 0o500), @as(u32, @intCast((try root.statFile(io, "restricted", .{ .follow_symlinks = false })).permissions.toMode() & 0o7777)));
+}
+
+test "rejects unsafe and malformed PAX xattrs" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var temp = std.testing.tmpDir(.{});
+    defer temp.cleanup();
+    try temp.dir.createDirPath(io, "root");
+    var root = try temp.dir.openDir(io, "root", .{});
+    defer root.close(io);
+
+    const cases = .{
+        .{ .key = "SCHILY.xattr.user.overlay.opaque", .value = "y", .expected = error.UnsupportedPaxXattr },
+        .{ .key = "LIBARCHIVE.xattr.user.rift%Q0", .value = "YQ==", .expected = error.PaxInvalidXattrName },
+        .{ .key = "LIBARCHIVE.xattr.user.rift.invalid", .value = "not-base64", .expected = error.PaxInvalidXattrValue },
+    };
+    inline for (cases, 0..) |case, index| {
+        var archive: Io.Writer.Allocating = .init(allocator);
+        defer archive.deinit();
+        var tar: std.tar.Writer = .{ .underlying_writer = &archive.writer };
+        try writeTestPaxHeader(allocator, &archive, &tar, &.{.{ .key = case.key, .value = case.value }});
+        try tar.writeFileBytes("payload", "data", .{});
+        const name = try std.fmt.allocPrint(allocator, "invalid-xattr-{d}.tar", .{index});
+        defer allocator.free(name);
+        try temp.dir.writeFile(io, .{ .sub_path = name, .data = archive.written() });
+        const blob = try temp.dir.openFile(io, name, .{ .mode = .read_only });
+        defer blob.close(io);
+        try std.testing.expectError(case.expected, applyOne(allocator, io, root, blob, "application/vnd.oci.image.layer.v1.tar"));
+    }
+
+    var ignored_archive: Io.Writer.Allocating = .init(allocator);
+    defer ignored_archive.deinit();
+    var ignored_tar: std.tar.Writer = .{ .underlying_writer = &ignored_archive.writer };
+    try writeTestPaxHeader(allocator, &ignored_archive, &ignored_tar, &.{
+        .{ .key = "SCHILY.xattr.com.apple.provenance", .value = "ignored" },
+        .{ .key = "SCHILY.xattr.invalid", .value = "ignored" },
+    });
+    try ignored_tar.writeFileBytes("ignored", "data", .{});
+    try temp.dir.writeFile(io, .{ .sub_path = "ignored-xattrs.tar", .data = ignored_archive.written() });
+    const ignored_blob = try temp.dir.openFile(io, "ignored-xattrs.tar", .{ .mode = .read_only });
+    defer ignored_blob.close(io);
+    try applyOne(allocator, io, root, ignored_blob, "application/vnd.oci.image.layer.v1.tar");
+    try std.testing.expectError(error.XattrReadFailed, readHostXattr(allocator, io, root, "ignored", "com.apple.provenance"));
 }
 
 test "tracks tar and PAX ownership through overrides and whiteouts" {

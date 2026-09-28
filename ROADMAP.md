@@ -83,7 +83,8 @@ This roadmap carries the original plan forward from the first project commit. `[
 - [x] Mount explicit host files and directories read-only by default, with opt-in write access.
 - [x] Preserve OCI file ownership and groups from tar headers and local/global PAX `uid`/`gid`; verify non-root file access in a VM.
 - [x] Preserve global PAX `path`, `linkpath`, and `size` overrides, including local precedence and empty-value resets.
-- [ ] Support OCI extended attributes and file capabilities.
+- [x] Restore PAX xattrs on files and nested directories, including binary values, local/global precedence, and legacy `security.capability`; verify in Alpine.
+- [ ] Expose OCI root-directory xattrs at `/` inside the overlay-backed container.
 - [x] Extract OCI FIFO entries as named pipes with preserved mode and ownership.
 - [ ] Support other special files outside runtime-managed `/dev`.
 - [ ] Reduce guest disk footprint and optimize startup and shutdown using measurements.
