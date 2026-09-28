@@ -129,7 +129,7 @@ pub fn inspect(init: std.process.Init, id: []const u8, writer: *Io.Writer) !void
     try writeInspection(writer, id, image, status);
 }
 
-pub fn logs(init: std.process.Init, id: []const u8, writer: *Io.Writer) !void {
+pub fn logs(init: std.process.Init, id: []const u8, writer: *Io.Writer, json: bool) !void {
     var state = try openState(init, id);
     defer state.close(init.io);
     const log = try state.openFile(init.io, "log", .{ .mode = .read_only, .follow_symlinks = false });
@@ -138,12 +138,24 @@ pub fn logs(init: std.process.Init, id: []const u8, writer: *Io.Writer) !void {
     var chunk: [32 * 1024]u8 = undefined;
     var reader = log.reader(init.io, &reader_buffer);
     var remaining = (try log.stat(init.io)).size;
+    var offset: u64 = 0;
     while (remaining > 0) {
         const count = try reader.interface.readSliceShort(chunk[0..@intCast(@min(remaining, chunk.len))]);
         if (count == 0) return error.LogTruncated;
-        try writer.writeAll(chunk[0..count]);
+        if (json) {
+            try writeJsonLogRecord(writer, id, offset, chunk[0..count]);
+        } else {
+            try writer.writeAll(chunk[0..count]);
+        }
         remaining -= count;
+        offset += count;
     }
+}
+
+fn writeJsonLogRecord(writer: *Io.Writer, id: []const u8, offset: u64, data: []const u8) !void {
+    var encoded: [std.base64.standard.Encoder.calcSize(32 * 1024)]u8 = undefined;
+    const payload = std.base64.standard.Encoder.encode(&encoded, data);
+    try writer.print("{{\"container_id\":\"{s}\",\"stream\":\"combined\",\"offset_bytes\":{d},\"encoding\":\"base64\",\"data\":\"{s}\"}}\n", .{ id, offset, payload });
 }
 
 pub fn exec(init: std.process.Init, id: []const u8, command: []const []const u8, writer: *Io.Writer, interactive: bool, tty: bool) !u8 {
@@ -553,6 +565,17 @@ test "inspection prints the container lifecycle fields" {
     try writeInspection(&output.writer, "0123456789abcdef0123456789abcdef", "alpine", "exited 37");
     try std.testing.expectEqualStrings(
         "Container ID: 0123456789abcdef0123456789abcdef\nImage: alpine\nState: exited 37\n",
+        output.written(),
+    );
+}
+
+test "structured log records preserve arbitrary bytes and offsets" {
+    var output: Io.Writer.Allocating = .init(std.testing.allocator);
+    defer output.deinit();
+    const data = [_]u8{ 'a', 0, '\n', 0xff };
+    try writeJsonLogRecord(&output.writer, "0123456789abcdef0123456789abcdef", 7, &data);
+    try std.testing.expectEqualStrings(
+        "{\"container_id\":\"0123456789abcdef0123456789abcdef\",\"stream\":\"combined\",\"offset_bytes\":7,\"encoding\":\"base64\",\"data\":\"YQAK/w==\"}\n",
         output.written(),
     );
 }

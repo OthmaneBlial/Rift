@@ -65,7 +65,7 @@ This roadmap carries the original plan forward from the first project commit. `[
 - [x] Configure the private guest VM's CPU count and RAM per run, with host-supported range checks and documented defaults; these set guest capacity rather than per-process quotas.
 - [ ] Implement further OCI process/resource controls such as per-process limits and configurable capability profiles.
 - [x] Review help and error messages across supported commands for clear, predictable use.
-- [ ] Add structured log output.
+- [x] Add binary-safe JSON Lines for detached logs with container ID, combined stream, and byte offsets; preserve output bytes as base64 data.
 
 ## 5. Complete image filesystem and host integration
 

@@ -20,6 +20,10 @@ The local process check verifies that a UID 0 workload sees `NoNewPrivs: 1` and 
 
 Each run uses a private Linux VM. `--cpus` and `--memory` configure the CPU and RAM exposed to that guest; defaults are 2 CPUs and 256 MiB. These are VM capacity settings, not per-process cgroup quotas. Apple Virtualization.framework validates the requested range for the current Mac. Dockerfile `RUN` keeps its fixed 2-CPU, 256-MiB build VM.
 
+## Detached logs
+
+`logs` prints the stored combined output as raw bytes. `logs --json` emits JSON Lines records containing the container ID, combined stream, byte offset, and base64 data. Stored logs have no timestamp or stdout/stderr separation, so the structured format preserves combined bytes rather than inventing either.
+
 ## Runtime shape
 
 Linux containers need a Linux kernel. On macOS, Rift will run workloads inside a small Linux virtual machine managed by Apple's Virtualization.framework. The host CLI will own the VM lifecycle; the Linux guest will own container namespaces and process execution.

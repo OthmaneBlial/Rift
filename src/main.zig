@@ -33,7 +33,7 @@ fn printHelp(writer: *Io.Writer) Io.Writer.Error!void {
             "             -p HOST:GUEST, -w DIR, -e KEY=VALUE, -v HOST:TARGET[:ro|rw]\n" ++
             "  ps                 List detached containers\n" ++
             "  inspect <id>       Show detached container details\n" ++
-            "  logs <id>          Show a detached container's output\n" ++
+            "  logs [--json] <id> Show detached output, optionally as JSON Lines\n" ++
             "  exec [-it] <id> <cmd> Run a command in a running container (-i stdin, -t TTY)\n" ++
             "  stop <id>          Stop a detached container\n" ++
             "  kill <id>          Force-kill a detached container\n" ++
@@ -123,8 +123,15 @@ fn dispatch(args: []const []const u8, writer: *Io.Writer, init: ?std.process.Ini
         return 0;
     }
     if (args.len > 0 and std.mem.eql(u8, args[0], "logs")) {
-        if (args.len != 2) return error.InvalidArguments;
-        try containers.logs(init orelse return error.CommandUnavailable, args[1], writer);
+        const json = args.len >= 2 and std.mem.eql(u8, args[1], "--json");
+        const id = if (json) blk: {
+            if (args.len != 3) return error.InvalidArguments;
+            break :blk args[2];
+        } else blk: {
+            if (args.len != 2) return error.InvalidArguments;
+            break :blk args[1];
+        };
+        try containers.logs(init orelse return error.CommandUnavailable, id, writer, json);
         return 0;
     }
     if (args.len > 0 and std.mem.eql(u8, args[0], "exec")) {
@@ -597,6 +604,8 @@ test "known commands reject malformed argument counts" {
     try std.testing.expectError(error.InvalidArguments, dispatch(&.{ "system", "version" }, &output.writer, null));
     try std.testing.expectError(error.InvalidArguments, dispatch(&.{ "ps", "extra" }, &output.writer, null));
     try std.testing.expectError(error.InvalidArguments, dispatch(&.{ "logs", "id", "extra" }, &output.writer, null));
+    try std.testing.expectError(error.InvalidArguments, dispatch(&.{ "logs", "--json" }, &output.writer, null));
+    try std.testing.expectError(error.CommandUnavailable, dispatch(&.{ "logs", "--json", "id" }, &output.writer, null));
     try std.testing.expectError(error.InvalidArguments, dispatch(&.{ "stop", "id", "extra" }, &output.writer, null));
     try std.testing.expectError(error.InvalidArguments, dispatch(&.{"kill"}, &output.writer, null));
     try std.testing.expectError(error.InvalidArguments, dispatch(&.{ "rm", "id", "extra" }, &output.writer, null));

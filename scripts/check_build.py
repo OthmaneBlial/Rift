@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Build and run a real OCI image without touching the user's Rift store."""
 
+import base64
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -182,6 +184,24 @@ STOPSIGNAL SIGUSR1
             signal_logs = call(binary, env, "logs", signal_id)
             if stopped.returncode != 0 or "RIFT_CUSTOM_STOP_SIGNAL" not in signal_logs.stdout:
                 raise RuntimeError(f"image STOPSIGNAL was not delivered: {stopped!r} {signal_logs!r}")
+            raw_logs = subprocess.run([binary, "logs", signal_id], env=env, capture_output=True, timeout=120)
+            structured_logs = subprocess.run([binary, "logs", "--json", signal_id], env=env, capture_output=True, timeout=120)
+            try:
+                records = [json.loads(line) for line in structured_logs.stdout.splitlines()]
+                decoded = bytearray()
+                for record in records:
+                    if (
+                        record["container_id"] != signal_id
+                        or record["stream"] != "combined"
+                        or record["offset_bytes"] != len(decoded)
+                        or record["encoding"] != "base64"
+                    ):
+                        raise ValueError("unexpected structured log record")
+                    decoded.extend(base64.b64decode(record["data"], validate=True))
+            except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+                raise RuntimeError(f"structured detached logs were invalid: {structured_logs!r}") from error
+            if raw_logs.returncode != 0 or structured_logs.returncode != 0 or bytes(decoded) != raw_logs.stdout:
+                raise RuntimeError(f"structured detached logs changed the output bytes: {structured_logs!r}")
         finally:
             if signal_id:
                 call(binary, env, "kill", signal_id)

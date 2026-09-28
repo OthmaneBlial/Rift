@@ -47,12 +47,13 @@ id=$(rift run -d -p 8080:80 nginx)
 curl http://127.0.0.1:8080
 rift ps
 rift logs "$id"
+rift logs --json "$id"
 rift exec "$id" /bin/sh -c 'echo online'
 rift stop "$id"
 rift rm "$id"
 ```
 
-Rift forwards one TCP port per run. Detached containers keep their logs and status until removed. `exec` runs a non-interactive command by default, streaming combined stdout and stderr; add `-i` to stream stdin or `-it` to attach a terminal.
+Rift forwards one TCP port per run. Detached containers keep their logs and status until removed. `rift logs` prints the original combined output; `rift logs --json` emits binary-safe JSON Lines with the container ID, combined stream, byte offset, and base64 data. `exec` runs a non-interactive command by default, streaming combined stdout and stderr; add `-i` to stream stdin or `-it` to attach a terminal.
 
 ## Build an image
 
@@ -87,7 +88,7 @@ Detached containers honor image `StopSignal`. Dockerfile `STOPSIGNAL` accepts ca
 - Pull `linux/arm64` images from Docker Hub, Amazon ECR Public, `registry.k8s.io`, GitHub Container Registry, Quay, and Google GCR. [Registry checks](docs/REGISTRIES.md) list the tested image samples; private Bearer-token support is verified against a local fixture.
 - Run foreground and detached containers with image entrypoint, command, environment, working directory, user, supplementary groups, and configurable guest CPU and RAM.
 - Use outbound networking, DNS, one localhost port mapping, and explicit file or directory volumes.
-- Inspect and manage detached containers with `ps`, `inspect`, `logs`, `exec`, `stop`, `kill`, and `rm`. `exec -i` streams stdin; `exec -it` adds a resizable TTY and forwards SIGINT, SIGTERM, SIGHUP, and SIGQUIT.
+- Inspect and manage detached containers with `ps`, `inspect`, `logs`, `exec`, `stop`, `kill`, and `rm`. `logs --json` emits byte-preserving JSON Lines. `exec -i` streams stdin; `exec -it` adds a resizable TTY and forwards SIGINT, SIGTERM, SIGHUP, and SIGQUIT.
 - Build OCI images from multiple `FROM` stages, file or directory `COPY` (including `COPY --from`), ordered single-line `RUN`, `STOPSIGNAL`, and the `ENV`, `USER`, `WORKDIR`, `ENTRYPOINT`, and `CMD` process settings. Each successful `RUN` squashes the prior filesystem into one layer. `.dockerignore`, globs, symlinks, special files, and other Dockerfile instructions remain unsupported.
 - Check storage with `system df` and preview or remove unused data with `clean`.
 
