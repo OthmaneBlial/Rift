@@ -35,7 +35,7 @@ Set resources for a run:
 rift run --cpus 4 --memory 1g --pids-limit 64 --rm alpine sh -c 'grep -c "^processor" /proc/cpuinfo; grep MemTotal /proc/meminfo'
 ```
 
-`--cpus` and `--memory` set the private VM's CPU and RAM. Memory accepts whole MiB or GiB suffixes (`512m`, `2g`) or a byte count in 1 MiB increments. Defaults are 2 CPUs and 256 MiB; the Mac's Virtualization.framework limits the accepted range. `--pids-limit` caps concurrent guest tasks (processes and threads) with cgroup v2; Rift reserves one task for its PID namespace supervisor. It is optional and has no default cap.
+`--cpus` and `--memory` set the private VM's CPU and RAM. Memory accepts whole MiB or GiB suffixes (`512m`, `2g`) or a byte count in 1 MiB increments. Defaults are 2 CPUs and 256 MiB; the Mac's Virtualization.framework limits the accepted range. `--pids-limit` caps concurrent guest tasks (processes and threads) with cgroup v2; Rift reserves one task for its PID namespace supervisor. It is optional and has no default cap. `--cap-profile none` removes Linux capabilities from workload and `exec` processes; the default is Rift's reduced capability set.
 
 Use `rift run --network none alpine ...` to start a container without a VM network adapter. Port forwarding requires networking.
 
@@ -129,7 +129,7 @@ The image and guest files were cached. Warm `exec` timing includes the host CLI,
 
 - macOS 12 or newer on Apple Silicon.
 - Zig 0.16 or newer for manual source builds; Homebrew installs the build dependency automatically.
-- One lightweight Linux VM per run; defaults are 2 CPUs and 256 MiB RAM. `--cpus` and `--memory` change guest VM capacity within the range supported by the Mac. `--pids-limit` optionally caps guest processes and threads.
+- One lightweight Linux VM per run; defaults are 2 CPUs and 256 MiB RAM. `--cpus` and `--memory` change guest VM capacity within the range supported by the Mac. `--pids-limit` optionally caps guest processes and threads; `--cap-profile none` removes capabilities from workload processes.
 - One TCP port mapping per run; up to 16 explicit file or directory volumes.
 - `rift build` supports up to 128 stages, one source per `COPY` (from the local context or an earlier named or indexed stage), single-line shell or JSON-array `RUN`, `STOPSIGNAL`, and `ENV`, `USER`, `WORKDIR`, `ENTRYPOINT`, and `CMD`. Each `RUN` boots a temporary Linux VM, applies the preceding image state, and stores the successful result as a squashed OCI layer; failed commands stop the build without recording its tag. Each build VM has 256 MiB RAM and a 256 MiB writable overlay. `ENV` values are literal and `WORKDIR` must be absolute. Targets must be absolute. Stop signals accept canonical names or numbers except for `SIGKILL`, `SIGSTOP`, and real-time signals. `.dockerignore`, globs, symlinks, special files, line continuations, and other Dockerfile instructions are unsupported.
 - Each pull is capped at 16 GiB of distinct image blobs not already verified in the local cache.

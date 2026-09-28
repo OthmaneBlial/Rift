@@ -101,7 +101,7 @@ pub fn execute(init: std.process.Init, arguments: []const []const u8, stop_path:
     cache_locked = false;
     const interactive = try Io.File.stdin().isTty(init.io);
     const measure_guest_boot = if (init.environ_map.get("RIFT_BENCHMARK_GUEST_BOOT")) |value| std.mem.eql(u8, value, "1") else false;
-    try guest.writeInitramfs(allocator, init.io, base_initramfs, run_dir, command, environment, working_dir, process.User orelse "", stop_signal, staged_volumes, interactive, options.network_enabled, port != null, measure_guest_boot, false, options.pids_limit);
+    try guest.writeInitramfs(allocator, init.io, base_initramfs, run_dir, command, environment, working_dir, process.User orelse "", stop_signal, staged_volumes, interactive, options.network_enabled, port != null, measure_guest_boot, false, options.pids_limit, options.capability_profile == .none);
 
     var root_path_buffer: [Io.Dir.max_path_bytes]u8 = undefined;
     var control_path_buffer: [Io.Dir.max_path_bytes]u8 = undefined;
@@ -154,7 +154,9 @@ fn waitForExecClients(init: std.process.Init, id: []const u8) !void {
     lock.unlock(init.io);
 }
 
-pub const Options = struct { image_index: usize, port: ?vm.PortMapping, working_dir: ?[]const u8, environments: []const []const u8, volumes: []const vm.Volume, cpu_count: u16, memory_size: u64, pids_limit: ?u32, network_enabled: bool, remove_after_exit: bool };
+pub const CapabilityProfile = enum { default, none };
+
+pub const Options = struct { image_index: usize, port: ?vm.PortMapping, working_dir: ?[]const u8, environments: []const []const u8, volumes: []const vm.Volume, cpu_count: u16, memory_size: u64, pids_limit: ?u32, capability_profile: CapabilityProfile, network_enabled: bool, remove_after_exit: bool };
 
 pub fn parseOptions(allocator: std.mem.Allocator, arguments: []const []const u8) !Options {
     var offset: usize = 0;
@@ -165,6 +167,8 @@ pub fn parseOptions(allocator: std.mem.Allocator, arguments: []const []const u8)
     var memory_size = vm.default_memory_bytes;
     var memory_size_set = false;
     var pids_limit: ?u32 = null;
+    var capability_profile: CapabilityProfile = .default;
+    var capability_profile_set = false;
     var network_enabled = true;
     var network_mode_set = false;
     var environments: std.ArrayList([]const u8) = .empty;
@@ -202,6 +206,11 @@ pub fn parseOptions(allocator: std.mem.Allocator, arguments: []const []const u8)
             pids_limit = std.fmt.parseInt(u32, arguments[offset + 1], 10) catch return error.InvalidPidsLimit;
             if (pids_limit.? == 0) return error.InvalidPidsLimit;
             offset += 2;
+        } else if (std.mem.eql(u8, arguments[offset], "--cap-profile")) {
+            if (capability_profile_set or offset + 1 >= arguments.len) return error.InvalidArguments;
+            capability_profile = if (std.mem.eql(u8, arguments[offset + 1], "default")) .default else if (std.mem.eql(u8, arguments[offset + 1], "none")) .none else return error.InvalidCapabilityProfile;
+            capability_profile_set = true;
+            offset += 2;
         } else if (std.mem.eql(u8, arguments[offset], "--network")) {
             if (network_mode_set or offset + 1 >= arguments.len or !std.mem.eql(u8, arguments[offset + 1], "none")) return error.InvalidNetworkMode;
             if (port != null) return error.NetworkRequiredForPort;
@@ -226,7 +235,7 @@ pub fn parseOptions(allocator: std.mem.Allocator, arguments: []const []const u8)
     if (arguments.len < offset + 1) return error.InvalidArguments;
     const environment_slice = try environments.toOwnedSlice(allocator);
     errdefer allocator.free(environment_slice);
-    return .{ .image_index = offset, .port = port, .working_dir = working_dir, .environments = environment_slice, .volumes = try volumes.toOwnedSlice(allocator), .cpu_count = cpu_count, .memory_size = memory_size, .pids_limit = pids_limit, .network_enabled = network_enabled, .remove_after_exit = remove_after_exit };
+    return .{ .image_index = offset, .port = port, .working_dir = working_dir, .environments = environment_slice, .volumes = try volumes.toOwnedSlice(allocator), .cpu_count = cpu_count, .memory_size = memory_size, .pids_limit = pids_limit, .capability_profile = capability_profile, .network_enabled = network_enabled, .remove_after_exit = remove_after_exit };
 }
 
 fn parseMemorySize(value: []const u8) !u64 {
@@ -404,6 +413,9 @@ test "run options validate configurable VM CPU and memory sizes" {
     const limited = try parseOptions(arena.allocator(), &.{ "--pids-limit", "64", "alpine" });
     try std.testing.expectEqual(@as(?u32, 64), limited.pids_limit);
     try std.testing.expectEqual(@as(?u32, null), defaults.pids_limit);
+    const restricted = try parseOptions(arena.allocator(), &.{ "--cap-profile", "none", "alpine" });
+    try std.testing.expectEqual(CapabilityProfile.none, restricted.capability_profile);
+    try std.testing.expectEqual(CapabilityProfile.default, defaults.capability_profile);
     try std.testing.expectError(error.InvalidCPUCount, parseOptions(arena.allocator(), &.{ "--cpus", "0", "alpine" }));
     try std.testing.expectError(error.InvalidCPUCount, parseOptions(arena.allocator(), &.{ "--cpus", "65536", "alpine" }));
     try std.testing.expectError(error.InvalidMemorySize, parseOptions(arena.allocator(), &.{ "--memory", "0m", "alpine" }));
@@ -414,6 +426,8 @@ test "run options validate configurable VM CPU and memory sizes" {
     try std.testing.expectError(error.InvalidPidsLimit, parseOptions(arena.allocator(), &.{ "--pids-limit", "many", "alpine" }));
     try std.testing.expectError(error.InvalidPidsLimit, parseOptions(arena.allocator(), &.{ "--pids-limit", "4294967296", "alpine" }));
     try std.testing.expectError(error.InvalidArguments, parseOptions(arena.allocator(), &.{ "--pids-limit", "64", "--pids-limit", "8", "alpine" }));
+    try std.testing.expectError(error.InvalidCapabilityProfile, parseOptions(arena.allocator(), &.{ "--cap-profile", "privileged", "alpine" }));
+    try std.testing.expectError(error.InvalidArguments, parseOptions(arena.allocator(), &.{ "--cap-profile", "none", "--cap-profile", "default", "alpine" }));
     try std.testing.expectError(error.InvalidArguments, parseOptions(arena.allocator(), &.{ "--cpus", "2", "--cpus", "4", "alpine" }));
     try std.testing.expectError(error.InvalidArguments, parseOptions(arena.allocator(), &.{ "--memory", "512m", "--memory", "1g", "alpine" }));
 }

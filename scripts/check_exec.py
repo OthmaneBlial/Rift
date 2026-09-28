@@ -49,6 +49,7 @@ def main() -> int:
         'while :; do sleep 1; done'
     )
     identifier = ""
+    profile_identifier = ""
     try:
         started = call(
             rift,
@@ -301,19 +302,58 @@ def main() -> int:
         removed = call(rift, "rm", identifier)
         if removed.returncode != 0:
             raise RuntimeError(f"container removal failed after exec: {removed!r}")
-        print("Rift exec check passed: streaming input/output, TTY, resize, terminal restore, signal forwarding, arguments, environment, working directory, PID namespace, filesystem, exit status, lifecycle")
+        restricted = call(
+            rift,
+            "run",
+            "-d",
+            "--cap-profile",
+            "none",
+            "alpine",
+            "/bin/sh",
+            "-c",
+            "echo RIFT_CAP_PROFILE_READY; exec sleep 60",
+        )
+        profile_identifier = restricted.stdout.strip()
+        if restricted.returncode != 0 or re.fullmatch(r"[0-9a-f]{32}", profile_identifier) is None:
+            raise RuntimeError(f"none-profile container failed to start: {restricted!r}")
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            logs = call(rift, "logs", profile_identifier)
+            if logs.returncode == 0 and "RIFT_CAP_PROFILE_READY" in logs.stdout:
+                break
+            time.sleep(0.2)
+        else:
+            raise RuntimeError("none-profile container did not become ready")
+        profile_exec = call(
+            rift,
+            "exec",
+            profile_identifier,
+            "/bin/busybox",
+            "grep",
+            "-q",
+            "^CapEff:[[:space:]]*0000000000000000$",
+            "/proc/self/status",
+        )
+        if profile_exec.returncode != 0:
+            raise RuntimeError(f"rift exec did not inherit the none capability profile: {profile_exec!r}")
+        if call(rift, "stop", profile_identifier).returncode != 0 or call(rift, "rm", profile_identifier).returncode != 0:
+            raise RuntimeError("could not clean up none-profile container")
+        profile_identifier = ""
+        print("Rift exec check passed: streaming input/output, TTY, resize, terminal restore, signal forwarding, arguments, environment, working directory, PID namespace, filesystem, capability profile, exit status, lifecycle")
         return 0
     except Exception as error:
         print(f"Rift exec check failed: {error}", file=sys.stderr)
         return 1
     finally:
-        if identifier and re.fullmatch(r"[0-9a-f]{32}", identifier):
-            state = call(rift, "inspect", identifier)
+        for cleanup_identifier in (profile_identifier, identifier):
+            if not cleanup_identifier or re.fullmatch(r"[0-9a-f]{32}", cleanup_identifier) is None:
+                continue
+            state = call(rift, "inspect", cleanup_identifier)
             if state.returncode == 0 and "State: running" in state.stdout:
-                call(rift, "stop", identifier)
-            state = call(rift, "inspect", identifier)
+                call(rift, "stop", cleanup_identifier)
+            state = call(rift, "inspect", cleanup_identifier)
             if state.returncode == 0 and "State: running" not in state.stdout:
-                call(rift, "rm", identifier)
+                call(rift, "rm", cleanup_identifier)
         shutil.rmtree(volume_root, ignore_errors=True)
 
 

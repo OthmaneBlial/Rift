@@ -29,8 +29,8 @@ fn printHelp(writer: *Io.Writer) Io.Writer.Error!void {
             "  rmi <image>        Remove a local image reference\n" ++
             "  run [options] <image> [command] [args...] Run in the foreground\n" ++
             "  run -d [options] <image> [command] [args...] Run detached\n" ++
-            "    Options: --rm (foreground only), --cpus N, --memory SIZE, --pids-limit N, --network none,\n" ++
-            "             -p HOST:GUEST, -w DIR, -e KEY=VALUE, -v HOST:TARGET[:ro|rw]\n" ++
+            "    Options: --rm (foreground only), --cpus N, --memory SIZE, --pids-limit N, --cap-profile default|none,\n" ++
+            "             --network none, -p HOST:GUEST, -w DIR, -e KEY=VALUE, -v HOST:TARGET[:ro|rw]\n" ++
             "  ps                 List detached containers\n" ++
             "  inspect <id>       Show detached container details\n" ++
             "  logs [--json] <id> Show detached output, optionally as JSON Lines\n" ++
@@ -482,6 +482,7 @@ pub fn main(init: std.process.Init) void {
             error.InvalidCPUCount => std.debug.print("rift: --cpus must be a positive whole number\n", .{}),
             error.InvalidMemorySize => std.debug.print("rift: --memory must be bytes or a size such as 512m or 2g, in 1 MiB increments\n", .{}),
             error.InvalidPidsLimit => std.debug.print("rift: --pids-limit must be a positive whole number no greater than 4294967295\n", .{}),
+            error.InvalidCapabilityProfile => std.debug.print("rift: --cap-profile must be 'default' or 'none'\n", .{}),
             error.InvalidNetworkMode => std.debug.print("rift: --network currently supports only 'none'\n", .{}),
             error.NetworkRequiredForPort => std.debug.print("rift: -p port forwarding requires networking; remove --network none\n", .{}),
             error.InvalidVMResources => std.debug.print("rift: requested VM CPU or memory size is outside this Mac's supported range\n", .{}),
@@ -541,6 +542,7 @@ test "help is available without a command" {
     try std.testing.expect(std.mem.indexOf(u8, output.written(), "exec [-it] <id> <cmd>") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.written(), "--rm (foreground only)") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.written(), "--pids-limit N") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output.written(), "--cap-profile default|none") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.written(), "--network none") != null);
 }
 

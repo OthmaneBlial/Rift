@@ -33,6 +33,7 @@ static volatile sig_atomic_t child_pid = -1;
 static volatile sig_atomic_t exec_pid = -1;
 static volatile sig_atomic_t pending_signal = 0;
 static int configured_stop_signal = SIGTERM;
+static int capability_profile_none = 0;
 
 static void forward_stop_signal(int signal_number) {
     int saved_errno = errno;
@@ -450,6 +451,7 @@ static int mount_standard_filesystems(void) {
 }
 
 static int allowed_capability(int capability) {
+    if (capability_profile_none) return 0;
     switch (capability) {
         case CAP_CHOWN:
         case CAP_DAC_OVERRIDE:
@@ -465,23 +467,40 @@ static int allowed_capability(int capability) {
     }
 }
 
-static int restrict_capabilities(void) {
+static int prepare_capabilities(void) {
     struct __user_cap_header_struct header = {.version = _LINUX_CAPABILITY_VERSION_3, .pid = 0};
     struct __user_cap_data_struct data[2] = {{0}, {0}};
     for (int capability = 0; capability < 64; ++capability) {
-        if (allowed_capability(capability)) {
+        if (allowed_capability(capability) || capability == CAP_SETUID || capability == CAP_SETGID || capability == CAP_SETPCAP) {
             data[capability / 32].effective |= 1U << (capability % 32);
             data[capability / 32].permitted |= 1U << (capability % 32);
-        } else if (prctl(PR_CAPBSET_DROP, capability, 0, 0, 0) != 0 && errno != EINVAL) {
-            return fail("drop capability bound");
         }
+    }
+    if (syscall(SYS_capset, &header, data) != 0) return fail("prepare capabilities");
+    for (int capability = 0; capability < 64; ++capability) {
+        if (!allowed_capability(capability) && prctl(PR_CAPBSET_DROP, capability, 0, 0, 0) != 0 && errno != EINVAL)
+            return fail("drop capability bound");
     }
     errno = 0;
     if (prctl(PR_CAPBSET_READ, 64, 0, 0, 0) != -1 || errno != EINVAL) {
         fputs("rift-exec: unsupported capability range\n", stderr);
         return 125;
     }
-    if (syscall(SYS_capset, &header, data) != 0) return fail("restrict capabilities");
+    return 0;
+}
+
+static int finish_capabilities(void) {
+    struct __user_cap_header_struct header = {.version = _LINUX_CAPABILITY_VERSION_3, .pid = 0};
+    struct __user_cap_data_struct data[2] = {{0}, {0}};
+    if (geteuid() == 0) {
+        for (int capability = 0; capability < 64; ++capability) {
+            if (allowed_capability(capability)) {
+                data[capability / 32].effective |= 1U << (capability % 32);
+                data[capability / 32].permitted |= 1U << (capability % 32);
+            }
+        }
+    }
+    if (syscall(SYS_capset, &header, data) != 0) return fail("apply capability profile");
     if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0) return fail("disable privilege escalation");
     return 0;
 }
@@ -617,7 +636,7 @@ static int run_exec(char *root, char *working_directory, char *user, char **comm
         fputs("rift-exec: image user or group was not found\n", stderr);
         return 125;
     }
-    if (restrict_capabilities() != 0) return 125;
+    if (prepare_capabilities() != 0) return 125;
     if (username[0]) {
         if (initgroups(username, gid) != 0) return fail("set supplementary groups");
     } else if (setgroups(0, NULL) != 0) {
@@ -625,6 +644,7 @@ static int run_exec(char *root, char *working_directory, char *user, char **comm
     }
     if (setgid(gid) != 0) return fail("setgid");
     if (setuid(uid) != 0) return fail("setuid");
+    if (finish_capabilities() != 0) return 125;
     if (chdir(working_directory) != 0) return fail("chdir working directory");
     if (syscall(SYS_close_range, 3U, ~0U, 0U) != 0) return fail("close inherited descriptors");
     execvp(command[0], command);
@@ -1138,7 +1158,7 @@ static int run_container(char **argv, unsigned long volume_count, uint32_t pids_
     }
     if (mount_standard_filesystems() != 0) return 125;
     if (ensure_working_directory(argv[2]) != 0) return fail("create working directory");
-    if (restrict_capabilities() != 0) return 125;
+    if (prepare_capabilities() != 0) return 125;
     if (username[0]) {
         if (initgroups(username, gid) != 0) return fail("set supplementary groups");
     } else if (setgroups(0, NULL) != 0) {
@@ -1146,6 +1166,7 @@ static int run_container(char **argv, unsigned long volume_count, uint32_t pids_
     }
     if (setgid(gid) != 0) return fail("setgid");
     if (setuid(uid) != 0) return fail("setuid");
+    if (finish_capabilities() != 0) return 125;
     if (chdir(argv[2]) != 0) return fail("chdir working directory");
     if (pending_signal) return 128 + pending_signal;
     pid_t workload = fork();
@@ -1269,21 +1290,45 @@ int main(int argc, char **argv) {
     if (argc == 4 && strcmp(argv[1], "--copy-root-xattrs") == 0)
         return copy_root_xattrs(argv[2], argv[3]);
     uint32_t pids_limit = 0;
-    if (argc > 1 && strcmp(argv[1], "--pids-limit") == 0) {
-        if (argc < 4) {
-            fputs("rift-exec: missing pids limit or command arguments\n", stderr);
-            return 125;
+    int pids_limit_set = 0;
+    int capability_profile_set = 0;
+    int option_end = 1;
+    while (option_end < argc) {
+        if (strcmp(argv[option_end], "--pids-limit") == 0) {
+            if (pids_limit_set || option_end + 1 >= argc) {
+                fputs("rift-exec: invalid or duplicate pids limit\n", stderr);
+                return 125;
+            }
+            errno = 0;
+            char *limit_end;
+            unsigned long parsed_limit = strtoul(argv[option_end + 1], &limit_end, 10);
+            if (errno || limit_end == argv[option_end + 1] || *limit_end || parsed_limit == 0 || parsed_limit > UINT32_MAX) {
+                fputs("rift-exec: invalid pids limit\n", stderr);
+                return 125;
+            }
+            pids_limit = (uint32_t)parsed_limit;
+            pids_limit_set = 1;
+            option_end += 2;
+        } else if (strcmp(argv[option_end], "--cap-profile") == 0) {
+            if (capability_profile_set || option_end + 1 >= argc) {
+                fputs("rift-exec: invalid or duplicate capability profile\n", stderr);
+                return 125;
+            }
+            if (strcmp(argv[option_end + 1], "default") == 0) capability_profile_none = 0;
+            else if (strcmp(argv[option_end + 1], "none") == 0) capability_profile_none = 1;
+            else {
+                fputs("rift-exec: invalid capability profile\n", stderr);
+                return 125;
+            }
+            capability_profile_set = 1;
+            option_end += 2;
+        } else {
+            break;
         }
-        errno = 0;
-        char *limit_end;
-        unsigned long parsed_limit = strtoul(argv[2], &limit_end, 10);
-        if (errno || limit_end == argv[2] || *limit_end || parsed_limit == 0 || parsed_limit > UINT32_MAX) {
-            fputs("rift-exec: invalid pids limit\n", stderr);
-            return 125;
-        }
-        pids_limit = (uint32_t)parsed_limit;
-        memmove(&argv[1], &argv[3], (size_t)(argc - 3) * sizeof(argv[0]));
-        argc -= 2;
+    }
+    if (option_end > 1) {
+        memmove(&argv[1], &argv[option_end], (size_t)(argc - option_end) * sizeof(argv[0]));
+        argc -= option_end - 1;
         argv[argc] = NULL;
     }
     if (argc < 7) {

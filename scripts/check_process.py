@@ -141,6 +141,22 @@ int main(void) {
         )
         if no_new_privs.returncode != 0:
             raise RuntimeError(f"container root did not inherit no_new_privs: {no_new_privs!r}")
+        default_capabilities = subprocess.run(
+            [binary, "run", "alpine", "/bin/busybox", "grep", "-q", "^CapEff:[[:space:]]*00000000000004fb$", "/proc/self/status"],
+            env=env, capture_output=True, text=True, timeout=60,
+        )
+        if default_capabilities.returncode != 0:
+            raise RuntimeError(f"default capability profile changed: {default_capabilities!r}")
+        no_capabilities = subprocess.run(
+            [binary, "run", "--pids-limit", "16", "--cap-profile", "none", "alpine", "/bin/busybox", "awk",
+             '$1 == "CapEff:" && $2 == "0000000000000000" {e=1} '
+             '$1 == "CapPrm:" && $2 == "0000000000000000" {p=1} '
+             '$1 == "CapBnd:" && $2 == "0000000000000000" {b=1} '
+             'END {exit !(e && p && b)}', "/proc/self/status"],
+            env=env, capture_output=True, text=True, timeout=60,
+        )
+        if no_capabilities.returncode != 0:
+            raise RuntimeError(f"none capability profile retained privileges: {no_capabilities!r}")
         mount_attempt = subprocess.run(
             [binary, "run", "alpine", "/bin/busybox", "sh", "-c", "mkdir -p /tmp/rift-mount-check && /bin/busybox mount -t tmpfs tmpfs /tmp/rift-mount-check"],
             env=env, capture_output=True, text=True, timeout=60,
@@ -248,7 +264,7 @@ int main(void) {
             raise RuntimeError(f"fixture still contains a working shell: {removed_shell!r}")
         if list((data / "runtime").iterdir()):
             raise RuntimeError("process settings run left runtime staging behind")
-    print("Rift process and ownership check passed: no_new_privs, root mount denial, users, groups, OCI ownership, xattrs and capabilities, FIFOs, writable /tmp, shell-free image")
+    print("Rift process and ownership check passed: capability profiles, no_new_privs, root mount denial, users, groups, OCI ownership, xattrs, FIFOs, writable /tmp, shell-free image")
     return 0
 
 

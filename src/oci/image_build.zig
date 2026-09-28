@@ -837,7 +837,7 @@ fn runBuildInstruction(
     defer allocator.free(initramfs_asset_path);
     const initramfs_asset = try Io.Dir.openFileAbsolute(io, initramfs_asset_path, .{ .mode = .read_only, .follow_symlinks = false });
     defer initramfs_asset.close(io);
-    try guest.writeInitramfs(allocator, io, initramfs_asset, run_stage, run.command, environment, working_dir, user, 15, &.{}, false, true, false, false, true, null);
+    try guest.writeInitramfs(allocator, io, initramfs_asset, run_stage, run.command, environment, working_dir, user, 15, &.{}, false, true, false, false, true, null, false);
 
     var root_path_buffer: [Io.Dir.max_path_bytes]u8 = undefined;
     var control_path_buffer: [Io.Dir.max_path_bytes]u8 = undefined;
