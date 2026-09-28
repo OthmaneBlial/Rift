@@ -23,10 +23,7 @@ pub fn execute(init: std.process.Init, arguments: []const []const u8, stop_path:
     const canonical = try image.formatAlloc(allocator);
 
     const home = init.environ_map.get("HOME") orelse return error.HomeDirectoryUnavailable;
-    var home_dir = try Io.Dir.openDirAbsolute(init.io, home, .{});
-    defer home_dir.close(init.io);
-    try home_dir.createDirPath(init.io, "Library/Application Support/Rift");
-    var data_dir = try home_dir.openDir(init.io, "Library/Application Support/Rift", .{ .follow_symlinks = false });
+    var data_dir = try storage.ensureDataDir(init.io, home);
     defer data_dir.close(init.io);
     var store = try storage.BlobStore.init(init.io, data_dir);
     defer store.deinit();
@@ -140,9 +137,7 @@ pub fn execute(init: std.process.Init, arguments: []const []const u8, stop_path:
 
 fn waitForExecClients(init: std.process.Init, id: []const u8) !void {
     const home = init.environ_map.get("HOME") orelse return error.HomeDirectoryUnavailable;
-    var home_dir = try Io.Dir.openDirAbsolute(init.io, home, .{});
-    defer home_dir.close(init.io);
-    var data_dir = try home_dir.openDir(init.io, "Library/Application Support/Rift", .{ .follow_symlinks = false });
+    var data_dir = try storage.ensureDataDir(init.io, home);
     defer data_dir.close(init.io);
     var containers = try data_dir.openDir(init.io, "containers", .{ .follow_symlinks = false });
     defer containers.close(init.io);

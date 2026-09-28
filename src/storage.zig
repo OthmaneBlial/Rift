@@ -3,6 +3,22 @@ const manifest = @import("oci/manifest.zig");
 
 const sha256_prefix = "sha256:";
 
+pub fn ensureDataDir(io: std.Io, home: []const u8) !std.Io.Dir {
+    var home_dir = try std.Io.Dir.openDirAbsolute(io, home, .{});
+    defer home_dir.close(io);
+    try home_dir.createDirPath(io, "Library/Application Support");
+    var support_dir = try home_dir.openDir(io, "Library/Application Support", .{ .follow_symlinks = false });
+    defer support_dir.close(io);
+    support_dir.createDir(io, "Rift", .fromMode(0o700)) catch |err| switch (err) {
+        error.PathAlreadyExists => {},
+        else => return err,
+    };
+    var data_dir = try support_dir.openDir(io, "Rift", .{ .follow_symlinks = false, .iterate = true });
+    errdefer data_dir.close(io);
+    try data_dir.setPermissions(io, .fromMode(0o700));
+    return data_dir;
+}
+
 pub const BlobStore = struct {
     io: std.Io,
     guard: std.Io.File,
@@ -555,4 +571,20 @@ test "cache store rejects symlinked directories" {
         defer std.testing.allocator.free(sentinel);
         try std.testing.expectEqualStrings("untouched", sentinel);
     }
+}
+
+test "Rift data directory is private when created or reopened" {
+    const io = std.testing.io;
+    var temp = std.testing.tmpDir(.{});
+    defer temp.cleanup();
+    var home_path_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const home = home_path_buffer[0..try temp.dir.realPath(io, &home_path_buffer)];
+
+    var data_dir = try ensureDataDir(io, home);
+    try data_dir.setPermissions(io, .fromMode(0o755));
+    data_dir.close(io);
+    data_dir = try ensureDataDir(io, home);
+    defer data_dir.close(io);
+    const info = try data_dir.stat(io);
+    try std.testing.expectEqual(@as(std.posix.mode_t, 0o700), info.permissions.toMode() & 0o777);
 }

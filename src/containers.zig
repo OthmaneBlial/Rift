@@ -4,6 +4,7 @@ const Io = std.Io;
 
 const reference = @import("oci/reference.zig");
 const run = @import("run.zig");
+const storage = @import("storage.zig");
 
 extern "c" fn rift_exec_terminal_start(with_tty: c_int) c_int;
 extern "c" fn rift_exec_terminal_stop() void;
@@ -173,9 +174,7 @@ pub fn exec(init: std.process.Init, id: []const u8, command: []const []const u8,
     if (!(try isRunning(init.io, state))) return error.ContainerNotRunning;
 
     const home = init.environ_map.get("HOME") orelse return error.HomeDirectoryUnavailable;
-    var home_dir = try Io.Dir.openDirAbsolute(init.io, home, .{});
-    defer home_dir.close(init.io);
-    var data_dir = try home_dir.openDir(init.io, "Library/Application Support/Rift", .{ .follow_symlinks = false });
+    var data_dir = try storage.ensureDataDir(init.io, home);
     defer data_dir.close(init.io);
     var channel: ?ExecChannel = null;
     for (0..600) |_| {
@@ -535,10 +534,10 @@ fn openState(init: std.process.Init, id: []const u8) !Io.Dir {
 
 fn openContainers(init: std.process.Init) !Io.Dir {
     const home = init.environ_map.get("HOME") orelse return error.HomeDirectoryUnavailable;
-    var home_dir = try Io.Dir.openDirAbsolute(init.io, home, .{});
-    defer home_dir.close(init.io);
-    try home_dir.createDirPath(init.io, "Library/Application Support/Rift/containers");
-    return home_dir.openDir(init.io, "Library/Application Support/Rift/containers", .{ .follow_symlinks = false, .iterate = true });
+    var data_dir = try storage.ensureDataDir(init.io, home);
+    defer data_dir.close(init.io);
+    try data_dir.createDirPath(init.io, "containers");
+    return data_dir.openDir(init.io, "containers", .{ .follow_symlinks = false, .iterate = true });
 }
 
 fn validId(id: []const u8) bool {

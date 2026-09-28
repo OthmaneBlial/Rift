@@ -30,9 +30,7 @@ pub fn main(init: std.process.Init) void {
 fn runOci(init: std.process.Init, kernel: []const u8, initramfs: []const u8, image: []const u8) !void {
     const allocator = init.arena.allocator();
     const home = init.environ_map.get("HOME") orelse return error.HomeDirectoryUnavailable;
-    var home_dir = try std.Io.Dir.openDirAbsolute(init.io, home, .{});
-    defer home_dir.close(init.io);
-    var data_dir = try home_dir.openDir(init.io, "Library/Application Support/Rift", .{});
+    var data_dir = try storage.ensureDataDir(init.io, home);
     defer data_dir.close(init.io);
     var store = try storage.BlobStore.init(init.io, data_dir);
     defer store.deinit();

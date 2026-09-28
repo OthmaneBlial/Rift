@@ -370,10 +370,7 @@ fn removeImage(init: std.process.Init, image_name: []const u8, writer: *Io.Write
 
 fn openImageStore(init: std.process.Init) !storage.BlobStore {
     const home = init.environ_map.get("HOME") orelse return error.HomeDirectoryUnavailable;
-    var home_dir = try Io.Dir.openDirAbsolute(init.io, home, .{});
-    defer home_dir.close(init.io);
-    try home_dir.createDirPath(init.io, "Library/Application Support/Rift");
-    var data_dir = try home_dir.openDir(init.io, "Library/Application Support/Rift", .{ .follow_symlinks = false });
+    var data_dir = try storage.ensureDataDir(init.io, home);
     defer data_dir.close(init.io);
     return storage.BlobStore.init(init.io, data_dir);
 }
@@ -411,10 +408,13 @@ fn openDataDir(init: std.process.Init) !?Io.Dir {
     const home = init.environ_map.get("HOME") orelse return error.HomeDirectoryUnavailable;
     var home_dir = try Io.Dir.openDirAbsolute(init.io, home, .{});
     defer home_dir.close(init.io);
-    return home_dir.openDir(init.io, "Library/Application Support/Rift", .{ .follow_symlinks = false, .iterate = true }) catch |err| switch (err) {
+    var data_dir = home_dir.openDir(init.io, "Library/Application Support/Rift", .{ .follow_symlinks = false, .iterate = true }) catch |err| switch (err) {
         error.FileNotFound => null,
         else => return err,
-    };
+    } orelse return null;
+    errdefer data_dir.close(init.io);
+    try data_dir.setPermissions(init.io, .fromMode(0o700));
+    return data_dir;
 }
 
 pub fn main(init: std.process.Init) void {
