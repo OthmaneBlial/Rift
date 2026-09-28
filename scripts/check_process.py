@@ -130,12 +130,20 @@ def main() -> int:
             owned_file.gid = 1000
             owned_file.size = len(b"before\n")
             layer.addfile(owned_file, io.BytesIO(b"before\n"))
+            named_pipe = tarfile.TarInfo("opt/rift-owned/pipe")
+            named_pipe.type = tarfile.FIFOTYPE
+            named_pipe.mode = 0o600
+            named_pipe.uid = 1000
+            named_pipe.gid = 1000
+            layer.addfile(named_pipe)
         append_layer(ownership_archive.getvalue())
         select_user("1000:1000")
         owner_check = subprocess.run(
             [binary, "run", "alpine", "/bin/busybox", "sh", "-c",
              "test \"$(stat -c '%u:%g' /)\" = '1000:1000' && "
              "test \"$(stat -c '%u:%g %a' /opt/rift-owned/probe)\" = '1000:1000 600' && "
+             "test -p /opt/rift-owned/pipe && "
+             "test \"$(stat -c '%u:%g %a' /opt/rift-owned/pipe)\" = '1000:1000 600' && "
              "printf 'after\\n' >> /opt/rift-owned/probe && "
              "grep -q '^after$' /opt/rift-owned/probe && echo RIFT_OWNER_OK"],
             env=env, capture_output=True, text=True, timeout=60,
@@ -166,7 +174,7 @@ def main() -> int:
             raise RuntimeError(f"fixture still contains a working shell: {removed_shell!r}")
         if list((data / "runtime").iterdir()):
             raise RuntimeError("process settings run left runtime staging behind")
-    print("Rift process and ownership check passed: no_new_privs, root mount denial, users, groups, OCI ownership, writable /tmp, shell-free image")
+    print("Rift process and ownership check passed: no_new_privs, root mount denial, users, groups, OCI ownership and FIFOs, writable /tmp, shell-free image")
     return 0
 
 

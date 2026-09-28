@@ -1,5 +1,8 @@
 const std = @import("std");
 const Io = std.Io;
+const c = @cImport({
+    @cInclude("sys/stat.h");
+});
 
 const max_layer_bytes = 8 * 1024 * 1024 * 1024;
 const max_image_layer_bytes = 32 * 1024 * 1024 * 1024;
@@ -60,7 +63,7 @@ pub fn validateUncompressedTar(allocator: std.mem.Allocator, io: Io, blob: Io.Fi
                 if (target.len == 0) return error.InvalidHardlink;
             },
             .device => if (entry.size != 0 or !std.mem.startsWith(u8, path, "dev/")) return error.UnsupportedLayerSpecialFile,
-            .directory, .file => {},
+            .directory, .file, .fifo => {},
         }
         try it.streamRemaining(entry, &discarding.writer);
     }
@@ -84,7 +87,7 @@ pub fn apply(
 
 const Pass = enum { whiteouts, entries };
 
-const LayerTarEntryKind = enum { directory, sym_link, file, hard_link, device };
+const LayerTarEntryKind = enum { directory, sym_link, file, hard_link, device, fifo };
 const LayerTarEntry = struct {
     name: []const u8,
     link_name: []const u8,
@@ -171,7 +174,7 @@ const LayerTarIterator = struct {
                 },
                 'L' => gnu_name = try self.readGnuString(size, self.file_name_buffer),
                 'K' => gnu_link_name = try self.readGnuString(size, self.link_name_buffer),
-                '0', 0, '1', '2', '3', '4', '5' => {
+                '0', 0, '1', '2', '3', '4', '5', '6' => {
                     const entry_size = pax.size orelse self.global_size orelse size;
                     if (entry_size > max_layer_bytes) return error.LayerTooLarge;
                     const mtime = if (pax.has_mtime)
@@ -188,8 +191,10 @@ const LayerTarIterator = struct {
                         '2' => .sym_link,
                         '1' => .hard_link,
                         '3', '4' => .device,
+                        '6' => .fifo,
                         else => .file,
                     };
+                    if (entry_kind == .fifo and entry_size != 0) return error.InvalidLayerFifo;
                     const ownership: Ownership = .{
                         .uid = if (pax.has_uid) pax.uid orelse try tarHeaderId(header[108..116]) else self.global_uid orelse try tarHeaderId(header[108..116]),
                         .gid = if (pax.has_gid) pax.gid orelse try tarHeaderId(header[116..124]) else self.global_gid orelse try tarHeaderId(header[116..124]),
@@ -524,10 +529,25 @@ fn applyTar(allocator: std.mem.Allocator, io: Io, root: Io.Dir, reader: *Io.Read
                 });
                 try setOwnership(ownership, path, entry.ownership, budget);
             },
+            .fifo => {
+                try parent.deleteTree(io, name);
+                try removeOwnerSubtree(allocator, ownership, path, budget);
+                try createFifo(allocator, io, parent, name, entry.mode & 0o777);
+                try parent.setTimestamps(io, name, .{ .modify_timestamp = .init(entry.mtime) });
+                try setOwnership(ownership, path, entry.ownership, budget);
+            },
             .hard_link => unreachable,
             .device => unreachable,
         }
     }
+}
+
+fn createFifo(allocator: std.mem.Allocator, io: Io, parent: Io.Dir, name: []const u8, mode: u32) !void {
+    const name_z = try allocator.dupeZ(u8, name);
+    defer allocator.free(name_z);
+    if (c.mkfifoat(parent.handle, name_z.ptr, @intCast(mode)) != 0) return error.FifoCreationFailed;
+    errdefer parent.deleteFile(io, name) catch {};
+    if (c.fchmodat(parent.handle, name_z.ptr, @intCast(mode), 0) != 0) return error.FifoPermissionsFailed;
 }
 
 pub fn applyDirectoryMetadata(io: Io, root: Io.Dir, directory_metadata: *std.StringHashMap(DirectoryMetadata)) !void {
@@ -1313,6 +1333,42 @@ test "applies hardlinks and rejects targets outside the root" {
     const unsafe_blob = try temp.dir.openFile(io, "unsafe.tar", .{ .mode = .read_only });
     defer unsafe_blob.close(io);
     try std.testing.expectError(error.UnsafeLayerPath, applyOne(allocator, io, root, unsafe_blob, "application/vnd.oci.image.layer.v1.tar"));
+}
+
+test "extracts OCI FIFOs and rejects FIFO payloads" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var temp = std.testing.tmpDir(.{});
+    defer temp.cleanup();
+    try temp.dir.createDirPath(io, "root");
+    var root = try temp.dir.openDir(io, "root", .{});
+    defer root.close(io);
+
+    var archive: Io.Writer.Allocating = .init(allocator);
+    defer archive.deinit();
+    try writeTestSpecial(&archive.writer, "pipes/notify", '6');
+    try temp.dir.writeFile(io, .{ .sub_path = "fifo.tar", .data = archive.written() });
+    const blob = try temp.dir.openFile(io, "fifo.tar", .{ .mode = .read_only });
+    defer blob.close(io);
+    try validateUncompressedTar(allocator, io, blob);
+    try applyOne(allocator, io, root, blob, "application/vnd.oci.image.layer.v1.tar");
+    const fifo_stat = try root.statFile(io, "pipes/notify", .{ .follow_symlinks = false });
+    try std.testing.expectEqual(Io.File.Kind.named_pipe, fifo_stat.kind);
+    try std.testing.expectEqual(@as(u32, 0o664), @as(u32, @intCast(fifo_stat.permissions.toMode() & 0o777)));
+
+    var invalid_archive: Io.Writer.Allocating = .init(allocator);
+    defer invalid_archive.deinit();
+    var invalid_tar: std.tar.Writer = .{ .underlying_writer = &invalid_archive.writer };
+    const header_offset = invalid_archive.written().len;
+    try invalid_tar.writeFileBytes("bad-fifo", "x", .{});
+    const invalid_bytes = @constCast(invalid_archive.written());
+    invalid_bytes[header_offset + 156] = '6';
+    updateTestTarChecksum(invalid_bytes[header_offset..][0..512]);
+    try temp.dir.writeFile(io, .{ .sub_path = "invalid-fifo.tar", .data = invalid_archive.written() });
+    const invalid_blob = try temp.dir.openFile(io, "invalid-fifo.tar", .{ .mode = .read_only });
+    defer invalid_blob.close(io);
+    try std.testing.expectError(error.InvalidLayerFifo, validateUncompressedTar(allocator, io, invalid_blob));
+    try std.testing.expectError(error.InvalidLayerFifo, applyOne(allocator, io, root, invalid_blob, "application/vnd.oci.image.layer.v1.tar"));
 }
 
 test "ignores image device nodes under runtime-managed /dev" {

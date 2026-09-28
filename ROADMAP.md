@@ -84,7 +84,8 @@ This roadmap carries the original plan forward from the first project commit. `[
 - [x] Preserve OCI file ownership and groups from tar headers and local/global PAX `uid`/`gid`; verify non-root file access in a VM.
 - [x] Preserve global PAX `path`, `linkpath`, and `size` overrides, including local precedence and empty-value resets.
 - [ ] Support OCI extended attributes and file capabilities.
-- [ ] Support FIFOs and special files outside runtime-managed `/dev`.
+- [x] Extract OCI FIFO entries as named pipes with preserved mode and ownership.
+- [ ] Support other special files outside runtime-managed `/dev`.
 - [ ] Reduce guest disk footprint and optimize startup and shutdown using measurements.
 - [ ] Evaluate guest reuse while preserving workload isolation and cleanup.
 

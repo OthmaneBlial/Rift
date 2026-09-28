@@ -39,7 +39,7 @@ The local `run-process-check` verifies that a UID 0 workload sees `NoNewPrivs: 1
 
 - There is no user namespace, seccomp filter, configurable capability profile, cgroup quota, or complete OCI resource-control implementation. VM CPU/RAM sizing does not limit an individual process inside the guest. UID 0 in a workload is root in the guest's initial user namespace, with the fixed reduced capability set above; the VM remains the host boundary.
 - Outbound guest networking is not filtered. Localhost port forwarding is explicit, but guest egress policy is not configurable.
-- PAX fields beyond local/global `path`, `linkpath`, `size`, `mtime`, `uid`, and `gid`, OCI extended attributes, and file capabilities are not implemented. Image device nodes under `/dev` are ignored because the guest replaces that directory; FIFOs and special files outside `/dev` are unsupported.
+- PAX fields beyond local/global `path`, `linkpath`, `size`, `mtime`, `uid`, and `gid`, OCI extended attributes, and file capabilities are not implemented. Image device nodes under `/dev` are ignored because the guest replaces that directory; OCI FIFOs are restored as named pipes, while other special files remain unsupported.
 - A pull refuses more than 16 GiB of distinct blobs missing from the verified cache; larger fully cached images remain usable. The cap is fixed today; add an opt-in override if real uncached workloads require more.
 - Layer expansion has fixed per-layer and per-image-pass limits, but Rift does not enforce a filesystem free-space reservation or a wall-clock limit for extraction.
 - Registry TLS and content digests do not replace publisher signature verification. Registry-wide provider compatibility is not established.
