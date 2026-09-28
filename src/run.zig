@@ -265,10 +265,7 @@ pub fn resolveVolumes(init: std.process.Init, volumes: []const vm.Volume) ![]con
         var buffer: [Io.Dir.max_path_bytes]u8 = undefined;
         switch (info.kind) {
             .directory => {
-                var directory = Io.Dir.openDirAbsolute(init.io, volume.source, .{ .follow_symlinks = false }) catch return error.InvalidVolumeSource;
-                defer directory.close(init.io);
-                const length = try directory.realPath(init.io, &buffer);
-                resolved[index] = .{ .source = try allocator.dupe(u8, buffer[0..length]), .target = volume.target, .read_only = volume.read_only };
+                resolved[index] = try resolveDirectoryVolume(init.io, allocator, volume, info.inode, &buffer);
             },
             .file => {
                 var file = Io.Dir.openFileAbsolute(init.io, volume.source, .{ .mode = .read_only, .allow_directory = false, .follow_symlinks = false }) catch return error.InvalidVolumeSource;
@@ -293,6 +290,15 @@ pub fn resolveVolumes(init: std.process.Init, volumes: []const vm.Volume) ![]con
         }
     }.lessThan);
     return resolved;
+}
+
+fn resolveDirectoryVolume(io: Io, allocator: std.mem.Allocator, volume: vm.Volume, expected_inode: Io.File.INode, path_buffer: []u8) !vm.Volume {
+    var directory = Io.Dir.openDirAbsolute(io, volume.source, .{ .follow_symlinks = false }) catch return error.InvalidVolumeSource;
+    defer directory.close(io);
+    const opened = directory.stat(io) catch return error.InvalidVolumeSource;
+    if (opened.kind != .directory or opened.inode != expected_inode) return error.InvalidVolumeSource;
+    const length = try directory.realPath(io, path_buffer);
+    return .{ .source = try allocator.dupe(u8, path_buffer[0..length]), .target = volume.target, .read_only = volume.read_only };
 }
 
 fn stageFileVolumes(allocator: std.mem.Allocator, io: Io, run_dir: Io.Dir, volumes: []const vm.Volume) ![]const vm.Volume {
@@ -503,4 +509,23 @@ test "file-volume staging rejects a source replaced by a symlink" {
     var run_again = try temp.dir.openDir(io, "run-again", .{});
     defer run_again.close(io);
     try std.testing.expectError(error.InvalidVolumeSource, stageFileVolumes(std.testing.allocator, io, run_again, &volumes));
+}
+
+test "directory-volume resolution rejects a source replaced after lookup" {
+    const io = std.testing.io;
+    var temp = std.testing.tmpDir(.{});
+    defer temp.cleanup();
+    try temp.dir.createDir(io, "source", .fromMode(0o700));
+    try temp.dir.createDir(io, "replacement", .fromMode(0o700));
+    const selected = try temp.dir.statFile(io, "source", .{ .follow_symlinks = false });
+    try temp.dir.rename("source", temp.dir, "selected", io);
+    try temp.dir.rename("replacement", temp.dir, "source", io);
+
+    var root_path_buffer: [Io.Dir.max_path_bytes]u8 = undefined;
+    const root_path = root_path_buffer[0..try temp.dir.realPath(io, &root_path_buffer)];
+    const source_path = try std.fmt.allocPrint(std.testing.allocator, "{s}/source", .{root_path});
+    defer std.testing.allocator.free(source_path);
+    const volume = vm.Volume{ .source = source_path, .target = "/input", .read_only = true };
+    var path_buffer: [Io.Dir.max_path_bytes]u8 = undefined;
+    try std.testing.expectError(error.InvalidVolumeSource, resolveDirectoryVolume(io, std.testing.allocator, volume, selected.inode, &path_buffer));
 }
