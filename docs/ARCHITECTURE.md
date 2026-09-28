@@ -14,7 +14,7 @@ The layer installer handles OCI tar, gzip, and zstd layers, including regular-fi
 
 Image character and block device entries below `/dev` are ignored because the guest replaces `/dev` with a fresh restricted tmpfs. Entries outside `/dev` are materialized inside the disposable overlay, retaining their device numbers, owner, mode, and modification time. PAX xattrs on device nodes are ignored, and Unix-domain socket entries remain unsupported. OCI FIFO entries are restored as named pipes.
 
-The local process check verifies that a UID 0 workload sees `NoNewPrivs: 1` and cannot mount a new tmpfs. `run-resources-check` starts foreground and detached containers with cgroup quotas, exercises the minimum CPU limit, and runs `exec` in the limited cgroup.
+The local process check verifies that a UID 0 workload sees `NoNewPrivs: 1` and cannot mount a new tmpfs. `run-check` confirms a one-task pids cap rejects child creation. `run-resources-check` measures CPU use below a 0.1 CPU quota, confirms a 64 MiB memory cap kills a 160 MiB tmpfs write, exercises the minimum CPU limit, and runs detached `exec` under the same cgroup limits.
 
 ## VM resources
 
