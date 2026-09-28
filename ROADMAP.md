@@ -64,7 +64,7 @@ This roadmap carries the original plan forward from the first project commit. `[
 - [x] Honor validated OCI image `StopSignal` values for detached shutdown, with Dockerfile `STOPSIGNAL` support.
 - [x] Configure the private guest VM's CPU count and RAM per run, with host-supported range checks and documented defaults; these set guest capacity rather than per-process quotas.
 - [x] Disable the guest VM network adapter per run; verify no guest interface or IPv4 default route.
-- [ ] Implement further OCI process/resource controls such as per-process limits and configurable capability profiles.
+- [ ] Implement further OCI process/resource controls such as per-process limits and configurable capability profiles. `--pids-limit` now applies an optional cgroup v2 task cap; configurable capability profiles and other controls remain.
 - [x] Review help and error messages across supported commands for clear, predictable use.
 - [x] Add binary-safe JSON Lines for detached logs with container ID, combined stream, and byte offsets; preserve output bytes as base64 data.
 

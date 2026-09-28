@@ -18,7 +18,7 @@ The local process check verifies that a UID 0 workload sees `NoNewPrivs: 1` and 
 
 ## VM resources
 
-Each run uses a private Linux VM. `--cpus` and `--memory` configure the CPU and RAM exposed to that guest; defaults are 2 CPUs and 256 MiB. These are VM capacity settings, not per-process cgroup quotas. Apple Virtualization.framework validates the requested range for the current Mac. Dockerfile `RUN` keeps its fixed 2-CPU, 256-MiB build VM.
+Each run uses a private Linux VM. `--cpus` and `--memory` configure the CPU and RAM exposed to that guest; defaults are 2 CPUs and 256 MiB. `--pids-limit` optionally caps guest tasks with cgroup v2, reserving one task for Rift's PID namespace supervisor. Apple Virtualization.framework validates the requested CPU and memory range for the current Mac. Dockerfile `RUN` keeps its fixed 2-CPU, 256-MiB build VM.
 
 ## Detached logs
 
@@ -46,7 +46,7 @@ Each VM is currently configured for 2 virtual CPUs and 256 MiB of guest RAM. Loc
 
 `rift pull alpine` resolves the reference, authenticates anonymously to public registries or uses optional process-environment credentials for a private Bearer challenge, selects the host's Linux architecture, fetches each required blob, verifies its digest, and publishes verified data into the content-addressed store. `rift images` lists locally recorded references and their platform manifest digests. `rift rmi alpine` removes its local reference; `rift clean --yes` later reclaims blobs no other reference uses.
 
-`rift run --rm alpine echo hello` assembles the image root, starts a Linux VM with the pinned Alpine kernel, mounts the read-only image through VirtioFS, starts the command on an ephemeral writable overlay, relays output, returns its exit status, and removes temporary host state. The guest uses `chroot` inside a VM with private PID/mount namespaces and reduced capabilities; complete OCI process controls remain planned.
+`rift run --rm alpine echo hello` assembles the image root, starts a Linux VM with the pinned Alpine kernel, mounts the read-only image through VirtioFS, starts the command on an ephemeral writable overlay, relays output, returns its exit status, and removes temporary host state. The guest uses `chroot` inside a VM with private PID/mount namespaces and reduced capabilities. The `pids` cgroup controller enforces an optional task limit; configurable capability profiles and other OCI process controls remain planned.
 
 Image downloads and guest execution are separate steps. A pull alone does not prove that an arbitrary image can execute with full OCI process semantics.
 

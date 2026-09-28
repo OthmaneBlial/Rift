@@ -1104,7 +1104,23 @@ failed: {
     }
 }
 
-static int run_container(char **argv, unsigned long volume_count, int ready_descriptor) {
+static int attach_pids_cgroup(void) {
+    int descriptor = open("/mnt/state/cgroup/rift/cgroup.procs", O_WRONLY | O_CLOEXEC);
+    if (descriptor < 0) return fail("open pids limit cgroup");
+    char pid[32];
+    int length = snprintf(pid, sizeof(pid), "%ld\n", (long)getpid());
+    if (length <= 0 || (size_t)length >= sizeof(pid) || write_all(descriptor, pid, (size_t)length) != 0) {
+        int saved_errno = errno;
+        close(descriptor);
+        errno = saved_errno;
+        return fail("attach pids limit cgroup");
+    }
+    if (close(descriptor) != 0) return fail("close pids limit cgroup");
+    return 0;
+}
+
+static int run_container(char **argv, unsigned long volume_count, uint32_t pids_limit, int ready_descriptor) {
+    if (pids_limit && attach_pids_cgroup() != 0) return 125;
     if (apply_image_ownership(argv[1]) != 0) return 125;
     if (chroot(argv[1]) != 0) return fail("chroot");
     if (chdir("/") != 0) return fail("chdir root");
@@ -1252,6 +1268,24 @@ done:
 int main(int argc, char **argv) {
     if (argc == 4 && strcmp(argv[1], "--copy-root-xattrs") == 0)
         return copy_root_xattrs(argv[2], argv[3]);
+    uint32_t pids_limit = 0;
+    if (argc > 1 && strcmp(argv[1], "--pids-limit") == 0) {
+        if (argc < 4) {
+            fputs("rift-exec: missing pids limit or command arguments\n", stderr);
+            return 125;
+        }
+        errno = 0;
+        char *limit_end;
+        unsigned long parsed_limit = strtoul(argv[2], &limit_end, 10);
+        if (errno || limit_end == argv[2] || *limit_end || parsed_limit == 0 || parsed_limit > UINT32_MAX) {
+            fputs("rift-exec: invalid pids limit\n", stderr);
+            return 125;
+        }
+        pids_limit = (uint32_t)parsed_limit;
+        memmove(&argv[1], &argv[3], (size_t)(argc - 3) * sizeof(argv[0]));
+        argc -= 2;
+        argv[argc] = NULL;
+    }
     if (argc < 7) {
         fputs("rift-exec: missing command\n", stderr);
         return 125;
@@ -1283,7 +1317,7 @@ int main(int argc, char **argv) {
         close(ready[0]);
         close(control);
         child_pid = -1;
-        return run_container(argv, volume_count, ready[1]);
+        return run_container(argv, volume_count, pids_limit, ready[1]);
     }
     close(ready[1]);
     child_pid = child;

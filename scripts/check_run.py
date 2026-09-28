@@ -53,6 +53,20 @@ def main() -> int:
                 file=sys.stderr,
             )
             return 1
+    if not network_only:
+        limited = subprocess.run(
+            [str(rift), "run", "--pids-limit", "1", "--rm", "alpine", "sh", "-c", "sleep 1 &"],
+            capture_output=True,
+            text=True,
+            timeout=45,
+        )
+        if limited.returncode == 0 or "can't fork" not in limited.stdout + limited.stderr:
+            print(
+                "Rift pids check failed: the one-task limit did not reject a child process\n"
+                f"exit={limited.returncode}, stdout={limited.stdout!r}, stderr={limited.stderr!r}",
+                file=sys.stderr,
+            )
+            return 1
     after = set(runtime.iterdir()) if runtime.exists() else set()
     if after != before or Path("/tmp/rift-should-not-exist").exists():
         print("Rift run check failed: temporary state or injected host file remains", file=sys.stderr)
@@ -60,7 +74,7 @@ def main() -> int:
     if network_only:
         print("Rift network check passed: container DNS lookup and cleanup")
     else:
-        print("Rift run check passed: defaults, environment, exit status, quoting, namespaces, devices, offline mode, cleanup")
+        print("Rift run check passed: defaults, environment, exit status, quoting, namespaces, devices, pids limit, offline mode, cleanup")
     return 0
 
 
