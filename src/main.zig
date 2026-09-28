@@ -29,8 +29,8 @@ fn printHelp(writer: *Io.Writer) Io.Writer.Error!void {
             "  rmi <image>        Remove a local image reference\n" ++
             "  run [options] <image> [command] [args...] Run in the foreground\n" ++
             "  run -d [options] <image> [command] [args...] Run detached\n" ++
-            "    Options: --rm (foreground only), -p HOST:GUEST, -w DIR,\n" ++
-            "             -e KEY=VALUE, -v HOST:TARGET[:ro|rw]\n" ++
+            "    Options: --rm (foreground only), --cpus N, --memory SIZE,\n" ++
+            "             -p HOST:GUEST, -w DIR, -e KEY=VALUE, -v HOST:TARGET[:ro|rw]\n" ++
             "  ps                 List detached containers\n" ++
             "  inspect <id>       Show detached container details\n" ++
             "  logs <id>          Show a detached container's output\n" ++
@@ -230,6 +230,7 @@ fn ensurePulled(init: std.process.Init, arguments: []const []const u8, detached:
     if (builtin.os.tag != .macos or builtin.cpu.arch != .aarch64) return error.UnsupportedHost;
     const options = try runtime.parseOptions(init.arena.allocator(), arguments);
     if (detached and options.remove_after_exit) return error.DetachedAutoRemoveUnsupported;
+    try runtime.validateResources(options);
     _ = try runtime.resolveVolumes(init, options.volumes);
     const image_name = arguments[options.image_index];
     try ensureImagePulled(init, image_name);
@@ -471,6 +472,9 @@ pub fn main(init: std.process.Init) void {
             error.InvalidImageConfig => std.debug.print("rift: image configuration is invalid or mismatches its layers\n", .{}),
             error.ImageHasNoCommand => std.debug.print("rift: image has no default command; specify one after the image\n", .{}),
             error.UnsupportedWorkingDirectory => std.debug.print("rift: image working directory must be an absolute path\n", .{}),
+            error.InvalidCPUCount => std.debug.print("rift: --cpus must be a positive whole number\n", .{}),
+            error.InvalidMemorySize => std.debug.print("rift: --memory must be bytes or a size such as 512m or 2g, in 1 MiB increments\n", .{}),
+            error.InvalidVMResources => std.debug.print("rift: requested VM CPU or memory size is outside this Mac's supported range\n", .{}),
             error.InvalidVolumeSpecification => std.debug.print("rift: volume must use absolute HOST:TARGET[:ro|rw] paths without . or .. components\n", .{}),
             error.ReservedVolumeTarget => std.debug.print("rift: volume target cannot be /dev or /proc\n", .{}),
             error.DuplicateVolumeTarget => std.debug.print("rift: each volume target must be unique\n", .{}),
@@ -502,6 +506,7 @@ pub fn main(init: std.process.Init) void {
         std.process.exit(if (err == error.InvalidArguments or err == error.CommandUnavailable or err == error.UnknownCommand or
             err == error.InvalidVolumeSpecification or err == error.ReservedVolumeTarget or err == error.DuplicateVolumeTarget or
             err == error.InvalidVolumeSource or err == error.FileVolumeMustShareFilesystem or err == error.FileVolumeCannotContainTarget or err == error.TooManyVolumes or err == error.ExecRequestTooLarge or
+            err == error.InvalidCPUCount or err == error.InvalidMemorySize or err == error.InvalidVMResources or
             err == error.InvalidBuildArguments or err == error.InvalidBuildTag or err == error.InvalidBuildContext or err == error.InvalidDockerfile or
             err == error.UnsupportedDockerIgnore or
             err == error.UnsupportedDockerfileInstruction or err == error.UnsupportedBuildStages or err == error.UnsupportedCopyForm or err == error.UnknownBuildStage or err == error.DuplicateBuildStage or err == error.BuildStageLimitExceeded or err == error.InvalidBuildSource or err == error.InvalidBuildTarget or

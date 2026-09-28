@@ -29,6 +29,14 @@ rift pull alpine
 rift run --rm alpine echo "Hello from Rift"
 ```
 
+Set resources for a run:
+
+```sh
+rift run --cpus 4 --memory 1g --rm alpine sh -c 'grep -c "^processor" /proc/cpuinfo; grep MemTotal /proc/meminfo'
+```
+
+`--cpus` and `--memory` set the private VM's CPU and RAM. Memory accepts whole MiB or GiB suffixes (`512m`, `2g`) or a byte count in 1 MiB increments. Defaults are 2 CPUs and 256 MiB; the Mac's Virtualization.framework limits the accepted range. These values describe guest resources, not per-process cgroup quotas.
+
 The first run downloads and verifies the pinned Alpine guest files. Image pulls and first-run setup need network access.
 
 ## Run a small service
@@ -77,7 +85,7 @@ Detached containers honor image `StopSignal`. Dockerfile `STOPSIGNAL` accepts ca
 ## What works
 
 - Pull `linux/arm64` images from Docker Hub, Amazon ECR Public, `registry.k8s.io`, GitHub Container Registry, Quay, and Google GCR. [Registry checks](docs/REGISTRIES.md) list the tested image samples; private Bearer-token support is verified against a local fixture.
-- Run foreground and detached containers with image entrypoint, command, environment, working directory, user, and supplementary groups.
+- Run foreground and detached containers with image entrypoint, command, environment, working directory, user, supplementary groups, and configurable guest CPU and RAM.
 - Use outbound networking, DNS, one localhost port mapping, and explicit file or directory volumes.
 - Inspect and manage detached containers with `ps`, `inspect`, `logs`, `exec`, `stop`, `kill`, and `rm`. `exec -i` streams stdin; `exec -it` adds a resizable TTY and forwards SIGINT, SIGTERM, SIGHUP, and SIGQUIT.
 - Build OCI images from multiple `FROM` stages, file or directory `COPY` (including `COPY --from`), ordered single-line `RUN`, `STOPSIGNAL`, and the `ENV`, `USER`, `WORKDIR`, `ENTRYPOINT`, and `CMD` process settings. Each successful `RUN` squashes the prior filesystem into one layer. `.dockerignore`, globs, symlinks, special files, and other Dockerfile instructions remain unsupported.
@@ -118,7 +126,7 @@ The image and guest files were cached. Warm `exec` timing includes the host CLI,
 
 - macOS 12 or newer on Apple Silicon.
 - Zig 0.16 or newer for manual source builds; Homebrew installs the build dependency automatically.
-- One lightweight Linux VM per run; the current guest limit is 2 CPUs and 256 MiB RAM.
+- One lightweight Linux VM per run; defaults are 2 CPUs and 256 MiB RAM. `--cpus` and `--memory` change guest VM capacity within the range supported by the Mac; they do not enforce per-process cgroup limits.
 - One TCP port mapping per run; up to 16 explicit file or directory volumes.
 - `rift build` supports up to 128 stages, one source per `COPY` (from the local context or an earlier named or indexed stage), single-line shell or JSON-array `RUN`, `STOPSIGNAL`, and `ENV`, `USER`, `WORKDIR`, `ENTRYPOINT`, and `CMD`. Each `RUN` boots a temporary Linux VM, applies the preceding image state, and stores the successful result as a squashed OCI layer; failed commands stop the build without recording its tag. Each build VM has 256 MiB RAM and a 256 MiB writable overlay. `ENV` values are literal and `WORKDIR` must be absolute. Targets must be absolute. Stop signals accept canonical names or numbers except for `SIGKILL`, `SIGSTOP`, and real-time signals. `.dockerignore`, globs, symlinks, special files, line continuations, and other Dockerfile instructions are unsupported.
 - Each pull is capped at 16 GiB of distinct image blobs not already verified in the local cache.

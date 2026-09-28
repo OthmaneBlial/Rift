@@ -14,6 +14,7 @@ pub fn execute(init: std.process.Init, arguments: []const []const u8, stop_path:
     if (builtin.os.tag != .macos or builtin.cpu.arch != .aarch64) return error.UnsupportedHost;
     const allocator = init.arena.allocator();
     const options = try parseOptions(allocator, arguments);
+    try validateResources(options);
     const volumes = try resolveVolumes(init, options.volumes);
     const offset = options.image_index;
     const port = options.port;
@@ -113,7 +114,7 @@ pub fn execute(init: std.process.Init, arguments: []const []const u8, stop_path:
     const kernel_path = try std.fmt.allocPrint(allocator, "{s}/Image", .{guest_path});
     const initramfs_path = try std.fmt.allocPrint(allocator, "{s}/initramfs", .{run_path});
 
-    vm.run(allocator, kernel_path, initramfs_path, "console=hvc0 quiet loglevel=0 rdinit=/rift-init", root_path, control_path, stop_path, kill_path, staged_volumes, true, port, measure_guest_boot, 0, 1) catch |err| {
+    vm.run(allocator, kernel_path, initramfs_path, "console=hvc0 quiet loglevel=0 rdinit=/rift-init", root_path, control_path, stop_path, kill_path, staged_volumes, true, port, measure_guest_boot, options.cpu_count, options.memory_size, 0, 1) catch |err| {
         if (container_id) |id| {
             control.writeFile(init.io, .{ .sub_path = "host-exit", .data = "" }) catch {};
             try waitForExecClients(init, id);
@@ -153,12 +154,16 @@ fn waitForExecClients(init: std.process.Init, id: []const u8) !void {
     lock.unlock(init.io);
 }
 
-pub const Options = struct { image_index: usize, port: ?vm.PortMapping, working_dir: ?[]const u8, environments: []const []const u8, volumes: []const vm.Volume, remove_after_exit: bool };
+pub const Options = struct { image_index: usize, port: ?vm.PortMapping, working_dir: ?[]const u8, environments: []const []const u8, volumes: []const vm.Volume, cpu_count: u16, memory_size: u64, remove_after_exit: bool };
 
 pub fn parseOptions(allocator: std.mem.Allocator, arguments: []const []const u8) !Options {
     var offset: usize = 0;
     var port: ?vm.PortMapping = null;
     var working_dir: ?[]const u8 = null;
+    var cpu_count = vm.default_cpu_count;
+    var cpu_count_set = false;
+    var memory_size = vm.default_memory_bytes;
+    var memory_size_set = false;
     var environments: std.ArrayList([]const u8) = .empty;
     errdefer environments.deinit(allocator);
     var volumes: std.ArrayList(vm.Volume) = .empty;
@@ -176,6 +181,17 @@ pub fn parseOptions(allocator: std.mem.Allocator, arguments: []const []const u8)
         } else if (std.mem.eql(u8, arguments[offset], "-w")) {
             if (working_dir != null or offset + 1 >= arguments.len or arguments[offset + 1].len == 0 or !validWorkingDirectory(arguments[offset + 1])) return error.InvalidArguments;
             working_dir = arguments[offset + 1];
+            offset += 2;
+        } else if (std.mem.eql(u8, arguments[offset], "--cpus")) {
+            if (cpu_count_set or offset + 1 >= arguments.len) return error.InvalidArguments;
+            cpu_count = std.fmt.parseInt(u16, arguments[offset + 1], 10) catch return error.InvalidCPUCount;
+            if (cpu_count == 0) return error.InvalidCPUCount;
+            cpu_count_set = true;
+            offset += 2;
+        } else if (std.mem.eql(u8, arguments[offset], "--memory")) {
+            if (memory_size_set or offset + 1 >= arguments.len) return error.InvalidArguments;
+            memory_size = try parseMemorySize(arguments[offset + 1]);
+            memory_size_set = true;
             offset += 2;
         } else if (std.mem.eql(u8, arguments[offset], "-e")) {
             if (offset + 1 >= arguments.len or !validEnvironment(arguments[offset + 1])) return error.InvalidArguments;
@@ -195,7 +211,26 @@ pub fn parseOptions(allocator: std.mem.Allocator, arguments: []const []const u8)
     if (arguments.len < offset + 1) return error.InvalidArguments;
     const environment_slice = try environments.toOwnedSlice(allocator);
     errdefer allocator.free(environment_slice);
-    return .{ .image_index = offset, .port = port, .working_dir = working_dir, .environments = environment_slice, .volumes = try volumes.toOwnedSlice(allocator), .remove_after_exit = remove_after_exit };
+    return .{ .image_index = offset, .port = port, .working_dir = working_dir, .environments = environment_slice, .volumes = try volumes.toOwnedSlice(allocator), .cpu_count = cpu_count, .memory_size = memory_size, .remove_after_exit = remove_after_exit };
+}
+
+fn parseMemorySize(value: []const u8) !u64 {
+    if (value.len == 0) return error.InvalidMemorySize;
+    const suffix = std.ascii.toLower(value[value.len - 1]);
+    const multiplier: u64 = switch (suffix) {
+        'm' => 1024 * 1024,
+        'g' => 1024 * 1024 * 1024,
+        else => 1,
+    };
+    const digits = if (multiplier == 1) value else value[0 .. value.len - 1];
+    const quantity = std.fmt.parseInt(u64, digits, 10) catch return error.InvalidMemorySize;
+    const bytes = std.math.mul(u64, quantity, multiplier) catch return error.InvalidMemorySize;
+    if (bytes == 0 or bytes % vm.memory_granularity_bytes != 0) return error.InvalidMemorySize;
+    return bytes;
+}
+
+pub fn validateResources(options: Options) !void {
+    try vm.validateResources(options.cpu_count, options.memory_size);
 }
 
 pub fn resolveVolumes(init: std.process.Init, volumes: []const vm.Volume) ![]const vm.Volume {
@@ -324,6 +359,25 @@ test "working directory override requires one absolute path" {
     try std.testing.expectError(error.InvalidArguments, parseOptions(allocator, &.{ "-w", "relative", "alpine" }));
     try std.testing.expectError(error.InvalidArguments, parseOptions(allocator, &.{ "-w", "", "alpine" }));
     try std.testing.expectError(error.InvalidArguments, parseOptions(allocator, &.{ "-w", "/tmp", "-w", "/", "alpine" }));
+}
+
+test "run options validate configurable VM CPU and memory sizes" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const selected = try parseOptions(arena.allocator(), &.{ "--cpus", "4", "--memory", "512m", "alpine" });
+    try std.testing.expectEqual(@as(u16, 4), selected.cpu_count);
+    try std.testing.expectEqual(@as(u64, 512 * 1024 * 1024), selected.memory_size);
+    const defaults = try parseOptions(arena.allocator(), &.{"alpine"});
+    try std.testing.expectEqual(vm.default_cpu_count, defaults.cpu_count);
+    try std.testing.expectEqual(vm.default_memory_bytes, defaults.memory_size);
+    try std.testing.expectError(error.InvalidCPUCount, parseOptions(arena.allocator(), &.{ "--cpus", "0", "alpine" }));
+    try std.testing.expectError(error.InvalidCPUCount, parseOptions(arena.allocator(), &.{ "--cpus", "65536", "alpine" }));
+    try std.testing.expectError(error.InvalidMemorySize, parseOptions(arena.allocator(), &.{ "--memory", "0m", "alpine" }));
+    try std.testing.expectError(error.InvalidMemorySize, parseOptions(arena.allocator(), &.{ "--memory", "512mb", "alpine" }));
+    try std.testing.expectError(error.InvalidMemorySize, parseOptions(arena.allocator(), &.{ "--memory", "1m1", "alpine" }));
+    try std.testing.expectError(error.InvalidMemorySize, parseOptions(arena.allocator(), &.{ "--memory", "18446744073709551615g", "alpine" }));
+    try std.testing.expectError(error.InvalidArguments, parseOptions(arena.allocator(), &.{ "--cpus", "2", "--cpus", "4", "alpine" }));
+    try std.testing.expectError(error.InvalidArguments, parseOptions(arena.allocator(), &.{ "--memory", "512m", "--memory", "1g", "alpine" }));
 }
 
 test "environment overrides require explicit values" {

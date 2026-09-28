@@ -12,6 +12,18 @@ extern RiftForwarder *rift_forward_start(const char *control_path, uint16_t host
 extern void rift_forward_stop(RiftForwarder *forwarder);
 typedef struct { const char *path; int read_only; } RiftShare;
 
+int rift_vm_validate_resources(size_t cpu_count, uint64_t memory_size) {
+    @autoreleasepool {
+        if (![NSThread isMainThread] || ![VZVirtualMachine isSupported]) return 2;
+        if (cpu_count < VZVirtualMachineConfiguration.minimumAllowedCPUCount ||
+            cpu_count > VZVirtualMachineConfiguration.maximumAllowedCPUCount ||
+            memory_size < VZVirtualMachineConfiguration.minimumAllowedMemorySize ||
+            memory_size > VZVirtualMachineConfiguration.maximumAllowedMemorySize ||
+            memory_size % (1024 * 1024) != 0) return 6;
+        return 0;
+    }
+}
+
 static int request_guest_stop(const char *control_path) {
     char path[PATH_MAX];
     const int length = snprintf(path, sizeof(path), "%s/stop", control_path);
@@ -62,11 +74,13 @@ static int write_guest_boot_ms(const char *control_path, double milliseconds) {
 int rift_vm_run(const char *kernel_path, const char *initramfs_path, const char *command_line,
                 const char *share_path, const char *control_path, const char *stop_path, const char *kill_path,
                 const RiftShare *volumes, size_t volume_count, int network_enabled, int measure_guest_boot,
-                int host_port, int guest_port, int input_fd, int output_fd) {
+                int host_port, int guest_port, size_t cpu_count, uint64_t memory_size, int input_fd, int output_fd) {
     @autoreleasepool {
         if (![NSThread isMainThread] || ![VZVirtualMachine isSupported]) return 2;
         if (!kernel_path || !initramfs_path || !command_line || input_fd < 0 || output_fd < 0) return 1;
         if (volume_count > 16 || (volume_count != 0 && !volumes)) return 1;
+        int resource_status = rift_vm_validate_resources(cpu_count, memory_size);
+        if (resource_status != 0) return resource_status;
         if ((host_port != 0 || guest_port != 0) && (!network_enabled || !control_path || host_port < 1 || host_port > 65535 || guest_port < 1 || guest_port > 65535)) return 1;
         if (stop_path && !control_path) return 1;
         if (measure_guest_boot && !control_path) return 1;
@@ -87,9 +101,8 @@ int rift_vm_run(const char *kernel_path, const char *initramfs_path, const char 
                                                             fileHandleForWriting:output];
 
         VZVirtualMachineConfiguration *config = [[VZVirtualMachineConfiguration alloc] init];
-        config.CPUCount = 2;
-        // ponytail: 256 MiB runs the checked Alpine and nginx workflows; add a per-run limit when broader images need it.
-        config.memorySize = 256 * 1024 * 1024;
+        config.CPUCount = cpu_count;
+        config.memorySize = memory_size;
         config.bootLoader = boot;
         config.platform = [[VZGenericPlatformConfiguration alloc] init];
         config.serialPorts = @[serial];

@@ -2,6 +2,12 @@ const std = @import("std");
 
 const Share = extern struct { path: [*:0]const u8, read_only: c_int };
 
+pub const default_cpu_count: u16 = 2;
+pub const default_memory_bytes: u64 = 256 * 1024 * 1024;
+pub const memory_granularity_bytes: u64 = 1024 * 1024;
+
+extern fn rift_vm_validate_resources(cpu_count: usize, memory_size: u64) c_int;
+
 extern fn rift_vm_run(
     kernel: [*:0]const u8,
     initramfs: [*:0]const u8,
@@ -16,12 +22,24 @@ extern fn rift_vm_run(
     measure_guest_boot: c_int,
     host_port: c_int,
     guest_port: c_int,
+    cpu_count: usize,
+    memory_size: u64,
     input_fd: c_int,
     output_fd: c_int,
 ) c_int;
 
 pub const PortMapping = struct { host: u16, guest: u16 };
 pub const Volume = struct { source: []const u8, target: []const u8, read_only: bool, is_file: bool = false };
+
+pub fn validateResources(cpu_count: u16, memory_size: u64) !void {
+    if (cpu_count == 0 or memory_size == 0 or memory_size % memory_granularity_bytes != 0) return error.InvalidVMResources;
+    return switch (rift_vm_validate_resources(cpu_count, memory_size)) {
+        0 => {},
+        2 => error.VirtualizationUnavailable,
+        6 => error.InvalidVMResources,
+        else => error.VirtualMachineFailed,
+    };
+}
 
 pub fn run(
     allocator: std.mem.Allocator,
@@ -36,10 +54,13 @@ pub fn run(
     network_enabled: bool,
     port: ?PortMapping,
     measure_guest_boot: bool,
+    cpu_count: u16,
+    memory_size: u64,
     input_fd: c_int,
     output_fd: c_int,
 ) !void {
     if (volumes.len > 16) return error.TooManyVolumes;
+    if (cpu_count == 0 or memory_size == 0 or memory_size % memory_granularity_bytes != 0) return error.InvalidVMResources;
     const kernel_z = try allocator.dupeZ(u8, kernel);
     defer allocator.free(kernel_z);
     const initramfs_z = try allocator.dupeZ(u8, initramfs);
@@ -66,12 +87,13 @@ pub fn run(
         shares[index] = .{ .path = volume_paths[index].ptr, .read_only = @intFromBool(volume.read_only) };
     }
 
-    return switch (rift_vm_run(kernel_z.ptr, initramfs_z.ptr, command_line_z.ptr, if (share_path_z) |path| path.ptr else null, if (control_path_z) |path| path.ptr else null, if (stop_path_z) |path| path.ptr else null, if (kill_path_z) |path| path.ptr else null, if (shares.len == 0) null else shares.ptr, shares.len, @intFromBool(network_enabled), @intFromBool(measure_guest_boot), if (port) |mapping| mapping.host else 0, if (port) |mapping| mapping.guest else 0, input_fd, output_fd)) {
+    return switch (rift_vm_run(kernel_z.ptr, initramfs_z.ptr, command_line_z.ptr, if (share_path_z) |path| path.ptr else null, if (control_path_z) |path| path.ptr else null, if (stop_path_z) |path| path.ptr else null, if (kill_path_z) |path| path.ptr else null, if (shares.len == 0) null else shares.ptr, shares.len, @intFromBool(network_enabled), @intFromBool(measure_guest_boot), if (port) |mapping| mapping.host else 0, if (port) |mapping| mapping.guest else 0, cpu_count, memory_size, input_fd, output_fd)) {
         0 => {},
         2 => error.VirtualizationUnavailable,
         3 => error.HostPortUnavailable,
         4 => error.ContainerStopped,
         5 => error.ContainerKilled,
+        6 => error.InvalidVMResources,
         else => error.VirtualMachineFailed,
     };
 }

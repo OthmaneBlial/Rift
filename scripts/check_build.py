@@ -76,6 +76,33 @@ CMD ["printf '%s|%s|%s|%s\\n' \"$RIFT_BUILD_MESSAGE\" \"$(pwd)\" \"$(id -u)\" \"
         if config_run.returncode != 0 or config_run.stdout != "hello world|/tmp/rift-build-work|65534|1777\n":
             raise RuntimeError(f"built image process configuration was not applied: {config_run!r}")
 
+        resources = call(
+            binary,
+            env,
+            "run",
+            "--rm",
+            "--cpus",
+            "1",
+            "--memory",
+            "512m",
+            "rift-build-check:local",
+            "/bin/sh",
+            "-c",
+            "printf 'CPUS='; grep -c '^processor' /proc/cpuinfo; awk '/^MemTotal:/ {print \"MEMORY_KIB=\" $2}' /proc/meminfo",
+        )
+        resource_lines = resources.stdout.splitlines()
+        if resources.returncode != 0 or len(resource_lines) != 2 or resource_lines[0] != "CPUS=1":
+            raise RuntimeError(f"run VM CPU limit was not applied: {resources!r}")
+        try:
+            memory_kib = int(resource_lines[1].removeprefix("MEMORY_KIB="))
+        except ValueError as error:
+            raise RuntimeError(f"run VM memory limit was not reported: {resources!r}") from error
+        if not 256 * 1024 < memory_kib <= 512 * 1024:
+            raise RuntimeError(f"run VM memory limit was not applied: {resources!r}")
+        unsupported_resources = call(binary, env, "run", "--cpus", "65535", "rift-build-config:local")
+        if unsupported_resources.returncode != 2 or "outside this Mac's supported range" not in unsupported_resources.stderr:
+            raise RuntimeError(f"unsupported VM resources were not rejected before launch: {unsupported_resources!r}")
+
         run_context = Path(home) / "run-context"
         run_context.mkdir()
         (run_context / "Dockerfile").write_text(
