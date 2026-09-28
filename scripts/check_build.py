@@ -93,6 +93,57 @@ CMD ["printf '%s|%s|%s|%s\\n' \"$RIFT_BUILD_MESSAGE\" \"$(pwd)\" \"$(id -u)\" \"
         if owners.returncode != 0 or owners.stdout != "0\n0\n":
             raise RuntimeError(f"RUN snapshot did not preserve root ownership: {owners!r}")
 
+        stages_context = Path(home) / "stages-context"
+        stages_context.mkdir()
+        (stages_context / "Dockerfile").write_text(
+            r'''FROM alpine AS Build
+COPY payload /tmp/payload
+RUN printf 'RUN_OK\n' >> /tmp/payload
+ENV RIFT_BUILD_STAGE=builder
+FROM alpine AS final
+ENV RIFT_BUILD_STAGE=final
+WORKDIR /tmp/final-stage
+COPY --from=build /tmp/payload /opt/payload
+COPY --from=0 /tmp/payload /opt/numeric-payload
+FROM final AS output
+'''
+        )
+        (stages_context / "payload").write_text("RIFT_STAGE_COPY_OK|")
+        stages_build = call(binary, env, "build", "-t", "rift-build-stages:local", str(stages_context))
+        if stages_build.returncode != 0 or "Built " not in stages_build.stdout:
+            raise RuntimeError(f"multi-stage Dockerfile build failed: {stages_build!r}")
+        stages_run = call(
+            binary,
+            env,
+            "run",
+            "--rm",
+            "rift-build-stages:local",
+            "/bin/sh",
+            "-c",
+            "printf '%s|%s|' \"$RIFT_BUILD_STAGE\" \"$PWD\"; cat /opt/payload /opt/numeric-payload",
+        )
+        if stages_run.returncode != 0 or stages_run.stdout != (
+            "final|/tmp/final-stage|RIFT_STAGE_COPY_OK|RUN_OK\nRIFT_STAGE_COPY_OK|RUN_OK\n"
+        ):
+            raise RuntimeError(f"multi-stage COPY, RUN, or inherited configuration failed: {stages_run!r}")
+
+        unknown_stage_context = Path(home) / "unknown-stage-context"
+        unknown_stage_context.mkdir()
+        (unknown_stage_context / "Dockerfile").write_text("FROM alpine\nCOPY --from=missing /file /file\n")
+        unknown_stage = call(binary, env, "build", "-t", "rift-build-unknown-stage:local", str(unknown_stage_context))
+        if unknown_stage.returncode == 0 or "earlier stage" not in unknown_stage.stderr:
+            raise RuntimeError(f"unknown COPY --from stage was not rejected: {unknown_stage!r}")
+
+        link_stage_context = Path(home) / "link-stage-context"
+        link_stage_context.mkdir()
+        (link_stage_context / "Dockerfile").write_text(
+            "FROM alpine AS source\nRUN ln -s /etc/passwd /tmp/linked\nFROM alpine\n"
+            "COPY --from=source /tmp/linked /tmp/linked\n"
+        )
+        link_stage = call(binary, env, "build", "-t", "rift-build-link-stage:local", str(link_stage_context))
+        if link_stage.returncode == 0 or "symlink or special file" not in link_stage.stderr:
+            raise RuntimeError(f"inter-stage COPY followed a symlink: {link_stage!r}")
+
         failing_context = Path(home) / "failing-context"
         failing_context.mkdir()
         (failing_context / "Dockerfile").write_text("FROM alpine\nRUN false\n")
@@ -107,10 +158,15 @@ CMD ["printf '%s|%s|%s|%s\\n' \"$RIFT_BUILD_MESSAGE\" \"$(pwd)\" \"$(id -u)\" \"
             or "rift-build-repeat:local" not in listed.stdout
             or "rift-build-config:local" not in listed.stdout
             or "rift-build-run:local" not in listed.stdout
+            or "rift-build-stages:local" not in listed.stdout
         ):
             raise RuntimeError(f"built image was not recorded: {listed!r}")
         if "rift-build-failed-run:local" in listed.stdout:
             raise RuntimeError("failed RUN command published an image reference")
+        if "rift-build-unknown-stage:local" in listed.stdout:
+            raise RuntimeError("unknown stage published an image reference")
+        if "rift-build-link-stage:local" in listed.stdout:
+            raise RuntimeError("symlink stage published an image reference")
         run = call(
             binary,
             env,
@@ -152,7 +208,7 @@ CMD ["printf '%s|%s|%s|%s\\n' \"$RIFT_BUILD_MESSAGE\" \"$(pwd)\" \"$(id -u)\" \"
         (source_dir / "link").symlink_to(outside)
         (link_context / "Dockerfile").write_text("FROM alpine\nCOPY source /unsafe\n")
         link_rejected = call(binary, env, "build", "-t", "rift-build-link-rejected:local", str(link_context))
-        if link_rejected.returncode == 0 or "links and special files are unsupported" not in link_rejected.stderr:
+        if link_rejected.returncode == 0 or "symlink or special file" not in link_rejected.stderr:
             raise RuntimeError(f"symlink inside a directory copy was not rejected: {link_rejected!r}")
 
         listed = call(binary, env, "images")
@@ -176,11 +232,14 @@ CMD ["printf '%s|%s|%s|%s\\n' \"$RIFT_BUILD_MESSAGE\" \"$(pwd)\" \"$(id -u)\" \"
         removed_run = call(binary, env, "rmi", "rift-build-run:local")
         if removed_run.returncode != 0:
             raise RuntimeError(f"RUN image cleanup failed: {removed_run!r}")
+        removed_stages = call(binary, env, "rmi", "rift-build-stages:local")
+        if removed_stages.returncode != 0:
+            raise RuntimeError(f"multi-stage image cleanup failed: {removed_stages!r}")
         runtime = data / "runtime"
         if runtime.exists() and any(runtime.iterdir()):
             raise RuntimeError("image build or run left runtime staging behind")
 
-    print("Rift build check passed: reproducible COPY layers, ordered Dockerfile RUN execution, process config, failure handling, VM execution, and cleanup")
+    print("Rift build check passed: reproducible COPY layers, ordered RUN execution, multi-stage builds, process config, failure handling, VM execution, and cleanup")
     return 0
 
 

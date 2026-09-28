@@ -293,7 +293,10 @@ fn buildImage(init: std.process.Init, options: BuildArguments, writer: *Io.Write
     if (output_image.digest != null) return error.InvalidBuildTag;
     const canonical_output = try output_image.formatAlloc(allocator);
 
-    try ensureImagePulled(init, plan.base_reference);
+    for (plan.stages) |stage| switch (stage.base) {
+        .image => |image| try ensureImagePulled(init, image),
+        .stage => {},
+    };
     var data_dir = (try openDataDir(init)) orelse return error.BaseImageNotFound;
     defer data_dir.close(init.io);
     var store = try storage.BlobStore.init(init.io, data_dir);
@@ -302,13 +305,20 @@ fn buildImage(init: std.process.Init, options: BuildArguments, writer: *Io.Write
     defer store.unlock();
     const records = try store.listImages(allocator);
     defer storage.deinitImageRecords(allocator, records);
-    const base_digest = for (records) |record| {
-        if (!std.mem.eql(u8, record.reference, plan.base_reference)) continue;
-        if (!std.mem.eql(u8, record.platform, "linux/arm64")) return error.UnsupportedHostArchitecture;
-        break record.digest;
-    } else return error.BaseImageNotFound;
+    const base_digests = try allocator.alloc(?[]const u8, plan.stages.len);
+    @memset(base_digests, null);
+    for (plan.stages, 0..) |stage, index| switch (stage.base) {
+        .image => |image| {
+            base_digests[index] = for (records) |record| {
+                if (!std.mem.eql(u8, record.reference, image)) continue;
+                if (!std.mem.eql(u8, record.platform, "linux/arm64")) return error.UnsupportedHostArchitecture;
+                break record.digest;
+            } else return error.BaseImageNotFound;
+        },
+        .stage => {},
+    };
 
-    const result = try image_build.build(allocator, init.io, data_dir, plan, base_digest, store);
+    const result = try image_build.build(allocator, init.io, data_dir, plan, base_digests, store);
     try store.recordImage(allocator, .{
         .reference = canonical_output,
         .digest = result.digest,
@@ -472,8 +482,11 @@ pub fn main(init: std.process.Init) void {
             error.InvalidBuildContext => std.debug.print("rift: build context must contain a readable Dockerfile\n", .{}),
             error.UnsupportedDockerIgnore => std.debug.print("rift: .dockerignore files are not supported by this build preview\n", .{}),
             error.InvalidDockerfile => std.debug.print("rift: invalid Dockerfile; check its instructions and JSON command arrays\n", .{}),
-            error.UnsupportedDockerfileInstruction, error.UnsupportedBuildStages, error.UnsupportedCopyForm => std.debug.print("rift: supported build instructions are one FROM, COPY, RUN, ENV, USER, WORKDIR, ENTRYPOINT, and CMD\n", .{}),
-            error.InvalidBuildSource => std.debug.print("rift: COPY accepts regular files and directories inside the build context; links and special files are unsupported\n", .{}),
+            error.UnsupportedDockerfileInstruction, error.UnsupportedBuildStages, error.UnsupportedCopyForm => std.debug.print("rift: supported build instructions are FROM, COPY [--from=stage], RUN, ENV, USER, WORKDIR, ENTRYPOINT, and CMD\n", .{}),
+            error.UnknownBuildStage => std.debug.print("rift: COPY --from must name an earlier stage or its numeric index\n", .{}),
+            error.DuplicateBuildStage => std.debug.print("rift: Dockerfile stage aliases must be unique\n", .{}),
+            error.BuildStageLimitExceeded => std.debug.print("rift: Dockerfile supports at most 128 build stages\n", .{}),
+            error.InvalidBuildSource => std.debug.print("rift: COPY source path is invalid or uses a symlink or special file\n", .{}),
             error.InvalidBuildTarget => std.debug.print("rift: COPY target must be an absolute path without . or .. components\n", .{}),
             error.UnsupportedBuildWorkingDirectory => std.debug.print("rift: WORKDIR must be an absolute path without . or .. components\n", .{}),
             error.UnsupportedBuildDirectoryPermissions => std.debug.print("rift: copied directories must be readable and searchable by their owner\n", .{}),
@@ -491,7 +504,7 @@ pub fn main(init: std.process.Init) void {
             err == error.InvalidVolumeSource or err == error.FileVolumeMustShareFilesystem or err == error.FileVolumeCannotContainTarget or err == error.TooManyVolumes or err == error.ExecRequestTooLarge or
             err == error.InvalidBuildArguments or err == error.InvalidBuildTag or err == error.InvalidBuildContext or err == error.InvalidDockerfile or
             err == error.UnsupportedDockerIgnore or
-            err == error.UnsupportedDockerfileInstruction or err == error.UnsupportedBuildStages or err == error.UnsupportedCopyForm or err == error.InvalidBuildSource or err == error.InvalidBuildTarget or
+            err == error.UnsupportedDockerfileInstruction or err == error.UnsupportedBuildStages or err == error.UnsupportedCopyForm or err == error.UnknownBuildStage or err == error.DuplicateBuildStage or err == error.BuildStageLimitExceeded or err == error.InvalidBuildSource or err == error.InvalidBuildTarget or
             err == error.UnsupportedBuildWorkingDirectory or
             err == error.UnsupportedBuildDirectoryPermissions or err == error.BuildTooManyEntries) 2 else 1);
     };

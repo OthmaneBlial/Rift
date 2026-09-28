@@ -17,8 +17,11 @@ const run_count_limit = 128;
 const copy_entry_limit = 100_000;
 const copy_path_list_limit = 64 * 1024 * 1024;
 const copy_depth_limit = 128;
+const build_stage_limit = 128;
 
-pub const Copy = struct { source: []const u8, target: []const u8, target_is_directory: bool };
+pub const Copy = struct { source: []const u8, target: []const u8, target_is_directory: bool, from_stage: ?usize = null };
+
+pub const StageBase = union(enum) { image: []const u8, stage: usize };
 
 pub const BuildConfig = struct {
     env: []const []const u8 = &.{},
@@ -38,18 +41,25 @@ pub const Instruction = union(enum) {
     run: Run,
 };
 
+pub const Stage = struct {
+    base: StageBase,
+    name: ?[]const u8,
+    instruction_start: usize,
+    instruction_count: usize,
+    config: BuildConfig,
+};
+
 pub const Plan = struct {
     context_path: []const u8,
-    base_reference: []const u8,
+    stages: []const Stage,
     instructions: []const Instruction,
-    config: BuildConfig,
 
     pub fn deinit(self: Plan, allocator: std.mem.Allocator) void {
         allocator.free(self.context_path);
-        allocator.free(self.base_reference);
         for (self.instructions) |instruction| deinitInstruction(allocator, instruction);
         allocator.free(self.instructions);
-        deinitBuildConfig(allocator, self.config);
+        for (self.stages) |stage| deinitStage(allocator, stage);
+        allocator.free(self.stages);
     }
 };
 
@@ -119,30 +129,58 @@ pub fn readPlan(allocator: std.mem.Allocator, io: Io, context_argument: []const 
     return parseDockerfile(allocator, context_path, body);
 }
 
+const StageDraft = struct {
+    base: ?StageBase = null,
+    name: ?[]const u8 = null,
+    instruction_start: usize = 0,
+    environment: std.ArrayList([]const u8) = .empty,
+    user: ?[]const u8 = null,
+    working_dir: ?[]const u8 = null,
+    entrypoint: ?[]const []const u8 = null,
+    command: ?[]const []const u8 = null,
+
+    fn deinit(self: *StageDraft, allocator: std.mem.Allocator) void {
+        if (self.base) |base| switch (base) {
+            .image => |value| allocator.free(value),
+            .stage => {},
+        };
+        if (self.name) |value| allocator.free(value);
+        for (self.environment.items) |entry| allocator.free(entry);
+        self.environment.deinit(allocator);
+        if (self.user) |value| allocator.free(value);
+        if (self.working_dir) |value| allocator.free(value);
+        if (self.entrypoint) |value| freeArguments(allocator, value);
+        if (self.command) |value| freeArguments(allocator, value);
+        self.* = .{};
+    }
+
+    fn buildConfig(self: StageDraft) BuildConfig {
+        return .{
+            .env = self.environment.items,
+            .user = self.user,
+            .working_dir = self.working_dir,
+            .entrypoint = self.entrypoint,
+            .cmd = self.command,
+        };
+    }
+};
+
 pub fn parseDockerfile(allocator: std.mem.Allocator, context_path: []const u8, body: []const u8) !Plan {
     if (body.len > dockerfile_limit or std.mem.indexOfScalar(u8, body, 0) != null) return error.InvalidDockerfile;
-    var base_reference: ?[]const u8 = null;
-    errdefer if (base_reference) |base| allocator.free(base);
     var instructions: std.ArrayList(Instruction) = .empty;
     errdefer {
         for (instructions.items) |instruction| deinitInstruction(allocator, instruction);
         instructions.deinit(allocator);
     }
+    var stages: std.ArrayList(Stage) = .empty;
+    errdefer {
+        for (stages.items) |stage| deinitStage(allocator, stage);
+        stages.deinit(allocator);
+    }
+    var draft: StageDraft = .{};
+    defer draft.deinit(allocator);
     var copy_count: usize = 0;
     var run_count: usize = 0;
-    var environment: std.ArrayList([]const u8) = .empty;
-    errdefer {
-        for (environment.items) |entry| allocator.free(entry);
-        environment.deinit(allocator);
-    }
-    var user: ?[]const u8 = null;
-    errdefer if (user) |value| allocator.free(value);
-    var working_dir: ?[]const u8 = null;
-    errdefer if (working_dir) |value| allocator.free(value);
-    var entrypoint: ?[]const []const u8 = null;
-    errdefer if (entrypoint) |value| freeArguments(allocator, value);
-    var command: ?[]const []const u8 = null;
-    errdefer if (command) |value| freeArguments(allocator, value);
 
     var lines = std.mem.splitScalar(u8, body, '\n');
     while (lines.next()) |raw_line| {
@@ -153,18 +191,56 @@ pub fn parseDockerfile(allocator: std.mem.Allocator, context_path: []const u8, b
         const instruction = line[0..separator];
         var offset = separator;
         if (std.ascii.eqlIgnoreCase(instruction, "FROM")) {
-            if (base_reference != null) return error.UnsupportedBuildStages;
-            const base = try nextWord(line, &offset) orelse return error.InvalidDockerfile;
+            if (draft.base != null) try finishStage(allocator, &stages, &draft, instructions.items.len);
+            if (stages.items.len == build_stage_limit) return error.BuildStageLimitExceeded;
+            const base_token = try nextWord(line, &offset) orelse return error.InvalidDockerfile;
+            var raw_name: ?[]const u8 = null;
+            if (try nextWord(line, &offset)) |as_token| {
+                if (!std.ascii.eqlIgnoreCase(as_token, "AS")) return error.UnsupportedBuildStages;
+                const alias = try nextWord(line, &offset) orelse return error.InvalidDockerfile;
+                if (!validStageName(alias)) return error.InvalidDockerfile;
+                for (stages.items) |stage| {
+                    if (stage.name) |existing| {
+                        if (std.ascii.eqlIgnoreCase(existing, alias)) return error.DuplicateBuildStage;
+                    }
+                }
+                raw_name = alias;
+            }
             if (try nextWord(line, &offset) != null) return error.UnsupportedBuildStages;
-            var parsed = reference.parse(allocator, base) catch return error.InvalidDockerfile;
-            defer parsed.deinit(allocator);
-            base_reference = try parsed.formatAlloc(allocator);
+            const inherited = findStage(stages.items, base_token, false);
+            var image_reference: ?[]const u8 = null;
+            errdefer if (image_reference) |value| allocator.free(value);
+            if (inherited == null) {
+                var parsed = reference.parse(allocator, base_token) catch return error.InvalidDockerfile;
+                defer parsed.deinit(allocator);
+                image_reference = try parsed.formatAlloc(allocator);
+            }
+            var owned_name: ?[]const u8 = if (raw_name) |value| try lowerStageName(allocator, value) else null;
+            errdefer if (owned_name) |value| allocator.free(value);
+            const base: StageBase = if (inherited) |index|
+                .{ .stage = index }
+            else
+                .{ .image = image_reference.? };
+            draft = .{
+                .base = base,
+                .name = owned_name,
+                .instruction_start = instructions.items.len,
+            };
+            image_reference = null;
+            owned_name = null;
         } else if (std.ascii.eqlIgnoreCase(instruction, "COPY")) {
-            if (base_reference == null or copy_count == copy_count_limit) return error.InvalidDockerfile;
-            const source_arg = try nextWord(line, &offset) orelse return error.InvalidDockerfile;
+            if (draft.base == null or copy_count == copy_count_limit) return error.InvalidDockerfile;
+            const first_arg = try nextWord(line, &offset) orelse return error.InvalidDockerfile;
+            var from_stage: ?usize = null;
+            const source_arg = if (std.mem.startsWith(u8, first_arg, "--from=")) blk: {
+                const stage_name = first_arg[7..];
+                if (stage_name.len == 0) return error.InvalidDockerfile;
+                from_stage = findStage(stages.items, stage_name, true) orelse return error.UnknownBuildStage;
+                break :blk try nextWord(line, &offset) orelse return error.InvalidDockerfile;
+            } else if (std.mem.startsWith(u8, first_arg, "--")) return error.UnsupportedCopyForm else first_arg;
             const target_arg = try nextWord(line, &offset) orelse return error.InvalidDockerfile;
             if (try nextWord(line, &offset) != null) return error.UnsupportedCopyForm;
-            const normalized_source = normalizeSource(source_arg);
+            const normalized_source = if (from_stage != null) normalizeStageSource(source_arg) else normalizeSource(source_arg);
             const target_is_directory = target_arg.len > 1 and target_arg[target_arg.len - 1] == '/';
             const normalized_target = if (target_is_directory) target_arg[0 .. target_arg.len - 1] else target_arg;
             if (!validContextPath(normalized_source)) return error.InvalidBuildSource;
@@ -174,16 +250,21 @@ pub fn parseDockerfile(allocator: std.mem.Allocator, context_path: []const u8, b
                 allocator.free(source);
                 return err;
             };
-            instructions.append(allocator, .{ .copy = .{ .source = source, .target = target, .target_is_directory = target_is_directory } }) catch |err| {
+            instructions.append(allocator, .{ .copy = .{
+                .source = source,
+                .target = target,
+                .target_is_directory = target_is_directory,
+                .from_stage = from_stage,
+            } }) catch |err| {
                 allocator.free(source);
                 allocator.free(target);
                 return err;
             };
             copy_count += 1;
         } else if (std.ascii.eqlIgnoreCase(instruction, "RUN")) {
-            if (base_reference == null or run_count == run_count_limit) return error.InvalidDockerfile;
+            if (draft.base == null or run_count == run_count_limit) return error.InvalidDockerfile;
             const run_command = try parseCommand(allocator, line[offset..]) orelse return error.InvalidDockerfile;
-            const run_config = try duplicateRunConfig(allocator, environment.items, user, working_dir);
+            const run_config = try duplicateRunConfig(allocator, draft.environment.items, draft.user, draft.working_dir);
             const run = Run{ .command = run_command, .config = run_config };
             instructions.append(allocator, .{ .run = run }) catch |err| {
                 deinitRun(allocator, run);
@@ -191,81 +272,162 @@ pub fn parseDockerfile(allocator: std.mem.Allocator, context_path: []const u8, b
             };
             run_count += 1;
         } else if (std.ascii.eqlIgnoreCase(instruction, "ENV")) {
-            if (base_reference == null) return error.InvalidDockerfile;
+            if (draft.base == null) return error.InvalidDockerfile;
             var found_assignment = false;
             while (try nextEnvironmentAssignment(allocator, line, &offset)) |assignment| {
                 found_assignment = true;
                 const key = environmentKey(assignment);
                 var replaced = false;
-                for (environment.items) |*existing| {
+                for (draft.environment.items) |*existing| {
                     if (!std.mem.eql(u8, environmentKey(existing.*), key)) continue;
                     allocator.free(existing.*);
                     existing.* = assignment;
                     replaced = true;
                     break;
                 }
-                if (!replaced) {
-                    environment.append(allocator, assignment) catch |err| {
-                        allocator.free(assignment);
-                        return err;
-                    };
-                }
+                if (!replaced) draft.environment.append(allocator, assignment) catch |err| {
+                    allocator.free(assignment);
+                    return err;
+                };
             }
             if (!found_assignment) return error.InvalidDockerfile;
         } else if (std.ascii.eqlIgnoreCase(instruction, "USER")) {
-            if (base_reference == null) return error.InvalidDockerfile;
+            if (draft.base == null) return error.InvalidDockerfile;
             const value = try nextWord(line, &offset) orelse return error.InvalidDockerfile;
             if (try nextWord(line, &offset) != null) return error.InvalidDockerfile;
             const owned = try allocator.dupe(u8, value);
-            if (user) |previous| allocator.free(previous);
-            user = owned;
+            if (draft.user) |previous| allocator.free(previous);
+            draft.user = owned;
         } else if (std.ascii.eqlIgnoreCase(instruction, "WORKDIR")) {
-            if (base_reference == null) return error.InvalidDockerfile;
+            if (draft.base == null) return error.InvalidDockerfile;
             const raw_path = try nextWord(line, &offset) orelse return error.InvalidDockerfile;
             if (try nextWord(line, &offset) != null) return error.InvalidDockerfile;
             const path = normalizeWorkingDirectory(raw_path) orelse return error.UnsupportedBuildWorkingDirectory;
             const config_path = try allocator.dupe(u8, path);
-            if (working_dir) |previous| allocator.free(previous);
-            working_dir = config_path;
+            if (draft.working_dir) |previous| allocator.free(previous);
+            draft.working_dir = config_path;
         } else if (std.ascii.eqlIgnoreCase(instruction, "ENTRYPOINT")) {
-            if (base_reference == null) return error.InvalidDockerfile;
+            if (draft.base == null) return error.InvalidDockerfile;
             const value = try parseCommand(allocator, line[offset..]) orelse return error.InvalidDockerfile;
-            if (entrypoint) |previous| freeArguments(allocator, previous);
-            entrypoint = value;
+            if (draft.entrypoint) |previous| freeArguments(allocator, previous);
+            draft.entrypoint = value;
         } else if (std.ascii.eqlIgnoreCase(instruction, "CMD")) {
-            if (base_reference == null) return error.InvalidDockerfile;
+            if (draft.base == null) return error.InvalidDockerfile;
             const value = try parseCommand(allocator, line[offset..]) orelse return error.InvalidDockerfile;
-            if (command) |previous| freeArguments(allocator, previous);
-            command = value;
+            if (draft.command) |previous| freeArguments(allocator, previous);
+            draft.command = value;
         } else {
             return error.UnsupportedDockerfileInstruction;
         }
     }
-    if (base_reference == null) return error.InvalidDockerfile;
+    if (draft.base == null) return error.InvalidDockerfile;
+    try finishStage(allocator, &stages, &draft, instructions.items.len);
     const owned_context_path = try allocator.dupe(u8, context_path);
     errdefer allocator.free(owned_context_path);
+    const owned_stages = try stages.toOwnedSlice(allocator);
+    errdefer {
+        for (owned_stages) |stage| deinitStage(allocator, stage);
+        allocator.free(owned_stages);
+    }
     const owned_instructions = try instructions.toOwnedSlice(allocator);
-    errdefer {
-        for (owned_instructions) |instruction| deinitInstruction(allocator, instruction);
-        allocator.free(owned_instructions);
-    }
-    const owned_environment = try environment.toOwnedSlice(allocator);
-    errdefer {
-        for (owned_environment) |entry| allocator.free(entry);
-        allocator.free(owned_environment);
-    }
     return .{
         .context_path = owned_context_path,
-        .base_reference = base_reference.?,
+        .stages = owned_stages,
         .instructions = owned_instructions,
-        .config = .{
-            .env = owned_environment,
-            .user = user,
-            .working_dir = working_dir,
-            .entrypoint = entrypoint,
-            .cmd = command,
-        },
     };
+}
+
+fn finishStage(allocator: std.mem.Allocator, stages: *std.ArrayList(Stage), draft: *StageDraft, instruction_end: usize) !void {
+    const base: StageBase = switch (draft.base.?) {
+        .image => |value| .{ .image = try allocator.dupe(u8, value) },
+        .stage => |index| .{ .stage = index },
+    };
+    errdefer switch (base) {
+        .image => |value| allocator.free(value),
+        .stage => {},
+    };
+    const name = if (draft.name) |value| try allocator.dupe(u8, value) else null;
+    errdefer if (name) |value| allocator.free(value);
+    const config_value = try duplicateBuildConfig(allocator, draft.buildConfig());
+    errdefer deinitBuildConfig(allocator, config_value);
+    try stages.append(allocator, .{
+        .base = base,
+        .name = name,
+        .instruction_start = draft.instruction_start,
+        .instruction_count = instruction_end - draft.instruction_start,
+        .config = config_value,
+    });
+    draft.deinit(allocator);
+}
+
+fn deinitStage(allocator: std.mem.Allocator, stage: Stage) void {
+    switch (stage.base) {
+        .image => |value| allocator.free(value),
+        .stage => {},
+    }
+    if (stage.name) |value| allocator.free(value);
+    deinitBuildConfig(allocator, stage.config);
+}
+
+fn duplicateBuildConfig(allocator: std.mem.Allocator, source: BuildConfig) !BuildConfig {
+    var environment = try allocator.alloc([]const u8, source.env.len);
+    var copied: usize = 0;
+    errdefer {
+        for (environment[0..copied]) |entry| allocator.free(entry);
+        allocator.free(environment);
+    }
+    for (source.env) |entry| {
+        environment[copied] = try allocator.dupe(u8, entry);
+        copied += 1;
+    }
+    const user = if (source.user) |value| try allocator.dupe(u8, value) else null;
+    errdefer if (user) |value| allocator.free(value);
+    const working_dir = if (source.working_dir) |value| try allocator.dupe(u8, value) else null;
+    errdefer if (working_dir) |value| allocator.free(value);
+    const entrypoint = if (source.entrypoint) |value| try duplicateArguments(allocator, value) else null;
+    errdefer if (entrypoint) |value| freeArguments(allocator, value);
+    const cmd = if (source.cmd) |value| try duplicateArguments(allocator, value) else null;
+    errdefer if (cmd) |value| freeArguments(allocator, value);
+    return .{ .env = environment, .user = user, .working_dir = working_dir, .entrypoint = entrypoint, .cmd = cmd };
+}
+
+fn findStage(stages: []const Stage, name: []const u8, allow_index: bool) ?usize {
+    if (allow_index) {
+        const index = std.fmt.parseInt(usize, name, 10) catch null;
+        if (index) |value| if (value < stages.len) return value;
+    }
+    for (stages, 0..) |stage, index| {
+        if (stage.name) |stage_name| if (std.ascii.eqlIgnoreCase(stage_name, name)) return index;
+    }
+    return null;
+}
+
+fn validStageName(name: []const u8) bool {
+    if (name.len == 0 or name.len > 128 or (!std.ascii.isAlphabetic(name[0]) and name[0] != '_')) return false;
+    for (name[1..]) |character| {
+        if (!std.ascii.isAlphanumeric(character) and character != '_' and character != '.' and character != '-') return false;
+    }
+    return true;
+}
+
+fn lowerStageName(allocator: std.mem.Allocator, name: []const u8) ![]const u8 {
+    const result = try allocator.dupe(u8, name);
+    for (result) |*character| character.* = std.ascii.toLower(character.*);
+    return result;
+}
+
+fn duplicateArguments(allocator: std.mem.Allocator, arguments: []const []const u8) ![]const []const u8 {
+    const result = try allocator.alloc([]const u8, arguments.len);
+    var copied: usize = 0;
+    errdefer {
+        for (result[0..copied]) |argument| allocator.free(argument);
+        allocator.free(result);
+    }
+    for (arguments) |argument| {
+        result[copied] = try allocator.dupe(u8, argument);
+        copied += 1;
+    }
+    return result;
 }
 
 fn deinitBuildConfig(allocator: std.mem.Allocator, value: BuildConfig) void {
@@ -406,9 +568,10 @@ pub fn build(
     io: Io,
     data_dir: Io.Dir,
     plan: Plan,
-    base_manifest_digest: []const u8,
+    base_manifest_digests: []const ?[]const u8,
     store: storage.BlobStore,
 ) !Result {
+    if (base_manifest_digests.len != plan.stages.len) return error.InvalidBuildPlan;
     var context = Io.Dir.openDirAbsolute(io, plan.context_path, .{ .iterate = true, .follow_symlinks = false }) catch return error.InvalidBuildContext;
     defer context.close(io);
     const runtime = try openRuntimeStage(io, data_dir);
@@ -422,27 +585,59 @@ pub fn build(
     const active = try stage.createFile(io, "active.lock", .{ .exclusive = true, .lock = .exclusive, .permissions = .fromMode(0o600) });
     defer active.close(io);
     defer runtime.deleteTree(io, stage_name) catch {};
-    const base_body = try store.readVerifiedAlloc(allocator, base_manifest_digest, 4 * 1024 * 1024);
-    defer allocator.free(base_body);
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
     const scratch = arena.allocator();
-    const base_manifest = try manifest.parseManifest(scratch, base_body);
-    const base_config_body = try store.readVerifiedAlloc(scratch, base_manifest.config.digest, 4 * 1024 * 1024);
+    const stage_digests = try scratch.alloc([]const u8, plan.stages.len);
+    var copied_bytes: u64 = 0;
+    var final_result: ?Result = null;
+    for (plan.stages, 0..) |build_stage, index| {
+        const base_digest = switch (build_stage.base) {
+            .image => base_manifest_digests[index] orelse return error.BaseImageNotFound,
+            .stage => |base_index| if (base_index < index) stage_digests[base_index] else return error.InvalidBuildPlan,
+        };
+        const stage_dir_name = try std.fmt.allocPrint(scratch, "stage-{d}", .{index});
+        try stage.createDir(io, stage_dir_name, .fromMode(0o700));
+        var stage_dir = try stage.openDir(io, stage_dir_name, .{ .iterate = true, .follow_symlinks = false });
+        defer stage_dir.close(io);
+        const start = build_stage.instruction_start;
+        const end = start + build_stage.instruction_count;
+        if (end > plan.instructions.len) return error.InvalidBuildPlan;
+        final_result = try buildStage(scratch, io, data_dir, context, stage_dir, plan.instructions[start..end], build_stage, base_digest, stage_digests[0..index], store, &copied_bytes);
+        stage_digests[index] = final_result.?.digest;
+    }
+    const result = final_result orelse return error.InvalidDockerfile;
+    return .{ .digest = try allocator.dupe(u8, result.digest), .layer_count = result.layer_count };
+}
+
+fn buildStage(
+    allocator: std.mem.Allocator,
+    io: Io,
+    data_dir: Io.Dir,
+    context: Io.Dir,
+    stage: Io.Dir,
+    instructions: []const Instruction,
+    build_stage: Stage,
+    base_manifest_digest: []const u8,
+    previous_stage_digests: []const []const u8,
+    store: storage.BlobStore,
+    copied_bytes: *u64,
+) !Result {
+    const base_body = try store.readVerifiedAlloc(allocator, base_manifest_digest, 4 * 1024 * 1024);
+    const base_manifest = try manifest.parseManifest(allocator, base_body);
+    const base_config_body = try store.readVerifiedAlloc(allocator, base_manifest.config.digest, 4 * 1024 * 1024);
     if (base_config_body.len != base_manifest.config.size) return error.InvalidImageConfig;
-    const base_image_config = try config.parse(scratch, base_config_body, base_manifest.layers.len);
+    const base_image_config = try config.parse(allocator, base_config_body, base_manifest.layers.len);
     const base_process = base_image_config.config orelse config.Process{};
 
     var layers: std.ArrayList(manifest.Descriptor) = .empty;
-    try layers.appendSlice(scratch, base_manifest.layers);
-    var current_config = base_config_body;
+    try layers.appendSlice(allocator, base_manifest.layers);
+    var current_config: []const u8 = base_config_body;
     var current_manifest_digest = base_manifest_digest;
     var pending_copies: std.ArrayList(Copy) = .empty;
-    defer pending_copies.deinit(scratch);
+    defer pending_copies.deinit(allocator);
     var copy_batch: usize = 0;
     var run_index: usize = 0;
-    var copied_bytes: u64 = 0;
-
     var guest_dir: ?Io.Dir = null;
     defer if (guest_dir) |dir| dir.close(io);
     var kernel: ?Io.File = null;
@@ -451,17 +646,23 @@ pub fn build(
     defer if (base_initramfs) |file| file.close(io);
     var guest_dir_path: ?[]u8 = null;
     defer if (guest_dir_path) |path| allocator.free(path);
-    for (plan.instructions) |instruction| switch (instruction) {
-        .copy => |copy| try pending_copies.append(scratch, copy),
-        .run => |run| {
-            if (pending_copies.items.len != 0) {
-                const layer = try createCopyLayer(allocator, io, stage, context, pending_copies.items, copy_batch, store, &copied_bytes);
+
+    for (instructions) |instruction| switch (instruction) {
+        .copy => |copy| {
+            if (copy.from_stage) |from_index| {
+                try flushCopyBatch(allocator, io, stage, context, &pending_copies, &copy_batch, &layers, &current_config, &current_manifest_digest, store, copied_bytes);
+                if (from_index >= previous_stage_digests.len) return error.InvalidBuildPlan;
+                const layer = try createStageCopyLayer(allocator, io, stage, previous_stage_digests[from_index], copy, copy_batch, store, copied_bytes);
                 copy_batch += 1;
-                try layers.append(scratch, layer);
-                current_config = try appendDiffId(scratch, current_config, layer.digest, .{});
+                try layers.append(allocator, layer);
+                current_config = try appendDiffId(allocator, current_config, layer.digest, .{});
                 current_manifest_digest = (try storeManifest(allocator, store, layers.items, current_config)).digest;
-                pending_copies.clearRetainingCapacity();
+            } else {
+                try pending_copies.append(allocator, copy);
             }
+        },
+        .run => |run| {
+            try flushCopyBatch(allocator, io, stage, context, &pending_copies, &copy_batch, &layers, &current_config, &current_manifest_digest, store, copied_bytes);
             if (guest_dir == null) {
                 try boot_assets.ensure(allocator, io, data_dir);
                 guest_dir = try data_dir.openDir(io, "guest", .{ .follow_symlinks = false });
@@ -473,33 +674,66 @@ pub fn build(
                 const path_len = try guest_dir.?.realPath(io, &path_buffer);
                 guest_dir_path = try allocator.dupe(u8, path_buffer[0..path_len]);
             }
-            const snapshot = try runBuildInstruction(
-                allocator,
-                io,
-                stage,
-                store,
-                current_manifest_digest,
-                run,
-                base_process,
-                run_index,
-                guest_dir_path.?,
-            );
+            const snapshot = try runBuildInstruction(allocator, io, stage, store, current_manifest_digest, run, base_process, run_index, guest_dir_path.?);
             run_index += 1;
             layers.clearRetainingCapacity();
-            try layers.append(scratch, snapshot);
-            current_config = try replaceDiffIds(scratch, current_config, snapshot.digest);
+            try layers.append(allocator, snapshot);
+            current_config = try replaceDiffIds(allocator, current_config, snapshot.digest);
             current_manifest_digest = (try storeManifest(allocator, store, layers.items, current_config)).digest;
         },
     };
-    if (pending_copies.items.len != 0) {
-        const layer = try createCopyLayer(allocator, io, stage, context, pending_copies.items, copy_batch, store, &copied_bytes);
-        try layers.append(scratch, layer);
-        current_config = try appendDiffId(scratch, current_config, layer.digest, .{});
-    }
+    try flushCopyBatch(allocator, io, stage, context, &pending_copies, &copy_batch, &layers, &current_config, &current_manifest_digest, store, copied_bytes);
 
-    const output_config = try applyBuildConfig(scratch, current_config, plan.config);
+    const output_config = try applyBuildConfig(allocator, current_config, build_stage.config);
     const output_manifest = try storeManifest(allocator, store, layers.items, output_config);
     return .{ .digest = output_manifest.digest, .layer_count = layers.items.len };
+}
+
+fn flushCopyBatch(
+    allocator: std.mem.Allocator,
+    io: Io,
+    stage: Io.Dir,
+    context: Io.Dir,
+    pending: *std.ArrayList(Copy),
+    batch: *usize,
+    layers: *std.ArrayList(manifest.Descriptor),
+    current_config: *[]const u8,
+    current_manifest_digest: *[]const u8,
+    store: storage.BlobStore,
+    copied_bytes: *u64,
+) !void {
+    if (pending.items.len == 0) return;
+    const layer = try createCopyLayer(allocator, io, stage, context, pending.items, batch.*, store, copied_bytes);
+    batch.* += 1;
+    try layers.append(allocator, layer);
+    current_config.* = try appendDiffId(allocator, current_config.*, layer.digest, .{});
+    current_manifest_digest.* = (try storeManifest(allocator, store, layers.items, current_config.*)).digest;
+    pending.clearRetainingCapacity();
+}
+
+fn createStageCopyLayer(
+    allocator: std.mem.Allocator,
+    io: Io,
+    stage: Io.Dir,
+    source_manifest_digest: []const u8,
+    copy: Copy,
+    index: usize,
+    store: storage.BlobStore,
+    copied_bytes: *u64,
+) !manifest.Descriptor {
+    const directory_name = try std.fmt.allocPrint(allocator, "from-{d}", .{index});
+    defer allocator.free(directory_name);
+    try stage.createDir(io, directory_name, .fromMode(0o700));
+    var from_stage = try stage.openDir(io, directory_name, .{ .iterate = true, .follow_symlinks = false });
+    defer from_stage.close(io);
+    try from_stage.createDir(io, "rootfs", .fromMode(0o700));
+    try from_stage.createDir(io, "control", .fromMode(0o700));
+    var source_root = try from_stage.openDir(io, "rootfs", .{ .iterate = true, .follow_symlinks = false });
+    defer source_root.close(io);
+    var control = try from_stage.openDir(io, "control", .{ .iterate = true, .follow_symlinks = false });
+    defer control.close(io);
+    try rootfs.assemble(allocator, io, source_root, control, store, source_manifest_digest);
+    return createCopyLayer(allocator, io, from_stage, source_root, &.{copy}, 0, store, copied_bytes);
 }
 
 fn createCopyLayer(
@@ -1049,6 +1283,13 @@ fn normalizeSource(source: []const u8) []const u8 {
     return source[start..end];
 }
 
+fn normalizeStageSource(source: []const u8) []const u8 {
+    const start: usize = if (std.mem.startsWith(u8, source, "/")) 1 else if (std.mem.startsWith(u8, source, "./")) 2 else 0;
+    var end = source.len;
+    while (end > start and source[end - 1] == '/') : (end -= 1) {}
+    return source[start..end];
+}
+
 fn validContextPath(path: []const u8) bool {
     if (path.len == 0 or path.len > 4096 or path[0] == '/' or std.mem.indexOfAny(u8, path, "*?[]\\") != null) return false;
     var parts = std.mem.splitScalar(u8, path, '/');
@@ -1070,7 +1311,8 @@ fn validTarget(path: []const u8) bool {
 test "parses a single-base Dockerfile with quoted local file copies" {
     const plan = try parseDockerfile(std.testing.allocator, "/tmp/context", "FROM alpine:3.21\nCOPY 'hello world' /app/hello\nCOPY folder/ /opt/app/\n");
     defer plan.deinit(std.testing.allocator);
-    try std.testing.expectEqualStrings("registry-1.docker.io/library/alpine:3.21", plan.base_reference);
+    try std.testing.expectEqual(@as(usize, 1), plan.stages.len);
+    try std.testing.expectEqualStrings("registry-1.docker.io/library/alpine:3.21", plan.stages[0].base.image);
     try std.testing.expectEqual(@as(usize, 2), plan.instructions.len);
     try std.testing.expectEqualStrings("hello world", plan.instructions[0].copy.source);
     try std.testing.expectEqualStrings("/app/hello", plan.instructions[0].copy.target);
@@ -1087,13 +1329,32 @@ test "parses and owns common process config instructions" {
     );
     defer plan.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(usize, 0), plan.instructions.len);
-    try std.testing.expectEqualStrings("BUILD_MESSAGE=hello world", plan.config.env[0]);
-    try std.testing.expectEqualStrings("BUILD_MODE=local", plan.config.env[1]);
-    try std.testing.expectEqualStrings("65534", plan.config.user.?);
-    try std.testing.expectEqualStrings("/tmp/rift-app", plan.config.working_dir.?);
-    try std.testing.expectEqualStrings("/bin/sh", plan.config.entrypoint.?[0]);
-    try std.testing.expectEqualStrings("-c", plan.config.entrypoint.?[1]);
-    try std.testing.expectEqual(@as(usize, 1), plan.config.cmd.?.len);
+    try std.testing.expectEqualStrings("BUILD_MESSAGE=hello world", plan.stages[0].config.env[0]);
+    try std.testing.expectEqualStrings("BUILD_MODE=local", plan.stages[0].config.env[1]);
+    try std.testing.expectEqualStrings("65534", plan.stages[0].config.user.?);
+    try std.testing.expectEqualStrings("/tmp/rift-app", plan.stages[0].config.working_dir.?);
+    try std.testing.expectEqualStrings("/bin/sh", plan.stages[0].config.entrypoint.?[0]);
+    try std.testing.expectEqualStrings("-c", plan.stages[0].config.entrypoint.?[1]);
+    try std.testing.expectEqual(@as(usize, 1), plan.stages[0].config.cmd.?.len);
+}
+
+test "parses named and indexed stage copies and inherited FROM stages" {
+    const plan = try parseDockerfile(
+        std.testing.allocator,
+        "/tmp/context",
+        "FROM alpine AS Build\nENV STAGE=builder\nCOPY file /tool\nFROM Build AS package\nCOPY --from=BUILD /tool /usr/bin/tool\nFROM package\nCOPY --from=1 /usr/bin/tool /tool\n",
+    );
+    defer plan.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 3), plan.stages.len);
+    try std.testing.expectEqualStrings("build", plan.stages[0].name.?);
+    try std.testing.expectEqualStrings("STAGE=builder", plan.stages[0].config.env[0]);
+    try std.testing.expectEqual(@as(usize, 0), plan.stages[1].base.stage);
+    try std.testing.expectEqualStrings("package", plan.stages[1].name.?);
+    try std.testing.expectEqual(@as(usize, 1), plan.stages[2].base.stage);
+    try std.testing.expectEqual(@as(usize, 0), plan.instructions[1].copy.from_stage.?);
+    try std.testing.expectEqualStrings("tool", plan.instructions[1].copy.source);
+    try std.testing.expectEqual(@as(usize, 1), plan.instructions[2].copy.from_stage.?);
+    try std.testing.expectEqualStrings("usr/bin/tool", plan.instructions[2].copy.source);
 }
 
 test "parses RUN commands in order with point-in-time process settings" {
@@ -1152,7 +1413,9 @@ test "applies build process settings while preserving base image config" {
 test "rejects unsupported instructions, stages, and unsafe paths" {
     try std.testing.expectError(error.InvalidDockerfile, parseDockerfile(std.testing.allocator, "/tmp", "FROM alpine\nRUN\n"));
     try std.testing.expectError(error.UnsupportedDockerfileInstruction, parseDockerfile(std.testing.allocator, "/tmp", "FROM alpine\nADD file /file\n"));
-    try std.testing.expectError(error.UnsupportedBuildStages, parseDockerfile(std.testing.allocator, "/tmp", "FROM alpine\nFROM alpine\nCOPY a /a\n"));
+    try std.testing.expectError(error.UnknownBuildStage, parseDockerfile(std.testing.allocator, "/tmp", "FROM alpine\nCOPY --from=future /a /a\nFROM alpine AS future\n"));
+    try std.testing.expectError(error.DuplicateBuildStage, parseDockerfile(std.testing.allocator, "/tmp", "FROM alpine AS build\nFROM alpine AS BUILD\n"));
+    try std.testing.expectError(error.InvalidBuildSource, parseDockerfile(std.testing.allocator, "/tmp", "FROM alpine AS build\nFROM alpine\nCOPY --from=build ../../etc/passwd /passwd\n"));
     try std.testing.expectError(error.InvalidBuildSource, parseDockerfile(std.testing.allocator, "/tmp", "FROM alpine\nCOPY ../secret /secret\n"));
     try std.testing.expectError(error.InvalidBuildTarget, parseDockerfile(std.testing.allocator, "/tmp", "FROM alpine\nCOPY file /../../secret\n"));
     try std.testing.expectError(error.UnsupportedBuildWorkingDirectory, parseDockerfile(std.testing.allocator, "/tmp", "FROM alpine\nWORKDIR relative\n"));
