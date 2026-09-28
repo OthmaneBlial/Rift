@@ -77,7 +77,9 @@ def main() -> int:
                             b"/usr/sbin/modprobe virtio_net; "
                             b"/usr/bin/busybox ip link set eth0 up; "
                             b"/usr/bin/busybox --install -s /usr/bin; "
-                            b"/usr/bin/busybox udhcpc -i eth0 -q -n -t 5 -T 2 && "
+                            b"for attempt in 1 2 3 4 5 6; do "
+                            b"/usr/bin/busybox udhcpc -i eth0 -q -n -t 1 -T 1 && break; "
+                            b"/usr/bin/busybox sleep 1; done; "
                             b"/usr/bin/busybox ip -4 addr show eth0 && "
                             b"/usr/bin/busybox nslookup example.com && echo RIFT_NETWORK_OK; "
                         )
