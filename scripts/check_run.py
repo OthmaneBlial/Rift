@@ -37,6 +37,9 @@ def main() -> int:
         (["run", "alpine", "sh", "-c",
           "mount -t tmpfs tmpfs /tmp >/dev/null 2>&1; test $? -ne 0 && echo MOUNT_DENIED"], 0,
          "MOUNT_DENIED"),
+        (["run", "--network", "none", "--rm", "alpine", "sh", "-c",
+          "! grep -q 'eth0:' /proc/net/dev && ! awk '$2 == \"00000000\" { found=1 } END { exit !found }' /proc/net/route && echo RIFT_NETWORK_NONE_OK"], 0,
+         "RIFT_NETWORK_NONE_OK"),
     ]
     if network_only:
         cases = [(["run", "alpine", "nslookup", "example.com"], 0, "example.com")]
@@ -57,7 +60,7 @@ def main() -> int:
     if network_only:
         print("Rift network check passed: container DNS lookup and cleanup")
     else:
-        print("Rift run check passed: defaults, environment, exit status, quoting, namespaces, devices, cleanup")
+        print("Rift run check passed: defaults, environment, exit status, quoting, namespaces, devices, offline mode, cleanup")
     return 0
 
 

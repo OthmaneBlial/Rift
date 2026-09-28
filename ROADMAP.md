@@ -63,6 +63,7 @@ This roadmap carries the original plan forward from the first project commit. `[
 - [x] Support multiple Dockerfile build stages, named or indexed `COPY --from`, and `FROM` inheritance from earlier stages.
 - [x] Honor validated OCI image `StopSignal` values for detached shutdown, with Dockerfile `STOPSIGNAL` support.
 - [x] Configure the private guest VM's CPU count and RAM per run, with host-supported range checks and documented defaults; these set guest capacity rather than per-process quotas.
+- [x] Disable the guest VM network adapter per run; verify no guest interface or IPv4 default route.
 - [ ] Implement further OCI process/resource controls such as per-process limits and configurable capability profiles.
 - [x] Review help and error messages across supported commands for clear, predictable use.
 - [x] Add binary-safe JSON Lines for detached logs with container ID, combined stream, and byte offsets; preserve output bytes as base64 data.
@@ -103,7 +104,7 @@ This roadmap carries the original plan forward from the first project commit. `[
 - [x] Record first-cached and subsequent startup, fresh-home pulls, logical store size, and worker-plus-VM process memory with scope and limitations.
 - [x] Verify a UID 0 workload inherits `no_new_privs` and cannot mount a new filesystem.
 - [x] Verify file and directory volume targets reject paths beneath image symlinks.
-- [ ] Complete an adversarial review of host/guest isolation assumptions; the localhost proxy's 16-client cap and idle-client shutdown, writable nested shares under read-only parents, and representative absolute/relative volume symlink escapes have integration coverage. Volume races, broader mount layouts, workload behavior, egress policy, and VM-boundary review remain.
+- [ ] Complete an adversarial review of host/guest isolation assumptions; the localhost proxy's 16-client cap and idle-client shutdown, writable nested shares under read-only parents, representative absolute/relative volume symlink escapes, and the no-network VM mode have integration coverage. Volume races, broader mount layouts, workload behavior, egress allowlists, and VM-boundary review remain.
 - [x] Measure VM-start-to-guest-control-ready latency on Apple M2; record timer endpoints and host polling resolution.
 - [x] Measure the Homebrew v0.1.2 keg and first-run guest assets in a fresh Rift home on Apple M2.
 - [x] Capture whole-Mac physical memory, free-page, and memory-pressure snapshots before VM startup and with an idle guest on Apple M2.

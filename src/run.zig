@@ -114,7 +114,7 @@ pub fn execute(init: std.process.Init, arguments: []const []const u8, stop_path:
     const kernel_path = try std.fmt.allocPrint(allocator, "{s}/Image", .{guest_path});
     const initramfs_path = try std.fmt.allocPrint(allocator, "{s}/initramfs", .{run_path});
 
-    vm.run(allocator, kernel_path, initramfs_path, "console=hvc0 quiet loglevel=0 rdinit=/rift-init", root_path, control_path, stop_path, kill_path, staged_volumes, true, port, measure_guest_boot, options.cpu_count, options.memory_size, 0, 1) catch |err| {
+    vm.run(allocator, kernel_path, initramfs_path, "console=hvc0 quiet loglevel=0 rdinit=/rift-init", root_path, control_path, stop_path, kill_path, staged_volumes, options.network_enabled, port, measure_guest_boot, options.cpu_count, options.memory_size, 0, 1) catch |err| {
         if (container_id) |id| {
             control.writeFile(init.io, .{ .sub_path = "host-exit", .data = "" }) catch {};
             try waitForExecClients(init, id);
@@ -154,7 +154,7 @@ fn waitForExecClients(init: std.process.Init, id: []const u8) !void {
     lock.unlock(init.io);
 }
 
-pub const Options = struct { image_index: usize, port: ?vm.PortMapping, working_dir: ?[]const u8, environments: []const []const u8, volumes: []const vm.Volume, cpu_count: u16, memory_size: u64, remove_after_exit: bool };
+pub const Options = struct { image_index: usize, port: ?vm.PortMapping, working_dir: ?[]const u8, environments: []const []const u8, volumes: []const vm.Volume, cpu_count: u16, memory_size: u64, network_enabled: bool, remove_after_exit: bool };
 
 pub fn parseOptions(allocator: std.mem.Allocator, arguments: []const []const u8) !Options {
     var offset: usize = 0;
@@ -164,6 +164,8 @@ pub fn parseOptions(allocator: std.mem.Allocator, arguments: []const []const u8)
     var cpu_count_set = false;
     var memory_size = vm.default_memory_bytes;
     var memory_size_set = false;
+    var network_enabled = true;
+    var network_mode_set = false;
     var environments: std.ArrayList([]const u8) = .empty;
     errdefer environments.deinit(allocator);
     var volumes: std.ArrayList(vm.Volume) = .empty;
@@ -176,6 +178,7 @@ pub fn parseOptions(allocator: std.mem.Allocator, arguments: []const []const u8)
             offset += 1;
         } else if (std.mem.eql(u8, arguments[offset], "-p")) {
             if (port != null or offset + 1 >= arguments.len) return error.InvalidArguments;
+            if (!network_enabled) return error.NetworkRequiredForPort;
             port = try parsePort(arguments[offset + 1]);
             offset += 2;
         } else if (std.mem.eql(u8, arguments[offset], "-w")) {
@@ -192,6 +195,12 @@ pub fn parseOptions(allocator: std.mem.Allocator, arguments: []const []const u8)
             if (memory_size_set or offset + 1 >= arguments.len) return error.InvalidArguments;
             memory_size = try parseMemorySize(arguments[offset + 1]);
             memory_size_set = true;
+            offset += 2;
+        } else if (std.mem.eql(u8, arguments[offset], "--network")) {
+            if (network_mode_set or offset + 1 >= arguments.len or !std.mem.eql(u8, arguments[offset + 1], "none")) return error.InvalidNetworkMode;
+            if (port != null) return error.NetworkRequiredForPort;
+            network_enabled = false;
+            network_mode_set = true;
             offset += 2;
         } else if (std.mem.eql(u8, arguments[offset], "-e")) {
             if (offset + 1 >= arguments.len or !validEnvironment(arguments[offset + 1])) return error.InvalidArguments;
@@ -211,7 +220,7 @@ pub fn parseOptions(allocator: std.mem.Allocator, arguments: []const []const u8)
     if (arguments.len < offset + 1) return error.InvalidArguments;
     const environment_slice = try environments.toOwnedSlice(allocator);
     errdefer allocator.free(environment_slice);
-    return .{ .image_index = offset, .port = port, .working_dir = working_dir, .environments = environment_slice, .volumes = try volumes.toOwnedSlice(allocator), .cpu_count = cpu_count, .memory_size = memory_size, .remove_after_exit = remove_after_exit };
+    return .{ .image_index = offset, .port = port, .working_dir = working_dir, .environments = environment_slice, .volumes = try volumes.toOwnedSlice(allocator), .cpu_count = cpu_count, .memory_size = memory_size, .network_enabled = network_enabled, .remove_after_exit = remove_after_exit };
 }
 
 fn parseMemorySize(value: []const u8) !u64 {
@@ -378,6 +387,20 @@ test "run options validate configurable VM CPU and memory sizes" {
     try std.testing.expectError(error.InvalidMemorySize, parseOptions(arena.allocator(), &.{ "--memory", "18446744073709551615g", "alpine" }));
     try std.testing.expectError(error.InvalidArguments, parseOptions(arena.allocator(), &.{ "--cpus", "2", "--cpus", "4", "alpine" }));
     try std.testing.expectError(error.InvalidArguments, parseOptions(arena.allocator(), &.{ "--memory", "512m", "--memory", "1g", "alpine" }));
+}
+
+test "network can be disabled and port forwarding requires networking" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const offline = try parseOptions(allocator, &.{ "--network", "none", "alpine" });
+    try std.testing.expect(!offline.network_enabled);
+    const online = try parseOptions(allocator, &.{"alpine"});
+    try std.testing.expect(online.network_enabled);
+    try std.testing.expectError(error.InvalidNetworkMode, parseOptions(allocator, &.{ "--network", "bridge", "alpine" }));
+    try std.testing.expectError(error.InvalidNetworkMode, parseOptions(allocator, &.{ "--network", "none", "--network", "none", "alpine" }));
+    try std.testing.expectError(error.NetworkRequiredForPort, parseOptions(allocator, &.{ "-p", "8080:80", "--network", "none", "alpine" }));
+    try std.testing.expectError(error.NetworkRequiredForPort, parseOptions(allocator, &.{ "--network", "none", "-p", "8080:80", "alpine" }));
 }
 
 test "environment overrides require explicit values" {

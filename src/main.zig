@@ -29,7 +29,7 @@ fn printHelp(writer: *Io.Writer) Io.Writer.Error!void {
             "  rmi <image>        Remove a local image reference\n" ++
             "  run [options] <image> [command] [args...] Run in the foreground\n" ++
             "  run -d [options] <image> [command] [args...] Run detached\n" ++
-            "    Options: --rm (foreground only), --cpus N, --memory SIZE,\n" ++
+            "    Options: --rm (foreground only), --cpus N, --memory SIZE, --network none,\n" ++
             "             -p HOST:GUEST, -w DIR, -e KEY=VALUE, -v HOST:TARGET[:ro|rw]\n" ++
             "  ps                 List detached containers\n" ++
             "  inspect <id>       Show detached container details\n" ++
@@ -481,6 +481,8 @@ pub fn main(init: std.process.Init) void {
             error.UnsupportedWorkingDirectory => std.debug.print("rift: image working directory must be an absolute path\n", .{}),
             error.InvalidCPUCount => std.debug.print("rift: --cpus must be a positive whole number\n", .{}),
             error.InvalidMemorySize => std.debug.print("rift: --memory must be bytes or a size such as 512m or 2g, in 1 MiB increments\n", .{}),
+            error.InvalidNetworkMode => std.debug.print("rift: --network currently supports only 'none'\n", .{}),
+            error.NetworkRequiredForPort => std.debug.print("rift: -p port forwarding requires networking; remove --network none\n", .{}),
             error.InvalidVMResources => std.debug.print("rift: requested VM CPU or memory size is outside this Mac's supported range\n", .{}),
             error.InvalidVolumeSpecification => std.debug.print("rift: volume must use absolute HOST:TARGET[:ro|rw] paths without . or .. components\n", .{}),
             error.ReservedVolumeTarget => std.debug.print("rift: volume target cannot be /dev or /proc\n", .{}),
@@ -514,6 +516,7 @@ pub fn main(init: std.process.Init) void {
             err == error.InvalidVolumeSpecification or err == error.ReservedVolumeTarget or err == error.DuplicateVolumeTarget or
             err == error.InvalidVolumeSource or err == error.FileVolumeMustShareFilesystem or err == error.FileVolumeCannotContainTarget or err == error.TooManyVolumes or err == error.ExecRequestTooLarge or
             err == error.InvalidCPUCount or err == error.InvalidMemorySize or err == error.InvalidVMResources or
+            err == error.InvalidNetworkMode or err == error.NetworkRequiredForPort or
             err == error.InvalidBuildArguments or err == error.InvalidBuildTag or err == error.InvalidBuildContext or err == error.InvalidDockerfile or
             err == error.UnsupportedDockerIgnore or
             err == error.UnsupportedDockerfileInstruction or err == error.UnsupportedBuildStages or err == error.UnsupportedCopyForm or err == error.UnknownBuildStage or err == error.DuplicateBuildStage or err == error.BuildStageLimitExceeded or err == error.InvalidBuildSource or err == error.InvalidBuildTarget or
@@ -536,6 +539,7 @@ test "help is available without a command" {
     try std.testing.expect(std.mem.indexOf(u8, output.written(), "inspect <id>") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.written(), "exec [-it] <id> <cmd>") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.written(), "--rm (foreground only)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output.written(), "--network none") != null);
 }
 
 test "exec parses stdin and TTY flags before the container ID" {

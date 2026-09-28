@@ -37,7 +37,9 @@ rift run --cpus 4 --memory 1g --rm alpine sh -c 'grep -c "^processor" /proc/cpui
 
 `--cpus` and `--memory` set the private VM's CPU and RAM. Memory accepts whole MiB or GiB suffixes (`512m`, `2g`) or a byte count in 1 MiB increments. Defaults are 2 CPUs and 256 MiB; the Mac's Virtualization.framework limits the accepted range. These values describe guest resources, not per-process cgroup quotas.
 
-The first run downloads and verifies the pinned Alpine guest files. Image pulls and first-run setup need network access.
+Use `rift run --network none alpine ...` to start a container without a VM network adapter. Port forwarding requires networking.
+
+The first run downloads and verifies the pinned Alpine guest files. Image pulls and first-run setup need host network access, even when a container uses `--network none`.
 
 ## Run a small service
 
@@ -87,7 +89,7 @@ Detached containers honor image `StopSignal`. Dockerfile `STOPSIGNAL` accepts ca
 
 - Pull `linux/arm64` images from Docker Hub, Amazon ECR Public, `registry.k8s.io`, GitHub Container Registry, Quay, and Google GCR. [Registry checks](docs/REGISTRIES.md) list the tested image samples; private Bearer-token support is verified against a local fixture.
 - Run foreground and detached containers with image entrypoint, command, environment, working directory, user, supplementary groups, and configurable guest CPU and RAM.
-- Use outbound networking, DNS, one localhost port mapping, and explicit file or directory volumes.
+- Use outbound networking and DNS by default, disable the VM network adapter with `--network none`, forward one localhost port, and mount explicit file or directory volumes.
 - Inspect and manage detached containers with `ps`, `inspect`, `logs`, `exec`, `stop`, `kill`, and `rm`. `logs --json` emits byte-preserving JSON Lines. `exec -i` streams stdin; `exec -it` adds a resizable TTY and forwards SIGINT, SIGTERM, SIGHUP, and SIGQUIT.
 - Build OCI images from multiple `FROM` stages, file or directory `COPY` (including `COPY --from`), ordered single-line `RUN`, `STOPSIGNAL`, and the `ENV`, `USER`, `WORKDIR`, `ENTRYPOINT`, and `CMD` process settings. Each successful `RUN` squashes the prior filesystem into one layer. `.dockerignore`, globs, symlinks, special files, and other Dockerfile instructions remain unsupported.
 - Check storage with `system df` and preview or remove unused data with `clean`.
