@@ -88,7 +88,7 @@ This roadmap carries the original plan forward from the first project commit. `[
 - [x] Expose OCI root-directory xattrs at `/` by copying them into the private upper layer; verify in Alpine.
 - [x] Extract OCI FIFO entries as named pipes with preserved mode and ownership.
 - [x] Recreate OCI character and block device nodes outside runtime-managed `/dev` inside the disposable guest overlay, preserving device numbers, owner, mode, and modification time; Unix-domain socket entries remain unsupported.
-- [ ] Reduce guest disk footprint and optimize startup and shutdown using measurements; networkless runs now skip the virtio-net module and DHCP setup.
+- [ ] Reduce guest disk footprint and optimize startup and shutdown using measurements; networkless runs skip the virtio-net module and DHCP setup, and APFS shares base initramfs data across per-run images (measured in `docs/BENCHMARKS.md`). Startup has no measured improvement yet; shutdown remains unoptimized.
 - [ ] Evaluate guest reuse while preserving workload isolation and cleanup.
 
 ## 6. Verify reliability, security, and performance

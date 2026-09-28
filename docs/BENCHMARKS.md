@@ -27,6 +27,14 @@ The first launch already has the image and guest files cached. It is **not** a f
 
 `binary_bytes` records the local executable size. Local builds are ad-hoc signed for execution on macOS; this is not Developer ID signing or notarization.
 
+## APFS initramfs sharing
+
+On APFS, Rift uses `fclonefileat` to clone the immutable installed `initramfs-virt` before appending each run's CPIO entries. Other filesystems or unsupported clone operations fall back to the streaming copy. Logical file sizes remain unchanged; APFS shares the base data until a write changes it.
+
+To measure the base-file storage effect, 12 temporary clones of the installed 10,161,578-byte initramfs reduced free space by 12,288 bytes. After removing those clones, 12 full copies reduced free space by 121,958,400 bytes for 121,938,936 logical bytes. Both groups were created under `~/Library/Application Support/Rift`; the temporary directory was removed. `shutil.disk_usage` reports free space for the whole volume, so the 12 KiB clone delta includes filesystem metadata and measurement noise. Each actual run also appends its own script and guest executor CPIO entries, which consume space in both cases. Treat this as evidence that cloning avoids roughly 122 MB of duplicate base data across these 12 files on this volume, not an exact per-file allocation guarantee.
+
+The cached runtime benchmark showed no startup improvement: one pre-change sample measured 1,100.0 ms for subsequent Alpine launches and 433.828 ms to guest control readiness; one post-change sample measured 1,109.4 ms and 435.95 ms. One sample per revision is insufficient to infer a difference. Guest shutdown was not changed or measured here.
+
 ## Latest cached benchmark
 
 Apple M2, macOS 26.6, Zig 0.16.0, `ReleaseSafe`, runtime commit `3ad3b27`, benchmark script commit `fc4c3e5`, three runs from 2026-09-28 04:38:49 to 04:39:11 UTC. Each run used the same cached store:

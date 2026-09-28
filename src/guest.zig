@@ -2,17 +2,32 @@ const std = @import("std");
 const Io = std.Io;
 const vm = @import("vm.zig");
 const executor = @import("guest_binary").bytes;
+const c = @cImport({
+    @cInclude("stdio.h");
+    @cInclude("sys/clonefile.h");
+    @cInclude("unistd.h");
+});
 
 pub fn writeInitramfs(allocator: std.mem.Allocator, io: Io, base: Io.File, output_dir: Io.Dir, command: []const []const u8, environment: []const []const u8, working_dir: []const u8, user: []const u8, stop_signal: u8, volumes: []const vm.Volume, interactive: bool, network_enabled: bool, require_network: bool, measure_guest_boot: bool, export_snapshot: bool, pids_limit: ?u32, capabilities_none: bool) !void {
     const script = try makeScript(allocator, command, environment, working_dir, user, stop_signal, volumes, interactive, network_enabled, require_network, measure_guest_boot, export_snapshot, pids_limit, capabilities_none);
     defer allocator.free(script);
-    var output = try output_dir.createFile(io, "initramfs", .{ .exclusive = true });
+    const cloned = c.fclonefileat(base.handle, output_dir.handle, "initramfs", 0) == 0;
+    var output = if (cloned)
+        try output_dir.openFile(io, "initramfs", .{ .mode = .write_only, .follow_symlinks = false })
+    else
+        try output_dir.createFile(io, "initramfs", .{ .exclusive = true });
     defer output.close(io);
     var output_buffer: [32 * 1024]u8 = undefined;
     var writer = output.writerStreaming(io, &output_buffer);
-    var input_buffer: [32 * 1024]u8 = undefined;
-    var reader = base.reader(io, &input_buffer);
-    const copied = try reader.interface.streamRemaining(&writer.interface);
+    const copied = if (cloned) blk: {
+        const end = c.lseek(output.handle, 0, c.SEEK_END);
+        if (end < 0) return error.SeekFailed;
+        break :blk @as(usize, @intCast(end));
+    } else blk: {
+        var input_buffer: [32 * 1024]u8 = undefined;
+        var reader = base.reader(io, &input_buffer);
+        break :blk try reader.interface.streamRemaining(&writer.interface);
+    };
     try writer.interface.splatByteAll(0, (4 - copied % 4) % 4);
     try writeNewc(&writer.interface, "rift-init", 0o100755, script);
     try writeNewc(&writer.interface, "rift-exec", 0o100755, executor);
@@ -216,4 +231,28 @@ test "capability profile none reaches the guest executor" {
     const script = try makeScript(std.testing.allocator, &.{"/bin/true"}, &.{}, "/", "", 15, &.{}, false, false, false, false, false, null, true);
     defer std.testing.allocator.free(script);
     try std.testing.expect(std.mem.indexOf(u8, script, "/rift-exec --cap-profile none /mnt/root") != null);
+}
+
+test "writeInitramfs preserves base bytes and appends runtime files" {
+    const io = std.testing.io;
+    var temp = std.testing.tmpDir(.{});
+    defer temp.cleanup();
+    const base_bytes = "base-initramfs";
+    try temp.dir.writeFile(io, .{ .sub_path = "base", .data = base_bytes });
+    const base = try temp.dir.openFile(io, "base", .{ .mode = .read_only, .follow_symlinks = false });
+    defer base.close(io);
+
+    try writeInitramfs(std.testing.allocator, io, base, temp.dir, &.{"/bin/true"}, &.{}, "/", "", 15, &.{}, false, false, false, false, false, null, false);
+
+    const output = try temp.dir.readFileAlloc(io, "initramfs", std.testing.allocator, .limited(base_bytes.len + executor.len + 128 * 1024));
+    defer std.testing.allocator.free(output);
+    try std.testing.expectEqualSlices(u8, base_bytes, output[0..base_bytes.len]);
+    const aligned_base_len = base_bytes.len + (4 - base_bytes.len % 4) % 4;
+    for (output[base_bytes.len..aligned_base_len]) |byte| try std.testing.expectEqual(@as(u8, 0), byte);
+    try std.testing.expectEqualStrings("070701", output[aligned_base_len .. aligned_base_len + 6]);
+    try std.testing.expect(std.mem.indexOf(u8, output[aligned_base_len..], "rift-init\x00") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output[aligned_base_len..], "rift-exec\x00") != null);
+    const original = try temp.dir.readFileAlloc(io, "base", std.testing.allocator, .limited(base_bytes.len + 1));
+    defer std.testing.allocator.free(original);
+    try std.testing.expectEqualSlices(u8, base_bytes, original);
 }
