@@ -197,6 +197,18 @@ static int child_status(pid_t child) {
     return decode_status(status);
 }
 
+static int forward_guest_stop_request(int control, pid_t child) {
+    struct stat info;
+    if (fstatat(control, "../stop", &info, AT_SYMLINK_NOFOLLOW) != 0)
+        return errno == ENOENT ? 0 : fail("check guest stop request");
+    if (!S_ISREG(info.st_mode)) {
+        errno = EINVAL;
+        return fail("check guest stop request");
+    }
+    if (kill(child, configured_stop_signal) != 0 && errno != ESRCH) return fail("forward guest stop signal");
+    return 1;
+}
+
 static int fail(const char *operation) {
     fprintf(stderr, "rift-exec: %s: %s\n", operation, strerror(errno));
     return 125;
@@ -1513,6 +1525,7 @@ int main(int argc, char **argv) {
         kill(child, SIGTERM);
         return fail("publish exec agent readiness");
     }
+    int stop_file_seen = 0;
     for (;;) {
         int status;
         pid_t finished = waitpid(child, &status, WNOHANG);
@@ -1524,6 +1537,15 @@ int main(int argc, char **argv) {
         if (finished < 0 && errno != EINTR) {
             close(control);
             return fail("wait for container process");
+        }
+        if (!stop_file_seen) {
+            int requested = forward_guest_stop_request(control, child);
+            if (requested < 0) {
+                close(control);
+                kill(child, SIGTERM);
+                return 125;
+            }
+            stop_file_seen = requested;
         }
         if (!pending_signal && service_exec_request(control, argv[1], argv[2], argv[3], cgroup_enabled) == 125) {
             close(control);

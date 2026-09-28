@@ -144,24 +144,11 @@ fn makeScript(allocator: std.mem.Allocator, command: []const []const u8, environ
         if (output.written().len > 64 * 1024) return error.CommandTooLong;
     }
     if (!interactive) try writer.writeAll(" < /dev/null");
-    try writer.print(
+    try writer.writeAll(
         " &\n" ++
             "    workload_pid=$!\n" ++
-            "    (\n" ++
-            "      while /usr/bin/busybox kill -0 \"$workload_pid\" 2>/dev/null; do\n" ++
-            "        if [ -e /mnt/control/stop ]; then\n" ++
-            "          /usr/bin/busybox kill -s {d} \"$workload_pid\" 2>/dev/null\n" ++
-            "          exit\n" ++
-            "        fi\n" ++
-            "        /usr/bin/busybox sleep 1\n" ++
-            "      done\n" ++
-            "    ) &\n" ++
-            "    watcher_pid=$!\n" ++
             "    wait \"$workload_pid\"\n" ++
-            "    status=$?\n" ++
-            "    /usr/bin/busybox kill \"$watcher_pid\" 2>/dev/null || true\n" ++
-            "    wait \"$watcher_pid\" 2>/dev/null || true\n",
-        .{stop_signal},
+            "    status=$?\n",
     );
     if (export_snapshot) try writer.writeAll(
         "    if [ \"${resolver_mounted:-0}\" = 1 ]; then /usr/bin/busybox umount /mnt/root/etc/resolv.conf || status=125; fi\n" ++
@@ -221,11 +208,11 @@ test "shell arguments remain quoted" {
     try std.testing.expect(std.mem.indexOf(u8, bare, "/rift-exec /mnt/root '/' '' 15 0 'echo' 'hello'") != null);
     try std.testing.expect(std.mem.indexOf(u8, bare, "mount -t overlay overlay -o metacopy=on,lowerdir=/mnt/rift") != null);
     try std.testing.expect(std.mem.indexOf(u8, bare, "--copy-root-xattrs /mnt/rift /mnt/state/upper") != null);
-    try std.testing.expect(std.mem.indexOf(u8, bare, "if [ -e /mnt/control/stop ]; then") != null);
+    try std.testing.expect(std.mem.indexOf(u8, bare, "if [ -e /mnt/control/stop ]; then") == null);
     try std.testing.expect(std.mem.indexOf(u8, bare, "virtio_net") == null);
     try std.testing.expect(std.mem.indexOf(u8, bare, "udhcpc") == null);
     try std.testing.expect(std.mem.indexOf(u8, bare, "guest-boot-ready") == null);
-    try std.testing.expect(std.mem.indexOf(u8, bare, "/usr/bin/busybox kill -s 15 \"$workload_pid\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, bare, "wait \"$workload_pid\"") != null);
     const workdir = try makeScript(std.testing.allocator, &.{"/bin/pwd"}, &.{}, "/tmp/a'b", "nobody", 15, &.{}, false, false, false, false, false, .{}, .{});
     defer std.testing.allocator.free(workdir);
     try std.testing.expect(std.mem.indexOf(u8, workdir, "/rift-exec /mnt/root '/tmp/a'\"'\"'b' 'nobody' 15 0 '/bin/pwd'") != null);
