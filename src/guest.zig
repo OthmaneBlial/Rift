@@ -8,8 +8,10 @@ const c = @cImport({
     @cInclude("unistd.h");
 });
 
-pub fn writeInitramfs(allocator: std.mem.Allocator, io: Io, base: Io.File, output_dir: Io.Dir, command: []const []const u8, environment: []const []const u8, working_dir: []const u8, user: []const u8, stop_signal: u8, volumes: []const vm.Volume, interactive: bool, network_enabled: bool, require_network: bool, measure_guest_boot: bool, export_snapshot: bool, pids_limit: ?u32, capabilities_none: bool) !void {
-    const script = try makeScript(allocator, command, environment, working_dir, user, stop_signal, volumes, interactive, network_enabled, require_network, measure_guest_boot, export_snapshot, pids_limit, capabilities_none);
+pub const ResourceLimits = struct { pids: ?u32 = null, cpu_milli: ?u32 = null, memory_bytes: ?u64 = null };
+
+pub fn writeInitramfs(allocator: std.mem.Allocator, io: Io, base: Io.File, output_dir: Io.Dir, command: []const []const u8, environment: []const []const u8, working_dir: []const u8, user: []const u8, stop_signal: u8, volumes: []const vm.Volume, interactive: bool, network_enabled: bool, require_network: bool, measure_guest_boot: bool, export_snapshot: bool, resources: ResourceLimits, capabilities_none: bool) !void {
+    const script = try makeScript(allocator, command, environment, working_dir, user, stop_signal, volumes, interactive, network_enabled, require_network, measure_guest_boot, export_snapshot, resources, capabilities_none);
     defer allocator.free(script);
     const cloned = c.fclonefileat(base.handle, output_dir.handle, "initramfs", 0) == 0;
     var output = if (cloned)
@@ -35,7 +37,7 @@ pub fn writeInitramfs(allocator: std.mem.Allocator, io: Io, base: Io.File, outpu
     try writer.interface.flush();
 }
 
-fn makeScript(allocator: std.mem.Allocator, command: []const []const u8, environment: []const []const u8, working_dir: []const u8, user: []const u8, stop_signal: u8, volumes: []const vm.Volume, interactive: bool, network_enabled: bool, require_network: bool, measure_guest_boot: bool, export_snapshot: bool, pids_limit: ?u32, capabilities_none: bool) ![]u8 {
+fn makeScript(allocator: std.mem.Allocator, command: []const []const u8, environment: []const []const u8, working_dir: []const u8, user: []const u8, stop_signal: u8, volumes: []const vm.Volume, interactive: bool, network_enabled: bool, require_network: bool, measure_guest_boot: bool, export_snapshot: bool, resources: ResourceLimits, capabilities_none: bool) ![]u8 {
     if (command.len == 0 or command.len > 256) return error.InvalidArguments;
     var output: Io.Writer.Allocating = .init(allocator);
     defer output.deinit();
@@ -57,14 +59,26 @@ fn makeScript(allocator: std.mem.Allocator, command: []const []const u8, environ
         "  if /usr/bin/busybox mount -t tmpfs -o size=256m tmpfs /mnt/state &&\n" ++
             "     /usr/bin/busybox mkdir -p /mnt/state/upper /mnt/state/work &&\n",
     );
-    if (pids_limit) |limit| {
+    const cgroup_enabled = resources.pids != null or resources.cpu_milli != null or resources.memory_bytes != null;
+    if (cgroup_enabled) {
         try writer.writeAll(
             "     /usr/bin/busybox mkdir /mnt/state/cgroup &&\n" ++
                 "     /usr/bin/busybox mount -t cgroup2 none /mnt/state/cgroup &&\n" ++
-                "     echo +pids > /mnt/state/cgroup/cgroup.subtree_control &&\n" ++
+                "     echo",
+        );
+        if (resources.pids != null) try writer.writeAll(" +pids");
+        if (resources.cpu_milli != null) try writer.writeAll(" +cpu");
+        if (resources.memory_bytes != null) try writer.writeAll(" +memory");
+        try writer.writeAll(
+            " > /mnt/state/cgroup/cgroup.subtree_control &&\n" ++
                 "     /usr/bin/busybox mkdir /mnt/state/cgroup/rift &&\n",
         );
-        try writer.print("     echo {d} > /mnt/state/cgroup/rift/pids.max &&\n", .{@as(u64, limit) + 1});
+        if (resources.pids) |limit| try writer.print("     echo {d} > /mnt/state/cgroup/rift/pids.max &&\n", .{@as(u64, limit) + 1});
+        if (resources.cpu_milli) |limit| {
+            const period: u64 = if (limit < 10) 1_000_000 else 100_000;
+            try writer.print("     echo {d} {d} > /mnt/state/cgroup/rift/cpu.max &&\n", .{ @as(u64, limit) * (period / 1000), period });
+        }
+        if (resources.memory_bytes) |limit| try writer.print("     echo {d} > /mnt/state/cgroup/rift/memory.max &&\n", .{limit});
     }
     try writer.writeAll(
         "     /rift-exec --copy-root-xattrs /mnt/rift /mnt/state/upper &&\n" ++
@@ -105,7 +119,7 @@ fn makeScript(allocator: std.mem.Allocator, command: []const []const u8, environ
         if (output.written().len > 64 * 1024) return error.CommandTooLong;
     }
     try writer.writeAll(" /rift-exec ");
-    if (pids_limit) |limit| try writer.print("--pids-limit {d} ", .{limit});
+    if (cgroup_enabled) try writer.writeAll("--resource-cgroup ");
     if (capabilities_none) try writer.writeAll("--cap-profile none ");
     try writer.writeAll("/mnt/root ");
     try quote(writer, working_dir);
@@ -190,7 +204,7 @@ fn writeNewc(writer: *Io.Writer, name: []const u8, mode: u32, data: []const u8) 
 
 test "shell arguments remain quoted" {
     const volumes = [_]vm.Volume{.{ .source = "/host", .target = "/tmp/a'b", .read_only = true }};
-    const script = try makeScript(std.testing.allocator, &.{ "/bin/echo", "a'b", "$(touch /tmp/host)" }, &.{"PATH=/bin"}, "/", "1000:1000", 15, &volumes, false, true, true, true, false, null, false);
+    const script = try makeScript(std.testing.allocator, &.{ "/bin/echo", "a'b", "$(touch /tmp/host)" }, &.{"PATH=/bin"}, "/", "1000:1000", 15, &volumes, false, true, true, true, false, .{}, false);
     defer std.testing.allocator.free(script);
     try std.testing.expect(std.mem.indexOf(u8, script, "env -i 'PATH=/bin' /rift-exec /mnt/root '/' '1000:1000' 15 1 'rift-volume-0' '/tmp/a'\"'\"'b' ro directory") != null);
     try std.testing.expect(std.mem.indexOf(u8, script, "'/bin/echo' 'a'\"'\"'b' '$(touch /tmp/host)'") != null);
@@ -199,7 +213,7 @@ test "shell arguments remain quoted" {
     try std.testing.expect(std.mem.indexOf(u8, script, ": > /mnt/control/guest-boot-ready").? < std.mem.indexOf(u8, script, "mount -t tmpfs -o size=256m").?);
     try std.testing.expect(std.mem.indexOf(u8, script, "if [ -s /mnt/control/guest-ip ]; then") != null);
     try std.testing.expect(std.mem.indexOf(u8, script, "udhcpc -i eth0") != null);
-    const bare = try makeScript(std.testing.allocator, &.{ "echo", "hello" }, &.{}, "/", "", 15, &.{}, true, false, false, false, false, null, false);
+    const bare = try makeScript(std.testing.allocator, &.{ "echo", "hello" }, &.{}, "/", "", 15, &.{}, true, false, false, false, false, .{}, false);
     defer std.testing.allocator.free(bare);
     try std.testing.expect(std.mem.indexOf(u8, bare, "/rift-exec /mnt/root '/' '' 15 0 'echo' 'hello'") != null);
     try std.testing.expect(std.mem.indexOf(u8, bare, "mount -t overlay overlay -o metacopy=on,lowerdir=/mnt/rift") != null);
@@ -209,26 +223,41 @@ test "shell arguments remain quoted" {
     try std.testing.expect(std.mem.indexOf(u8, bare, "udhcpc") == null);
     try std.testing.expect(std.mem.indexOf(u8, bare, "guest-boot-ready") == null);
     try std.testing.expect(std.mem.indexOf(u8, bare, "/usr/bin/busybox kill -s 15 \"$workload_pid\"") != null);
-    const workdir = try makeScript(std.testing.allocator, &.{"/bin/pwd"}, &.{}, "/tmp/a'b", "nobody", 15, &.{}, false, false, false, false, false, null, false);
+    const workdir = try makeScript(std.testing.allocator, &.{"/bin/pwd"}, &.{}, "/tmp/a'b", "nobody", 15, &.{}, false, false, false, false, false, .{}, false);
     defer std.testing.allocator.free(workdir);
     try std.testing.expect(std.mem.indexOf(u8, workdir, "/rift-exec /mnt/root '/tmp/a'\"'\"'b' 'nobody' 15 0 '/bin/pwd'") != null);
 
-    const snapshot = try makeScript(std.testing.allocator, &.{"/bin/true"}, &.{}, "/", "", 15, &.{}, false, true, false, false, true, null, false);
+    const snapshot = try makeScript(std.testing.allocator, &.{"/bin/true"}, &.{}, "/", "", 15, &.{}, false, true, false, false, true, .{}, false);
     defer std.testing.allocator.free(snapshot);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "mount --bind /etc/resolv.conf /mnt/root/etc/resolv.conf") != null);
     try std.testing.expect(std.mem.indexOf(u8, snapshot, "tar -cpf /mnt/control/snapshot.tar -C /mnt/root .") != null);
 }
 
 test "pids limit configures an isolated cgroup for the workload" {
-    const script = try makeScript(std.testing.allocator, &.{"/bin/true"}, &.{}, "/", "", 15, &.{}, false, false, false, false, false, 8, false);
+    const script = try makeScript(std.testing.allocator, &.{"/bin/true"}, &.{}, "/", "", 15, &.{}, false, false, false, false, false, .{ .pids = 8 }, false);
     defer std.testing.allocator.free(script);
     try std.testing.expect(std.mem.indexOf(u8, script, "mount -t cgroup2 none /mnt/state/cgroup") != null);
     try std.testing.expect(std.mem.indexOf(u8, script, "echo 9 > /mnt/state/cgroup/rift/pids.max") != null);
-    try std.testing.expect(std.mem.indexOf(u8, script, "/rift-exec --pids-limit 8 /mnt/root") != null);
+    try std.testing.expect(std.mem.indexOf(u8, script, "/rift-exec --resource-cgroup /mnt/root") != null);
+}
+
+test "cpu and memory limits configure cgroup v2 quotas" {
+    const script = try makeScript(std.testing.allocator, &.{"/bin/true"}, &.{}, "/", "", 15, &.{}, false, false, false, false, false, .{ .cpu_milli = 1500, .memory_bytes = 536870912 }, false);
+    defer std.testing.allocator.free(script);
+    try std.testing.expect(std.mem.indexOf(u8, script, "echo +cpu +memory > /mnt/state/cgroup/cgroup.subtree_control") != null);
+    try std.testing.expect(std.mem.indexOf(u8, script, "echo 150000 100000 > /mnt/state/cgroup/rift/cpu.max") != null);
+    try std.testing.expect(std.mem.indexOf(u8, script, "echo 536870912 > /mnt/state/cgroup/rift/memory.max") != null);
+    try std.testing.expect(std.mem.indexOf(u8, script, "/rift-exec --resource-cgroup /mnt/root") != null);
+}
+
+test "minimum cpu limit stays above the kernel quota floor" {
+    const script = try makeScript(std.testing.allocator, &.{"/bin/true"}, &.{}, "/", "", 15, &.{}, false, false, false, false, false, .{ .cpu_milli = 1 }, false);
+    defer std.testing.allocator.free(script);
+    try std.testing.expect(std.mem.indexOf(u8, script, "echo 1000 1000000 > /mnt/state/cgroup/rift/cpu.max") != null);
 }
 
 test "capability profile none reaches the guest executor" {
-    const script = try makeScript(std.testing.allocator, &.{"/bin/true"}, &.{}, "/", "", 15, &.{}, false, false, false, false, false, null, true);
+    const script = try makeScript(std.testing.allocator, &.{"/bin/true"}, &.{}, "/", "", 15, &.{}, false, false, false, false, false, .{}, true);
     defer std.testing.allocator.free(script);
     try std.testing.expect(std.mem.indexOf(u8, script, "/rift-exec --cap-profile none /mnt/root") != null);
 }
@@ -242,7 +271,7 @@ test "writeInitramfs preserves base bytes and appends runtime files" {
     const base = try temp.dir.openFile(io, "base", .{ .mode = .read_only, .follow_symlinks = false });
     defer base.close(io);
 
-    try writeInitramfs(std.testing.allocator, io, base, temp.dir, &.{"/bin/true"}, &.{}, "/", "", 15, &.{}, false, false, false, false, false, null, false);
+    try writeInitramfs(std.testing.allocator, io, base, temp.dir, &.{"/bin/true"}, &.{}, "/", "", 15, &.{}, false, false, false, false, false, .{}, false);
 
     const output = try temp.dir.readFileAlloc(io, "initramfs", std.testing.allocator, .limited(base_bytes.len + executor.len + 128 * 1024));
     defer std.testing.allocator.free(output);

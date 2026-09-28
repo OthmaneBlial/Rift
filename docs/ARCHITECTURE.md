@@ -14,11 +14,11 @@ The layer installer handles OCI tar, gzip, and zstd layers, including regular-fi
 
 Image character and block device entries below `/dev` are ignored because the guest replaces `/dev` with a fresh restricted tmpfs. Entries outside `/dev` are materialized inside the disposable overlay, retaining their device numbers, owner, mode, and modification time. PAX xattrs on device nodes are ignored, and Unix-domain socket entries remain unsupported. OCI FIFO entries are restored as named pipes.
 
-The local process check verifies that a UID 0 workload sees `NoNewPrivs: 1` and cannot mount a new tmpfs.
+The local process check verifies that a UID 0 workload sees `NoNewPrivs: 1` and cannot mount a new tmpfs. `run-resources-check` starts foreground and detached containers with cgroup quotas, exercises the minimum CPU limit, and runs `exec` in the limited cgroup.
 
 ## VM resources
 
-Each run uses a private Linux VM. `--cpus` and `--memory` configure the CPU and RAM exposed to that guest; defaults are 2 CPUs and 256 MiB. `--pids-limit` optionally caps guest tasks with cgroup v2, reserving one task for Rift's PID namespace supervisor. Apple Virtualization.framework validates the requested CPU and memory range for the current Mac. Dockerfile `RUN` keeps its fixed 2-CPU, 256-MiB build VM.
+Each run uses a private Linux VM. `--cpus` and `--memory` configure the CPU and RAM exposed to that guest; defaults are 2 CPUs and 256 MiB. `--cpu-limit` sets the container's cgroup v2 CPU bandwidth, and `--memory-limit` sets its cgroup v2 memory hard limit. `--pids-limit` caps guest tasks. Rift reserves one task in the cgroup for its PID namespace supervisor; workload and `exec` processes share the same resource limits. Apple Virtualization.framework validates the requested VM CPU and memory range for the current Mac. Dockerfile `RUN` keeps its fixed 2-CPU, 256-MiB build VM.
 
 ## Detached logs
 
@@ -35,7 +35,7 @@ The intended boundaries are:
 3. **Image store** — content-addressed blobs and image metadata under the user's Application Support directory.
 4. **Layer installer** — safe tar extraction and root filesystem assembly, without following paths outside the image root.
 5. **VM controller** — Linux kernel and initramfs boot, console, guest communication, and shutdown through Virtualization.framework.
-6. **Guest execution** — a generated initramfs script mounts the image and invokes a static helper for private PID/mount namespaces, basic devices and `/proc`, chroot, working directory, user/group, the default reduced capability profile or `--cap-profile none`, and command execution. Fine-grained OCI capability controls, seccomp, and CPU/memory quotas remain planned.
+6. **Guest execution** — a generated initramfs script mounts the image and invokes a static helper for private PID/mount namespaces, basic devices and `/proc`, chroot, working directory, user/group, the default reduced capability profile or `--cap-profile none`, cgroup v2 resource limits, and command execution. Fine-grained OCI capability controls and seccomp remain planned.
 7. **Networking and mounts** — outbound guest networking, one localhost TCP port mapping, and explicit file and directory shares work; file sources must share a filesystem with runtime storage.
 
 The host-facing implementation stays in Zig. A small static C helper handles Linux process setup inside the guest and is embedded in the Rift binary; Objective-C remains a narrow macOS framework bridge.
@@ -46,7 +46,7 @@ Each VM is currently configured for 2 virtual CPUs and 256 MiB of guest RAM. Loc
 
 `rift pull alpine` resolves the reference, authenticates anonymously to public registries or uses optional process-environment credentials for a private Bearer challenge, selects the host's Linux architecture, fetches each required blob, verifies its digest, and publishes verified data into the content-addressed store. `rift images` lists locally recorded references and their platform manifest digests. `rift rmi alpine` removes its local reference; `rift clean --yes` later reclaims blobs no other reference uses.
 
-`rift run --rm alpine echo hello` assembles the image root, starts a Linux VM with the pinned Alpine kernel, mounts the read-only image through VirtioFS, starts the command on an ephemeral writable overlay, relays output, returns its exit status, and removes temporary host state. The guest uses `chroot` inside a VM with private PID/mount namespaces and reduced capabilities. The `pids` cgroup controller enforces an optional task limit. `--cap-profile none` removes all capabilities from workload and `exec` processes; per-capability add/drop controls and other OCI resource controls remain planned.
+`rift run --rm alpine echo hello` assembles the image root, starts a Linux VM with the pinned Alpine kernel, mounts the read-only image through VirtioFS, starts the command on an ephemeral writable overlay, relays output, returns its exit status, and removes temporary host state. The guest uses `chroot` inside a VM with private PID/mount namespaces and reduced capabilities. Optional cgroup v2 `pids`, `cpu`, and `memory` controllers limit tasks, CPU time, and memory. `--cap-profile none` removes all capabilities from workload and `exec` processes; per-capability add/drop controls remain planned.
 
 Image downloads and guest execution are separate steps. A pull alone does not prove that an arbitrary image can execute with full OCI process semantics.
 

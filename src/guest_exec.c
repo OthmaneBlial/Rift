@@ -652,7 +652,9 @@ static int run_exec(char *root, char *working_directory, char *user, char **comm
     return fail("exec");
 }
 
-static int service_exec_request(int directory, char *root, char *working_directory, char *user) {
+static int attach_resource_cgroup(void);
+
+static int service_exec_request(int directory, char *root, char *working_directory, char *user, int cgroup_enabled) {
     int scan_descriptor = openat(directory, ".", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
     if (scan_descriptor < 0) return fail("scan exec requests");
     DIR *entries = fdopendir(scan_descriptor);
@@ -784,6 +786,7 @@ static int service_exec_request(int directory, char *root, char *working_directo
         exec_pid = -1;
         pending_signal = 0;
         restore_default_stop_signal();
+        if (cgroup_enabled && attach_resource_cgroup() != 0) _exit(125);
         if (interactive) close(input_file);
         if (tty) {
             close(pty_master);
@@ -1201,23 +1204,23 @@ failed: {
     }
 }
 
-static int attach_pids_cgroup(void) {
+static int attach_resource_cgroup(void) {
     int descriptor = open("/mnt/state/cgroup/rift/cgroup.procs", O_WRONLY | O_CLOEXEC);
-    if (descriptor < 0) return fail("open pids limit cgroup");
+    if (descriptor < 0) return fail("open resource cgroup");
     char pid[32];
     int length = snprintf(pid, sizeof(pid), "%ld\n", (long)getpid());
     if (length <= 0 || (size_t)length >= sizeof(pid) || write_all(descriptor, pid, (size_t)length) != 0) {
         int saved_errno = errno;
         close(descriptor);
         errno = saved_errno;
-        return fail("attach pids limit cgroup");
+        return fail("attach resource cgroup");
     }
-    if (close(descriptor) != 0) return fail("close pids limit cgroup");
+    if (close(descriptor) != 0) return fail("close resource cgroup");
     return 0;
 }
 
-static int run_container(char **argv, unsigned long volume_count, uint32_t pids_limit, int ready_descriptor) {
-    if (pids_limit && attach_pids_cgroup() != 0) return 125;
+static int run_container(char **argv, unsigned long volume_count, int cgroup_enabled, int ready_descriptor) {
+    if (cgroup_enabled && attach_resource_cgroup() != 0) return 125;
     if (apply_image_ownership(argv[1]) != 0) return 125;
     if (chroot(argv[1]) != 0) return fail("chroot");
     if (chdir("/") != 0) return fail("chdir root");
@@ -1366,26 +1369,17 @@ done:
 int main(int argc, char **argv) {
     if (argc == 4 && strcmp(argv[1], "--copy-root-xattrs") == 0)
         return copy_root_xattrs(argv[2], argv[3]);
-    uint32_t pids_limit = 0;
-    int pids_limit_set = 0;
+    int cgroup_enabled = 0;
     int capability_profile_set = 0;
     int option_end = 1;
     while (option_end < argc) {
-        if (strcmp(argv[option_end], "--pids-limit") == 0) {
-            if (pids_limit_set || option_end + 1 >= argc) {
-                fputs("rift-exec: invalid or duplicate pids limit\n", stderr);
+        if (strcmp(argv[option_end], "--resource-cgroup") == 0) {
+            if (cgroup_enabled) {
+                fputs("rift-exec: duplicate resource cgroup option\n", stderr);
                 return 125;
             }
-            errno = 0;
-            char *limit_end;
-            unsigned long parsed_limit = strtoul(argv[option_end + 1], &limit_end, 10);
-            if (errno || limit_end == argv[option_end + 1] || *limit_end || parsed_limit == 0 || parsed_limit > UINT32_MAX) {
-                fputs("rift-exec: invalid pids limit\n", stderr);
-                return 125;
-            }
-            pids_limit = (uint32_t)parsed_limit;
-            pids_limit_set = 1;
-            option_end += 2;
+            cgroup_enabled = 1;
+            option_end++;
         } else if (strcmp(argv[option_end], "--cap-profile") == 0) {
             if (capability_profile_set || option_end + 1 >= argc) {
                 fputs("rift-exec: invalid or duplicate capability profile\n", stderr);
@@ -1439,7 +1433,7 @@ int main(int argc, char **argv) {
         close(ready[0]);
         close(control);
         child_pid = -1;
-        return run_container(argv, volume_count, pids_limit, ready[1]);
+        return run_container(argv, volume_count, cgroup_enabled, ready[1]);
     }
     close(ready[1]);
     child_pid = child;
@@ -1471,7 +1465,7 @@ int main(int argc, char **argv) {
             close(control);
             return fail("wait for container process");
         }
-        if (!pending_signal && service_exec_request(control, argv[1], argv[2], argv[3]) == 125) {
+        if (!pending_signal && service_exec_request(control, argv[1], argv[2], argv[3], cgroup_enabled) == 125) {
             close(control);
             kill(child, SIGTERM);
             return 125;

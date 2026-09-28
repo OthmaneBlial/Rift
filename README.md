@@ -32,10 +32,10 @@ rift run --rm alpine echo "Hello from Rift"
 Set resources for a run:
 
 ```sh
-rift run --cpus 4 --memory 1g --pids-limit 64 --rm alpine sh -c 'grep -c "^processor" /proc/cpuinfo; grep MemTotal /proc/meminfo'
+rift run --cpus 4 --memory 1g --cpu-limit 1.5 --memory-limit 512m --pids-limit 64 --rm alpine sh -c 'grep -c "^processor" /proc/cpuinfo; grep MemTotal /proc/meminfo'
 ```
 
-`--cpus` and `--memory` set the private VM's CPU and RAM. Memory accepts whole MiB or GiB suffixes (`512m`, `2g`) or a byte count in 1 MiB increments. Defaults are 2 CPUs and 256 MiB; the Mac's Virtualization.framework limits the accepted range. `--pids-limit` caps concurrent guest tasks (processes and threads) with cgroup v2; Rift reserves one task for its PID namespace supervisor. It is optional and has no default cap. `--cap-profile none` removes Linux capabilities from workload and `exec` processes; the default is Rift's reduced capability set.
+`--cpus` and `--memory` set CPU and RAM visible to the private VM. Defaults are 2 CPUs and 256 MiB; Virtualization.framework limits accepted values. `--cpu-limit` sets a per-container CPU-time quota from 0.001 up to the VM's vCPU count, with at most three decimal places. `--memory-limit` sets a per-container cgroup memory limit and accepts bytes or `m`/`g` sizes; it cannot exceed `--memory`. Exceeding this hard memory limit can trigger the guest kernel's cgroup OOM handling. `--pids-limit` caps guest processes and threads; Rift reserves one task for its PID namespace supervisor. All three cgroup limits are optional. `--cap-profile none` removes Linux capabilities from workload and `exec` processes; the default is Rift's reduced capability set.
 
 Use `rift run --network none alpine ...` to start a container without a VM network adapter. Port forwarding requires networking.
 
@@ -129,7 +129,7 @@ The image and guest files were cached. Each run median covers five launches; the
 
 - macOS 12 or newer on Apple Silicon.
 - Zig 0.16 or newer for manual source builds; Homebrew installs the build dependency automatically.
-- One lightweight Linux VM per run; defaults are 2 CPUs and 256 MiB RAM. `--cpus` and `--memory` change guest VM capacity within the range supported by the Mac. `--pids-limit` optionally caps guest processes and threads; `--cap-profile none` removes capabilities from workload processes.
+- One lightweight Linux VM per run; defaults are 2 CPUs and 256 MiB RAM. `--cpus` and `--memory` change guest VM capacity within the range supported by the Mac. `--cpu-limit`, `--memory-limit`, and `--pids-limit` optionally enforce per-container cgroup v2 quotas; `--cap-profile none` removes capabilities from workload processes.
 - One TCP port mapping per run; up to 16 explicit file or directory volumes.
 - `rift build` supports up to 128 stages, one source per `COPY` (from the local context or an earlier named or indexed stage), single-line shell or JSON-array `RUN`, `STOPSIGNAL`, and `ENV`, `USER`, `WORKDIR`, `ENTRYPOINT`, and `CMD`. Each `RUN` boots a temporary Linux VM, applies the preceding image state, and stores the successful result as a squashed OCI layer; failed commands stop the build without recording its tag. Each build VM has 256 MiB RAM and a 256 MiB writable overlay. `ENV` values are literal and `WORKDIR` must be absolute. Targets must be absolute. Stop signals accept canonical names or numbers except for `SIGKILL`, `SIGSTOP`, and real-time signals. `.dockerignore`, globs, symlinks, special files, line continuations, and other Dockerfile instructions are unsupported.
 - Each pull is capped at 16 GiB of distinct image blobs not already verified in the local cache.

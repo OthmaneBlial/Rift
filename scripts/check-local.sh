@@ -39,6 +39,7 @@ for check in \
     cache-lock-check \
     cache-prune-check \
     run-process-check \
+    run-resources-check \
     run-volume-check \
     registry-auth-check
 do

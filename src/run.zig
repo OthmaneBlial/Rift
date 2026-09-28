@@ -98,7 +98,7 @@ pub fn execute(init: std.process.Init, arguments: []const []const u8, stop_path:
     cache_locked = false;
     const interactive = try Io.File.stdin().isTty(init.io);
     const measure_guest_boot = if (init.environ_map.get("RIFT_BENCHMARK_GUEST_BOOT")) |value| std.mem.eql(u8, value, "1") else false;
-    try guest.writeInitramfs(allocator, init.io, base_initramfs, run_dir, command, environment, working_dir, process.User orelse "", stop_signal, staged_volumes, interactive, options.network_enabled, port != null, measure_guest_boot, false, options.pids_limit, options.capability_profile == .none);
+    try guest.writeInitramfs(allocator, init.io, base_initramfs, run_dir, command, environment, working_dir, process.User orelse "", stop_signal, staged_volumes, interactive, options.network_enabled, port != null, measure_guest_boot, false, .{ .pids = options.pids_limit, .cpu_milli = options.cpu_limit_milli, .memory_bytes = options.memory_limit_bytes }, options.capability_profile == .none);
 
     var root_path_buffer: [Io.Dir.max_path_bytes]u8 = undefined;
     var control_path_buffer: [Io.Dir.max_path_bytes]u8 = undefined;
@@ -151,7 +151,7 @@ fn waitForExecClients(init: std.process.Init, id: []const u8) !void {
 
 pub const CapabilityProfile = enum { default, none };
 
-pub const Options = struct { image_index: usize, port: ?vm.PortMapping, working_dir: ?[]const u8, environments: []const []const u8, volumes: []const vm.Volume, cpu_count: u16, memory_size: u64, pids_limit: ?u32, capability_profile: CapabilityProfile, network_enabled: bool, remove_after_exit: bool };
+pub const Options = struct { image_index: usize, port: ?vm.PortMapping, working_dir: ?[]const u8, environments: []const []const u8, volumes: []const vm.Volume, cpu_count: u16, memory_size: u64, pids_limit: ?u32, cpu_limit_milli: ?u32, memory_limit_bytes: ?u64, capability_profile: CapabilityProfile, network_enabled: bool, remove_after_exit: bool };
 
 pub fn parseOptions(allocator: std.mem.Allocator, arguments: []const []const u8) !Options {
     var offset: usize = 0;
@@ -162,6 +162,8 @@ pub fn parseOptions(allocator: std.mem.Allocator, arguments: []const []const u8)
     var memory_size = vm.default_memory_bytes;
     var memory_size_set = false;
     var pids_limit: ?u32 = null;
+    var cpu_limit_milli: ?u32 = null;
+    var memory_limit_bytes: ?u64 = null;
     var capability_profile: CapabilityProfile = .default;
     var capability_profile_set = false;
     var network_enabled = true;
@@ -193,13 +195,21 @@ pub fn parseOptions(allocator: std.mem.Allocator, arguments: []const []const u8)
             offset += 2;
         } else if (std.mem.eql(u8, arguments[offset], "--memory")) {
             if (memory_size_set or offset + 1 >= arguments.len) return error.InvalidArguments;
-            memory_size = try parseMemorySize(arguments[offset + 1]);
+            memory_size = try parseMemorySize(arguments[offset + 1], vm.memory_granularity_bytes);
             memory_size_set = true;
             offset += 2;
         } else if (std.mem.eql(u8, arguments[offset], "--pids-limit")) {
             if (pids_limit != null or offset + 1 >= arguments.len) return error.InvalidArguments;
             pids_limit = std.fmt.parseInt(u32, arguments[offset + 1], 10) catch return error.InvalidPidsLimit;
             if (pids_limit.? == 0) return error.InvalidPidsLimit;
+            offset += 2;
+        } else if (std.mem.eql(u8, arguments[offset], "--cpu-limit")) {
+            if (cpu_limit_milli != null or offset + 1 >= arguments.len) return error.InvalidArguments;
+            cpu_limit_milli = try parseCpuLimit(arguments[offset + 1]);
+            offset += 2;
+        } else if (std.mem.eql(u8, arguments[offset], "--memory-limit")) {
+            if (memory_limit_bytes != null or offset + 1 >= arguments.len) return error.InvalidArguments;
+            memory_limit_bytes = parseMemorySize(arguments[offset + 1], 1) catch return error.InvalidMemoryLimit;
             offset += 2;
         } else if (std.mem.eql(u8, arguments[offset], "--cap-profile")) {
             if (capability_profile_set or offset + 1 >= arguments.len) return error.InvalidArguments;
@@ -228,12 +238,14 @@ pub fn parseOptions(allocator: std.mem.Allocator, arguments: []const []const u8)
         } else break;
     }
     if (arguments.len < offset + 1) return error.InvalidArguments;
+    if (cpu_limit_milli) |limit| if (limit > @as(u32, cpu_count) * 1000) return error.InvalidCPULimit;
+    if (memory_limit_bytes) |limit| if (limit > memory_size) return error.InvalidMemoryLimit;
     const environment_slice = try environments.toOwnedSlice(allocator);
     errdefer allocator.free(environment_slice);
-    return .{ .image_index = offset, .port = port, .working_dir = working_dir, .environments = environment_slice, .volumes = try volumes.toOwnedSlice(allocator), .cpu_count = cpu_count, .memory_size = memory_size, .pids_limit = pids_limit, .capability_profile = capability_profile, .network_enabled = network_enabled, .remove_after_exit = remove_after_exit };
+    return .{ .image_index = offset, .port = port, .working_dir = working_dir, .environments = environment_slice, .volumes = try volumes.toOwnedSlice(allocator), .cpu_count = cpu_count, .memory_size = memory_size, .pids_limit = pids_limit, .cpu_limit_milli = cpu_limit_milli, .memory_limit_bytes = memory_limit_bytes, .capability_profile = capability_profile, .network_enabled = network_enabled, .remove_after_exit = remove_after_exit };
 }
 
-fn parseMemorySize(value: []const u8) !u64 {
+fn parseMemorySize(value: []const u8, granularity: u64) !u64 {
     if (value.len == 0) return error.InvalidMemorySize;
     const suffix = std.ascii.toLower(value[value.len - 1]);
     const multiplier: u64 = switch (suffix) {
@@ -244,8 +256,28 @@ fn parseMemorySize(value: []const u8) !u64 {
     const digits = if (multiplier == 1) value else value[0 .. value.len - 1];
     const quantity = std.fmt.parseInt(u64, digits, 10) catch return error.InvalidMemorySize;
     const bytes = std.math.mul(u64, quantity, multiplier) catch return error.InvalidMemorySize;
-    if (bytes == 0 or bytes % vm.memory_granularity_bytes != 0) return error.InvalidMemorySize;
+    if (bytes == 0 or bytes % granularity != 0) return error.InvalidMemorySize;
     return bytes;
+}
+
+fn parseCpuLimit(value: []const u8) !u32 {
+    const decimal = std.mem.indexOfScalar(u8, value, '.');
+    const whole_text = if (decimal) |point| value[0..point] else value;
+    const whole = std.fmt.parseInt(u32, whole_text, 10) catch return error.InvalidCPULimit;
+    var fraction: u32 = 0;
+    if (decimal) |point| {
+        const digits = value[point + 1 ..];
+        if (digits.len == 0 or digits.len > 3) return error.InvalidCPULimit;
+        fraction = std.fmt.parseInt(u32, digits, 10) catch return error.InvalidCPULimit;
+        fraction *= switch (digits.len) {
+            1 => 100,
+            2 => 10,
+            else => 1,
+        };
+    }
+    const milli = std.math.add(u32, std.math.mul(u32, whole, 1000) catch return error.InvalidCPULimit, fraction) catch return error.InvalidCPULimit;
+    if (milli == 0) return error.InvalidCPULimit;
+    return milli;
 }
 
 pub fn validateResources(options: Options) !void {
@@ -405,12 +437,16 @@ test "working directory override requires one absolute path" {
 test "run options validate configurable VM CPU and memory sizes" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    const selected = try parseOptions(arena.allocator(), &.{ "--cpus", "4", "--memory", "512m", "alpine" });
+    const selected = try parseOptions(arena.allocator(), &.{ "--cpus", "4", "--memory", "1g", "--cpu-limit", "1.5", "--memory-limit", "512m", "alpine" });
     try std.testing.expectEqual(@as(u16, 4), selected.cpu_count);
-    try std.testing.expectEqual(@as(u64, 512 * 1024 * 1024), selected.memory_size);
+    try std.testing.expectEqual(@as(u64, 1024 * 1024 * 1024), selected.memory_size);
+    try std.testing.expectEqual(@as(u32, 1500), selected.cpu_limit_milli);
+    try std.testing.expectEqual(@as(u64, 512 * 1024 * 1024), selected.memory_limit_bytes);
     const defaults = try parseOptions(arena.allocator(), &.{"alpine"});
     try std.testing.expectEqual(vm.default_cpu_count, defaults.cpu_count);
     try std.testing.expectEqual(vm.default_memory_bytes, defaults.memory_size);
+    try std.testing.expectEqual(@as(?u32, null), defaults.cpu_limit_milli);
+    try std.testing.expectEqual(@as(?u64, null), defaults.memory_limit_bytes);
     const limited = try parseOptions(arena.allocator(), &.{ "--pids-limit", "64", "alpine" });
     try std.testing.expectEqual(@as(?u32, 64), limited.pids_limit);
     try std.testing.expectEqual(@as(?u32, null), defaults.pids_limit);
@@ -431,6 +467,13 @@ test "run options validate configurable VM CPU and memory sizes" {
     try std.testing.expectError(error.InvalidArguments, parseOptions(arena.allocator(), &.{ "--cap-profile", "none", "--cap-profile", "default", "alpine" }));
     try std.testing.expectError(error.InvalidArguments, parseOptions(arena.allocator(), &.{ "--cpus", "2", "--cpus", "4", "alpine" }));
     try std.testing.expectError(error.InvalidArguments, parseOptions(arena.allocator(), &.{ "--memory", "512m", "--memory", "1g", "alpine" }));
+    try std.testing.expectError(error.InvalidCPULimit, parseOptions(arena.allocator(), &.{ "--cpu-limit", "0", "alpine" }));
+    try std.testing.expectError(error.InvalidCPULimit, parseOptions(arena.allocator(), &.{ "--cpu-limit", "1.1234", "alpine" }));
+    try std.testing.expectError(error.InvalidCPULimit, parseOptions(arena.allocator(), &.{ "--cpu-limit", "2.1", "alpine" }));
+    try std.testing.expectError(error.InvalidArguments, parseOptions(arena.allocator(), &.{ "--cpu-limit", "1", "--cpu-limit", "2", "alpine" }));
+    try std.testing.expectError(error.InvalidMemoryLimit, parseOptions(arena.allocator(), &.{ "--memory-limit", "bad", "alpine" }));
+    try std.testing.expectError(error.InvalidMemoryLimit, parseOptions(arena.allocator(), &.{ "--memory-limit", "257m", "alpine" }));
+    try std.testing.expectError(error.InvalidArguments, parseOptions(arena.allocator(), &.{ "--memory-limit", "128m", "--memory-limit", "64m", "alpine" }));
 }
 
 test "network can be disabled and port forwarding requires networking" {

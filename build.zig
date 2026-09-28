@@ -125,6 +125,12 @@ pub fn build(b: *std.Build) void {
         check_process.step.dependOn(&sign_exe.step);
         b.step("run-process-check", "Check OCI working directory, users, groups, and file ownership").dependOn(&check_process.step);
 
+        const check_resources = b.addSystemCommand(&.{"/usr/bin/python3"});
+        check_resources.addFileArg(b.path("scripts/check_resources.py"));
+        check_resources.addArg(exe_path);
+        check_resources.step.dependOn(&sign_exe.step);
+        b.step("run-resources-check", "Check per-container cgroup limits and detached exec").dependOn(&check_resources.step);
+
         const check_volume = b.addSystemCommand(&.{"/usr/bin/python3"});
         check_volume.addFileArg(b.path("scripts/check_volume.py"));
         check_volume.addArg(exe_path);
