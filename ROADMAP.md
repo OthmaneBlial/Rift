@@ -82,7 +82,8 @@ This roadmap carries the original plan forward from the first project commit. `[
 - [x] Forward one TCP port from localhost into a container.
 - [x] Mount explicit host files and directories read-only by default, with opt-in write access.
 - [x] Preserve OCI file ownership and groups from tar headers and local/global PAX `uid`/`gid`; verify non-root file access in a VM.
-- [ ] Preserve remaining global PAX fields and support OCI extended attributes and file capabilities.
+- [x] Preserve global PAX `path`, `linkpath`, and `size` overrides, including local precedence and empty-value resets.
+- [ ] Support OCI extended attributes and file capabilities.
 - [ ] Support FIFOs and special files outside runtime-managed `/dev`.
 - [ ] Reduce guest disk footprint and optimize startup and shutdown using measurements.
 - [ ] Evaluate guest reuse while preserving workload isolation and cleanup.

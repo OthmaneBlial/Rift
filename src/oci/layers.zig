@@ -116,9 +116,14 @@ const LayerTarIterator = struct {
     layer_total: u64 = 0,
     file_name_buffer: []u8,
     link_name_buffer: []u8,
+    global_file_name_buffer: [Io.Dir.max_path_bytes]u8 = undefined,
+    global_link_name_buffer: [Io.Dir.max_path_bytes]u8 = undefined,
     header_buffer: [512]u8 = undefined,
     padding: usize = 0,
     unread_file_bytes: u64 = 0,
+    global_path: ?[]const u8 = null,
+    global_linkpath: ?[]const u8 = null,
+    global_size: ?u64 = null,
     global_mtime: ?Io.Timestamp = null,
     global_uid: ?u32 = null,
     global_gid: ?u32 = null,
@@ -167,7 +172,7 @@ const LayerTarIterator = struct {
                 'L' => gnu_name = try self.readGnuString(size, self.file_name_buffer),
                 'K' => gnu_link_name = try self.readGnuString(size, self.link_name_buffer),
                 '0', 0, '1', '2', '3', '4', '5' => {
-                    const entry_size = pax.size orelse size;
+                    const entry_size = pax.size orelse self.global_size orelse size;
                     if (entry_size > max_layer_bytes) return error.LayerTooLarge;
                     const mtime = if (pax.has_mtime)
                         pax.mtime orelse try tarMtime(header)
@@ -175,9 +180,9 @@ const LayerTarIterator = struct {
                         self.global_mtime orelse try tarMtime(header);
                     var raw_name_buffer: [Io.Dir.max_path_bytes]u8 = undefined;
                     const raw_name = try tarHeaderName(header, &raw_name_buffer);
-                    const name = pax.path orelse gnu_name orelse try copyTarString(self.file_name_buffer, raw_name);
+                    const name = pax.path orelse gnu_name orelse self.global_path orelse try copyTarString(self.file_name_buffer, raw_name);
                     const raw_link_name = std.mem.sliceTo(header[157..257], 0);
-                    const link_name = pax.linkpath orelse gnu_link_name orelse try copyTarString(self.link_name_buffer, raw_link_name);
+                    const link_name = pax.linkpath orelse gnu_link_name orelse self.global_linkpath orelse try copyTarString(self.link_name_buffer, raw_link_name);
                     const entry_kind: LayerTarEntryKind = switch (kind) {
                         '5' => .directory,
                         '2' => .sym_link,
@@ -267,6 +272,12 @@ const LayerTarIterator = struct {
                     self.global_uid = if (value.len == 0) null else try parsePaxId(value);
                 } else if (std.mem.eql(u8, key, "gid")) {
                     self.global_gid = if (value.len == 0) null else try parsePaxId(value);
+                } else if (std.mem.eql(u8, key, "path")) {
+                    self.global_path = if (value.len == 0) null else try copyTarString(&self.global_file_name_buffer, value);
+                } else if (std.mem.eql(u8, key, "linkpath")) {
+                    self.global_linkpath = if (value.len == 0) null else try copyTarString(&self.global_link_name_buffer, value);
+                } else if (std.mem.eql(u8, key, "size")) {
+                    self.global_size = if (value.len == 0) null else std.fmt.parseInt(u64, value, 10) catch return error.PaxInvalidAttribute;
                 }
             } else if (std.mem.eql(u8, key, "path")) {
                 pax.path = try copyTarString(self.file_name_buffer, value);
@@ -1012,6 +1023,103 @@ test "honors local PAX path and size overrides and rejects unsafe overrides" {
     try unsafe_link_tar.writeLink("unsafe-link", "inside", .{});
     try temp.dir.writeFile(io, .{ .sub_path = "unsafe-link.tar", .data = unsafe_link_archive.written() });
     const unsafe_link_blob = try temp.dir.openFile(io, "unsafe-link.tar", .{ .mode = .read_only });
+    defer unsafe_link_blob.close(io);
+    try std.testing.expectError(error.UnsafeLayerLink, applyOne(allocator, io, root, unsafe_link_blob, "application/vnd.oci.image.layer.v1.tar"));
+    try std.testing.expectError(error.UnsafeLayerLink, validateUncompressedTar(allocator, io, unsafe_link_blob));
+}
+
+test "honors global PAX path, linkpath, and size with local precedence and clearing" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var temp = std.testing.tmpDir(.{});
+    defer temp.cleanup();
+    try temp.dir.createDirPath(io, "root");
+    var root = try temp.dir.openDir(io, "root", .{});
+    defer root.close(io);
+    try root.writeFile(io, .{ .sub_path = "global-target", .data = "global" });
+    try root.writeFile(io, .{ .sub_path = "fallback-target", .data = "fallback" });
+
+    var archive: Io.Writer.Allocating = .init(allocator);
+    defer archive.deinit();
+    var tar: std.tar.Writer = .{ .underlying_writer = &archive.writer };
+    try writeTestPaxHeaderKind(allocator, &archive, &tar, 'g', &.{
+        .{ .key = "path", .value = "global-name" },
+        .{ .key = "size", .value = "5" },
+    });
+    const global_header_offset = archive.written().len;
+    try tar.writeFileBytes("fallback", "hello", .{});
+    const global_bytes = @constCast(archive.written());
+    @memset(global_bytes[global_header_offset + 124 .. global_header_offset + 136], 0);
+    updateTestTarChecksum(global_bytes[global_header_offset..][0..512]);
+
+    try writeTestPaxHeader(allocator, &archive, &tar, &.{
+        .{ .key = "path", .value = "local-name" },
+        .{ .key = "size", .value = "2" },
+    });
+    try tar.writeFileBytes("fallback-local", "abc", .{});
+    try tar.writeFileBytes("fallback-inherited", "again", .{});
+
+    try writeTestPaxHeaderKind(allocator, &archive, &tar, 'g', &.{
+        .{ .key = "path", .value = "" },
+        .{ .key = "size", .value = "" },
+    });
+    try tar.writeFileBytes("reset-name", "r", .{});
+    try writeTestPaxHeaderKind(allocator, &archive, &tar, 'g', &.{.{ .key = "linkpath", .value = "global-target" }});
+    try tar.writeLink("global-link", "fallback-target", .{});
+    try writeTestPaxHeaderKind(allocator, &archive, &tar, 'g', &.{.{ .key = "linkpath", .value = "" }});
+    try tar.writeLink("reset-link", "fallback-target", .{});
+
+    try temp.dir.writeFile(io, .{ .sub_path = "global-pax.tar", .data = archive.written() });
+    const blob = try temp.dir.openFile(io, "global-pax.tar", .{ .mode = .read_only });
+    defer blob.close(io);
+    try validateUncompressedTar(allocator, io, blob);
+    try applyOne(allocator, io, root, blob, "application/vnd.oci.image.layer.v1.tar");
+
+    const global_contents = try root.readFileAlloc(io, "global-name", allocator, .limited(8));
+    defer allocator.free(global_contents);
+    try std.testing.expectEqualStrings("again", global_contents);
+    const local_contents = try root.readFileAlloc(io, "local-name", allocator, .limited(8));
+    defer allocator.free(local_contents);
+    try std.testing.expectEqualStrings("ab", local_contents);
+    const reset_contents = try root.readFileAlloc(io, "reset-name", allocator, .limited(8));
+    defer allocator.free(reset_contents);
+    try std.testing.expectEqualStrings("r", reset_contents);
+    const global_link_contents = try root.readFileAlloc(io, "global-link", allocator, .limited(8));
+    defer allocator.free(global_link_contents);
+    try std.testing.expectEqualStrings("global", global_link_contents);
+    const reset_link_contents = try root.readFileAlloc(io, "reset-link", allocator, .limited(16));
+    defer allocator.free(reset_link_contents);
+    try std.testing.expectEqualStrings("fallback", reset_link_contents);
+    try std.testing.expectError(error.FileNotFound, root.statFile(io, "fallback", .{}));
+}
+
+test "rejects unsafe global PAX paths and link targets" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var temp = std.testing.tmpDir(.{});
+    defer temp.cleanup();
+    try temp.dir.createDirPath(io, "root");
+    var root = try temp.dir.openDir(io, "root", .{});
+    defer root.close(io);
+
+    var unsafe_path_archive: Io.Writer.Allocating = .init(allocator);
+    defer unsafe_path_archive.deinit();
+    var unsafe_path_tar: std.tar.Writer = .{ .underlying_writer = &unsafe_path_archive.writer };
+    try writeTestPaxHeaderKind(allocator, &unsafe_path_archive, &unsafe_path_tar, 'g', &.{.{ .key = "path", .value = "../outside" }});
+    try unsafe_path_tar.writeFileBytes("fallback", "blocked", .{});
+    try temp.dir.writeFile(io, .{ .sub_path = "unsafe-global-path.tar", .data = unsafe_path_archive.written() });
+    const unsafe_path_blob = try temp.dir.openFile(io, "unsafe-global-path.tar", .{ .mode = .read_only });
+    defer unsafe_path_blob.close(io);
+    try std.testing.expectError(error.UnsafeLayerPath, applyOne(allocator, io, root, unsafe_path_blob, "application/vnd.oci.image.layer.v1.tar"));
+    try std.testing.expectError(error.FileNotFound, temp.dir.statFile(io, "outside", .{}));
+
+    var unsafe_link_archive: Io.Writer.Allocating = .init(allocator);
+    defer unsafe_link_archive.deinit();
+    var unsafe_link_tar: std.tar.Writer = .{ .underlying_writer = &unsafe_link_archive.writer };
+    try writeTestPaxHeaderKind(allocator, &unsafe_link_archive, &unsafe_link_tar, 'g', &.{.{ .key = "linkpath", .value = "../../outside" }});
+    try unsafe_link_tar.writeLink("unsafe-link", "inside", .{});
+    try temp.dir.writeFile(io, .{ .sub_path = "unsafe-global-link.tar", .data = unsafe_link_archive.written() });
+    const unsafe_link_blob = try temp.dir.openFile(io, "unsafe-global-link.tar", .{ .mode = .read_only });
     defer unsafe_link_blob.close(io);
     try std.testing.expectError(error.UnsafeLayerLink, applyOne(allocator, io, root, unsafe_link_blob, "application/vnd.oci.image.layer.v1.tar"));
     try std.testing.expectError(error.UnsafeLayerLink, validateUncompressedTar(allocator, io, unsafe_link_blob));
