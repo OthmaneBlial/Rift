@@ -87,7 +87,7 @@ This roadmap carries the original plan forward from the first project commit. `[
 - [x] Restore PAX xattrs on files and nested directories, including binary values, local/global precedence, and legacy `security.capability`; verify in Alpine.
 - [x] Expose OCI root-directory xattrs at `/` by copying them into the private upper layer; verify in Alpine.
 - [x] Extract OCI FIFO entries as named pipes with preserved mode and ownership.
-- [ ] Support other special files outside runtime-managed `/dev`.
+- [x] Recreate OCI character and block device nodes outside runtime-managed `/dev` inside the disposable guest overlay, preserving device numbers, owner, mode, and modification time; Unix-domain socket entries remain unsupported.
 - [ ] Reduce guest disk footprint and optimize startup and shutdown using measurements; networkless runs now skip the virtio-net module and DHCP setup.
 - [ ] Evaluate guest reuse while preserving workload isolation and cleanup.
 

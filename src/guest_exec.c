@@ -23,6 +23,7 @@
 #include <sys/wait.h>
 #include <sys/xattr.h>
 #include <termios.h>
+#include <time.h>
 #include <unistd.h>
 
 static int fail(const char *operation);
@@ -959,6 +960,14 @@ static uint32_t load_u32_le(const unsigned char value[4]) {
     return (uint32_t)value[0] | (uint32_t)value[1] << 8 | (uint32_t)value[2] << 16 | (uint32_t)value[3] << 24;
 }
 
+static int64_t load_i64_le(const unsigned char value[8]) {
+    uint64_t raw = 0;
+    for (unsigned int index = 0; index < 8; ++index) raw |= (uint64_t)value[index] << (index * 8);
+    int64_t result;
+    memcpy(&result, &raw, sizeof(result));
+    return result;
+}
+
 static int read_exact(int descriptor, void *buffer, size_t size) {
     unsigned char *cursor = buffer;
     while (size) {
@@ -1025,6 +1034,47 @@ static int chown_image_root(const char *root_path, uid_t uid, gid_t gid) {
     return status;
 }
 
+static int create_image_device(const char *root_path, char *path, uint8_t kind, uint32_t mode,
+                              uint32_t major_number, uint32_t minor_number, uint32_t uid, uint32_t gid,
+                              int64_t seconds, uint32_t nanoseconds) {
+    if (!valid_owner_path(path, strlen(path)) || (kind != 1 && kind != 2) || (mode & ~07777U) || nanoseconds >= 1000000000U) {
+        errno = EINVAL;
+        return fail("validate image device node");
+    }
+    int directory = open(root_path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (directory < 0) return fail("open image root for device node");
+    char *part = path;
+    for (;;) {
+        char *separator = strchr(part, '/');
+        if (!separator) break;
+        *separator = '\0';
+        int next = openat(directory, part, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+        *separator = '/';
+        if (next < 0) {
+            int status = fail("open image device parent");
+            close(directory);
+            return status;
+        }
+        close(directory);
+        directory = next;
+        part = separator + 1;
+    }
+    const mode_t type = kind == 1 ? S_IFCHR : S_IFBLK;
+    int result = mknodat(directory, part, type | (mode_t)mode, makedev(major_number, minor_number));
+    if (result == 0) result = fchownat(directory, part, (uid_t)uid, (gid_t)gid, AT_SYMLINK_NOFOLLOW);
+    if (result == 0) result = fchmodat(directory, part, (mode_t)mode, 0);
+    if (result == 0) {
+        const struct timespec times[2] = {
+            {.tv_sec = 0, .tv_nsec = UTIME_OMIT},
+            {.tv_sec = (time_t)seconds, .tv_nsec = (long)nanoseconds},
+        };
+        result = utimensat(directory, part, times, AT_SYMLINK_NOFOLLOW);
+    }
+    int status = result == 0 ? 0 : fail("create image device node");
+    close(directory);
+    return status;
+}
+
 static int apply_image_ownership(const char *root_path) {
     const int descriptor = open("/mnt/control/owners", O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
     if (descriptor < 0) return errno == ENOENT ? 0 : fail("open image ownership manifest");
@@ -1035,7 +1085,7 @@ static int apply_image_ownership(const char *root_path) {
         return fail("validate image ownership manifest");
     }
     unsigned char magic[8];
-    if (read_exact(descriptor, magic, sizeof(magic)) != 0 || memcmp(magic, "RIFTOWN1", sizeof(magic)) != 0) {
+    if (read_exact(descriptor, magic, sizeof(magic)) != 0 || memcmp(magic, "RIFTOWN2", sizeof(magic)) != 0) {
         close(descriptor);
         errno = EINVAL;
         return fail("read image ownership manifest");
@@ -1054,17 +1104,10 @@ static int apply_image_ownership(const char *root_path) {
         const uint32_t gid = load_u32_le(&header[4]);
         const uint32_t path_length = load_u32_le(&header[8]);
         if (++records > 1000000 || uid == UINT32_MAX || gid == UINT32_MAX || path_length > PATH_MAX ||
-            (off_t)path_length > remaining || (uid == 0 && gid == 0)) {
+            remaining < 1 || (off_t)path_length > remaining - 1) {
             close(descriptor);
             errno = EINVAL;
             return fail("validate image ownership record");
-        }
-        if (path_length == 0) {
-            if (chown_image_root(root_path, (uid_t)uid, (gid_t)gid) != 0) {
-                close(descriptor);
-                return 125;
-            }
-            continue;
         }
         char path[PATH_MAX + 1];
         if (read_exact(descriptor, path, path_length) != 0) {
@@ -1074,12 +1117,46 @@ static int apply_image_ownership(const char *root_path) {
         }
         remaining -= (off_t)path_length;
         path[path_length] = '\0';
-        if (!valid_owner_path(path, path_length)) {
+        unsigned char kind;
+        if (read_exact(descriptor, &kind, sizeof(kind)) != 0) {
+            close(descriptor);
+            return fail("read image metadata type");
+        }
+        remaining -= 1;
+        if (kind > 2 || (path_length == 0 && kind != 0) || (kind != 0 && path_length == 0) ||
+            (kind == 0 && uid == 0 && gid == 0) || (path_length != 0 && !valid_owner_path(path, path_length))) {
             close(descriptor);
             errno = EINVAL;
-            return fail("validate image ownership path");
+            return fail("validate image metadata record");
         }
-        if (chown_image_path(root_path, path, (uid_t)uid, (gid_t)gid) != 0) {
+
+        if (path_length == 0) {
+            if (chown_image_root(root_path, (uid_t)uid, (gid_t)gid) != 0) {
+                close(descriptor);
+                return 125;
+            }
+            continue;
+        }
+
+        if (kind != 0) {
+            unsigned char node[24];
+            if (remaining < (off_t)sizeof(node) || read_exact(descriptor, node, sizeof(node)) != 0) {
+                close(descriptor);
+                errno = EINVAL;
+                return fail("read image device metadata");
+            }
+            remaining -= (off_t)sizeof(node);
+            const uint32_t mode = load_u32_le(&node[0]);
+            const uint32_t major_number = load_u32_le(&node[4]);
+            const uint32_t minor_number = load_u32_le(&node[8]);
+            const int64_t seconds = load_i64_le(&node[12]);
+            const uint32_t nanoseconds = load_u32_le(&node[20]);
+            if (mode & ~07777U || nanoseconds >= 1000000000U ||
+                create_image_device(root_path, path, kind, mode, major_number, minor_number, uid, gid, seconds, nanoseconds) != 0) {
+                close(descriptor);
+                return 125;
+            }
+        } else if ((uid != 0 || gid != 0) && chown_image_path(root_path, path, (uid_t)uid, (gid_t)gid) != 0) {
             close(descriptor);
             return 125;
         }

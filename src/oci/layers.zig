@@ -21,7 +21,7 @@ pub const ExpansionBudget = struct {
     // apply decompresses every layer once for whiteouts and again for entries.
     whiteouts: u64 = 0,
     entries: u64 = 0,
-    owner_manifest_bytes: u64 = "RIFTOWN1".len,
+    owner_manifest_bytes: u64 = "RIFTOWN2".len,
     owner_index_scan_visits: u64 = 0,
     xattr_metadata_bytes: u64 = 0,
 };
@@ -40,7 +40,18 @@ pub const DirectoryMetadata = struct {
 pub const Ownership = struct {
     uid: u32,
     gid: u32,
+    device_node: ?DeviceNode = null,
 };
+
+pub const DeviceNode = struct {
+    kind: DeviceKind,
+    mode: u32,
+    major: u32,
+    minor: u32,
+    mtime: Io.Timestamp,
+};
+
+pub const DeviceKind = enum(u8) { character = 1, block = 2 };
 
 /// Validate a guest-produced uncompressed layer without extracting it to the host filesystem.
 pub fn validateUncompressedTar(allocator: std.mem.Allocator, io: Io, blob: Io.File) !void {
@@ -76,7 +87,7 @@ pub fn validateUncompressedTar(allocator: std.mem.Allocator, io: Io, blob: Io.Fi
                 const target = try cleanPath(entry.link_name, &clean_link_buffer);
                 if (target.len == 0) return error.InvalidHardlink;
             },
-            .device => if (entry.size != 0 or !std.mem.startsWith(u8, path, "dev/")) return error.UnsupportedLayerSpecialFile,
+            .device => if (entry.size != 0 or entry.device_node == null) return error.UnsupportedLayerSpecialFile,
             .directory, .file, .fifo => {},
         }
         try it.streamRemaining(entry, &discarding.writer);
@@ -110,6 +121,7 @@ const LayerTarEntry = struct {
     kind: LayerTarEntryKind,
     mtime: Io.Timestamp,
     ownership: Ownership,
+    device_node: ?DeviceNode,
     xattrs: []const Xattr,
 };
 
@@ -123,6 +135,10 @@ const PaxOverrides = struct {
     uid: ?u32 = null,
     has_gid: bool = false,
     gid: ?u32 = null,
+    has_devmajor: bool = false,
+    devmajor: ?u32 = null,
+    has_devminor: bool = false,
+    devminor: ?u32 = null,
 };
 
 /// std.tar.Iterator drops PAX mtime records and global PAX headers. Keep its
@@ -145,6 +161,8 @@ const LayerTarIterator = struct {
     global_mtime: ?Io.Timestamp = null,
     global_uid: ?u32 = null,
     global_gid: ?u32 = null,
+    global_devmajor: ?u32 = null,
+    global_devminor: ?u32 = null,
     local_xattrs: std.StringHashMap([]u8),
     global_xattrs: std.StringHashMap([]u8),
     entry_arena: std.heap.ArenaAllocator,
@@ -236,6 +254,17 @@ const LayerTarIterator = struct {
                         .gid = if (pax.has_gid) pax.gid orelse try tarHeaderId(header[116..124]) else self.global_gid orelse try tarHeaderId(header[116..124]),
                     };
                     const xattrs = try self.effectiveXattrs();
+                    const device_node: ?DeviceNode = if (entry_kind == .device) blk: {
+                        const major_number = if (pax.has_devmajor) pax.devmajor orelse try tarHeaderId(header[329..337]) else self.global_devmajor orelse try tarHeaderId(header[329..337]);
+                        const minor_number = if (pax.has_devminor) pax.devminor orelse try tarHeaderId(header[337..345]) else self.global_devminor orelse try tarHeaderId(header[337..345]);
+                        break :blk .{
+                            .kind = if (kind == '3') .character else .block,
+                            .mode = (try tarHeaderMode(header)) & 0o7777,
+                            .major = major_number,
+                            .minor = minor_number,
+                            .mtime = mtime,
+                        };
+                    } else null;
                     self.padding = tarBlockPadding(entry_size);
                     self.unread_file_bytes = entry_size;
                     return .{
@@ -246,6 +275,7 @@ const LayerTarIterator = struct {
                         .kind = entry_kind,
                         .mtime = mtime,
                         .ownership = ownership,
+                        .device_node = device_node,
                         .xattrs = xattrs,
                     };
                 },
@@ -317,6 +347,10 @@ const LayerTarIterator = struct {
                     self.global_uid = if (value.len == 0) null else try parsePaxId(value);
                 } else if (std.mem.eql(u8, key, "gid")) {
                     self.global_gid = if (value.len == 0) null else try parsePaxId(value);
+                } else if (std.mem.eql(u8, key, "SCHILY.devmajor")) {
+                    self.global_devmajor = if (value.len == 0) null else try parsePaxId(value);
+                } else if (std.mem.eql(u8, key, "SCHILY.devminor")) {
+                    self.global_devminor = if (value.len == 0) null else try parsePaxId(value);
                 } else if (std.mem.eql(u8, key, "path")) {
                     self.global_path = if (value.len == 0) null else try copyTarString(&self.global_file_name_buffer, value);
                 } else if (std.mem.eql(u8, key, "linkpath")) {
@@ -339,6 +373,12 @@ const LayerTarIterator = struct {
             } else if (std.mem.eql(u8, key, "gid")) {
                 pax.has_gid = true;
                 pax.gid = if (value.len == 0) null else try parsePaxId(value);
+            } else if (std.mem.eql(u8, key, "SCHILY.devmajor")) {
+                pax.has_devmajor = true;
+                pax.devmajor = if (value.len == 0) null else try parsePaxId(value);
+            } else if (std.mem.eql(u8, key, "SCHILY.devminor")) {
+                pax.has_devminor = true;
+                pax.devminor = if (value.len == 0) null else try parsePaxId(value);
             }
             offset = end;
         }
@@ -638,7 +678,19 @@ fn applyTar(allocator: std.mem.Allocator, io: Io, root: Io.Dir, reader: *Io.Read
             continue;
         }
         if (entry.kind == .device) {
-            if (entry.size != 0 or !std.mem.startsWith(u8, path, "dev/")) return error.UnsupportedLayerSpecialFile;
+            if (entry.size != 0 or entry.device_node == null) return error.UnsupportedLayerSpecialFile;
+            if (std.mem.startsWith(u8, path, "dev/")) continue;
+            if (phase == .whiteouts) continue;
+            if (path.len == 0) return error.UnsafeLayerPath;
+            const node = entry.device_node.?;
+            try accountXattrMetadata(budget, entry.xattrs);
+            var parent = (try openParent(io, root, parentPath(path), true)).?;
+            defer parent.close(io);
+            try parent.deleteTree(io, basename(path));
+            try removeOwnerSubtree(allocator, ownership, path, budget);
+            var metadata = entry.ownership;
+            metadata.device_node = node;
+            try setOwnership(ownership, path, metadata, budget);
             continue;
         }
         if (path.len == 0) {
@@ -866,21 +918,38 @@ fn setHostXattrsFd(allocator: std.mem.Allocator, descriptor: c_int, xattrs: []co
 }
 
 fn setOwnership(ownership: *std.StringHashMap(Ownership), path: []const u8, value: Ownership, budget: *ExpansionBudget) !void {
-    if (value.uid == 0 and value.gid == 0) {
-        if (ownership.count() == 0) return;
-        if (ownership.fetchRemove(path)) |removed| {
-            budget.owner_manifest_bytes -= @as(u64, 12) + @as(u64, @intCast(removed.key.len));
+    const should_store = value.uid != 0 or value.gid != 0 or value.device_node != null;
+    const owned_value = value;
+
+    if (ownership.getPtr(path)) |stored| {
+        const old_size = try ownerRecordSize(path.len, stored.*);
+        const new_size = if (should_store) try ownerRecordSize(path.len, owned_value) else 0;
+        const base = std.math.sub(u64, budget.owner_manifest_bytes, old_size) catch return error.OwnershipManifestTooLarge;
+        const total = std.math.add(u64, base, new_size) catch return error.OwnershipManifestTooLarge;
+        if (total > max_owner_manifest_bytes) return error.OwnershipManifestTooLarge;
+        budget.owner_manifest_bytes = total;
+        if (should_store) {
+            stored.* = owned_value;
+        } else if (ownership.fetchRemove(path)) |removed| {
             ownership.allocator.free(removed.key);
         }
         return;
     }
-    if (ownership.getPtr(path)) |stored| {
-        stored.* = value;
-        return;
-    }
+    if (!should_store) return;
     if (ownership.count() >= max_owner_records) return error.TooManyOwnedImageEntries;
-    try accountOwnerManifestRecord(budget, path.len);
-    try ownership.put(try ownership.allocator.dupe(u8, path), value);
+    const record_size = try ownerRecordSize(path.len, owned_value);
+    const total = std.math.add(u64, budget.owner_manifest_bytes, record_size) catch return error.OwnershipManifestTooLarge;
+    if (total > max_owner_manifest_bytes) return error.OwnershipManifestTooLarge;
+    const owned_path = try ownership.allocator.dupe(u8, path);
+    errdefer ownership.allocator.free(owned_path);
+    try ownership.put(owned_path, owned_value);
+    budget.owner_manifest_bytes = total;
+}
+
+pub fn ownerRecordSize(path_length: usize, value: Ownership) !u64 {
+    var size = std.math.add(u64, 13, std.math.cast(u64, path_length) orelse return error.OwnershipManifestTooLarge) catch return error.OwnershipManifestTooLarge;
+    if (value.device_node != null) size = std.math.add(u64, size, 24) catch return error.OwnershipManifestTooLarge;
+    return size;
 }
 
 fn removeOwnerSubtree(allocator: std.mem.Allocator, ownership: *std.StringHashMap(Ownership), prefix: []const u8, budget: *ExpansionBudget) !void {
@@ -907,7 +976,7 @@ fn removeOwnerEntries(allocator: std.mem.Allocator, ownership: *std.StringHashMa
     }
     for (removed_paths.items) |path| {
         if (ownership.fetchRemove(path)) |removed| {
-            budget.owner_manifest_bytes -= @as(u64, 12) + @as(u64, @intCast(removed.key.len));
+            budget.owner_manifest_bytes -= try ownerRecordSize(removed.key.len, removed.value);
             ownership.allocator.free(removed.key);
         }
     }
@@ -937,8 +1006,8 @@ fn applyHardlink(allocator: std.mem.Allocator, io: Io, root: Io.Dir, path: []con
     try setOwnership(ownership, path, target_ownership, budget);
 }
 
-fn accountOwnerManifestRecord(budget: *ExpansionBudget, path_length: usize) !void {
-    const record_bytes = std.math.add(u64, 12, @intCast(path_length)) catch return error.OwnershipManifestTooLarge;
+fn accountOwnerManifestRecord(budget: *ExpansionBudget, path_length: usize, value: Ownership) !void {
+    const record_bytes = try ownerRecordSize(path_length, value);
     const total = std.math.add(u64, budget.owner_manifest_bytes, record_bytes) catch return error.OwnershipManifestTooLarge;
     if (total > max_owner_manifest_bytes) return error.OwnershipManifestTooLarge;
     budget.owner_manifest_bytes = total;
@@ -984,10 +1053,11 @@ fn copyXattrs(allocator: std.mem.Allocator, xattrs: []const Xattr) ![]const Xatt
 
 test "bounds ownership metadata bytes and repeated index scans" {
     var budget: ExpansionBudget = .{};
-    try accountOwnerManifestRecord(&budget, 4);
-    try std.testing.expectEqual(@as(u64, 24), budget.owner_manifest_bytes);
-    try std.testing.expectError(error.OwnershipManifestTooLarge, accountOwnerManifestRecord(&budget, max_owner_manifest_bytes));
-    try std.testing.expectEqual(@as(u64, 24), budget.owner_manifest_bytes);
+    const value: Ownership = .{ .uid = 1, .gid = 1 };
+    try accountOwnerManifestRecord(&budget, 4, value);
+    try std.testing.expectEqual(@as(u64, 25), budget.owner_manifest_bytes);
+    try std.testing.expectError(error.OwnershipManifestTooLarge, accountOwnerManifestRecord(&budget, max_owner_manifest_bytes, value));
+    try std.testing.expectEqual(@as(u64, 25), budget.owner_manifest_bytes);
 
     var scan_budget: ExpansionBudget = .{ .owner_index_scan_visits = max_owner_index_scan_visits - 1 };
     try accountOwnerIndexScan(&scan_budget, 1);
@@ -1006,11 +1076,11 @@ test "ownership removals keep the bounded manifest size in sync" {
     }
     var budget: ExpansionBudget = .{};
     try setOwnership(&ownership, "owned", .{ .uid = 1000, .gid = 1000 }, &budget);
-    try std.testing.expectEqual(@as(u64, 25), budget.owner_manifest_bytes);
+    try std.testing.expectEqual(@as(u64, 26), budget.owner_manifest_bytes);
     try setOwnership(&ownership, "owned", .{ .uid = 2000, .gid = 2000 }, &budget);
-    try std.testing.expectEqual(@as(u64, 25), budget.owner_manifest_bytes);
+    try std.testing.expectEqual(@as(u64, 26), budget.owner_manifest_bytes);
     try setOwnership(&ownership, "owned", .{ .uid = 0, .gid = 0 }, &budget);
-    try std.testing.expectEqual(@as(u64, "RIFTOWN1".len), budget.owner_manifest_bytes);
+    try std.testing.expectEqual(@as(u64, "RIFTOWN2".len), budget.owner_manifest_bytes);
 }
 
 fn tarMtime(header: *const [512]u8) !Io.Timestamp {
@@ -1839,7 +1909,7 @@ test "ignores image device nodes under runtime-managed /dev" {
     try std.testing.expectError(error.FileNotFound, root.statFile(io, "dev/sda", .{ .follow_symlinks = false }));
 }
 
-test "rejects image device nodes outside runtime-managed /dev" {
+test "records character and block nodes outside runtime-managed /dev" {
     const allocator = std.testing.allocator;
     const io = std.testing.io;
     var temp = std.testing.tmpDir(.{});
@@ -1850,12 +1920,49 @@ test "rejects image device nodes outside runtime-managed /dev" {
 
     var archive: Io.Writer.Allocating = .init(allocator);
     defer archive.deinit();
-    try writeTestSpecial(&archive.writer, "etc/device", '3');
+    var tar: std.tar.Writer = .{ .underlying_writer = &archive.writer };
+    try writeTestPaxHeaderKind(allocator, &archive, &tar, 'g', &.{
+        .{ .key = "SCHILY.devmajor", .value = "8" },
+        .{ .key = "SCHILY.devminor", .value = "2" },
+    });
+    try writeTestPaxHeader(allocator, &archive, &tar, &.{
+        .{ .key = "SCHILY.xattr.user.rift-device", .value = "guest-value" },
+        .{ .key = "SCHILY.devmajor", .value = "5" },
+    });
+    try writeTestDevice(&archive.writer, "etc/character", '3', 0o640, 1234, 2345, 1, 9, 1_700_000_000);
+    try writeTestDevice(&archive.writer, "etc/block", '4', 0o600, 0, 0, 8, 1, 1_700_000_001);
     try temp.dir.writeFile(io, .{ .sub_path = "device.tar", .data = archive.written() });
     const blob = try temp.dir.openFile(io, "device.tar", .{ .mode = .read_only });
     defer blob.close(io);
 
-    try std.testing.expectError(error.UnsupportedLayerSpecialFile, applyOne(allocator, io, root, blob, "application/vnd.oci.image.layer.v1.tar"));
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    var directory_metadata = std.StringHashMap(DirectoryMetadata).init(arena.allocator());
+    defer directory_metadata.deinit();
+    var ownership = std.StringHashMap(Ownership).init(arena.allocator());
+    defer ownership.deinit();
+    var budget: ExpansionBudget = .{};
+    try apply(allocator, io, root, blob, "application/vnd.oci.image.layer.v1.tar", &directory_metadata, &ownership, &budget);
+
+    const character_owner = ownership.get("etc/character").?;
+    try std.testing.expectEqual(@as(u32, 1234), character_owner.uid);
+    try std.testing.expectEqual(@as(u32, 2345), character_owner.gid);
+    const character = character_owner.device_node.?;
+    try std.testing.expectEqual(DeviceKind.character, character.kind);
+    try std.testing.expectEqual(@as(u32, 0o640), character.mode);
+    try std.testing.expectEqual(@as(u32, 5), character.major);
+    try std.testing.expectEqual(@as(u32, 2), character.minor);
+    try std.testing.expectEqual(Io.Timestamp.fromNanoseconds(1_700_000_000 * std.time.ns_per_s), character.mtime);
+    try std.testing.expect(budget.xattr_metadata_bytes > 0);
+    const block_value = ownership.get("etc/block").?;
+    try std.testing.expectEqual(@as(u32, 0), block_value.uid);
+    try std.testing.expectEqual(@as(u32, 0), block_value.gid);
+    const block = block_value.device_node.?;
+    try std.testing.expectEqual(DeviceKind.block, block.kind);
+    try std.testing.expectEqual(@as(u32, 8), block.major);
+    try std.testing.expectEqual(@as(u32, 2), block.minor);
+    try std.testing.expectError(error.FileNotFound, root.statFile(io, "etc/character", .{ .follow_symlinks = false }));
+    try std.testing.expectError(error.FileNotFound, root.statFile(io, "etc/block", .{ .follow_symlinks = false }));
 }
 
 fn applyOne(allocator: std.mem.Allocator, io: Io, root: Io.Dir, blob: Io.File, media_type: []const u8) !void {
@@ -1907,6 +2014,34 @@ fn writeTestSpecial(writer: *Io.Writer, name: []const u8, kind: u8) !void {
     bytes[156] = kind;
     updateTestTarChecksum(bytes);
     try writer.writeAll(bytes);
+}
+
+fn writeTestDevice(writer: *Io.Writer, name: []const u8, kind: u8, mode: u32, uid: u32, gid: u32, major_number: u32, minor_number: u32, seconds: u64) !void {
+    var header = std.tar.Writer.Header.init(.regular);
+    try header.setPath("", name);
+    const bytes = std.mem.asBytes(&header);
+    bytes[156] = kind;
+    try writeTestTarOctal(bytes[100..108], mode);
+    try writeTestTarOctal(bytes[108..116], uid);
+    try writeTestTarOctal(bytes[116..124], gid);
+    try writeTestTarOctal(bytes[136..148], seconds);
+    try writeTestTarOctal(bytes[329..337], major_number);
+    try writeTestTarOctal(bytes[337..345], minor_number);
+    updateTestTarChecksum(bytes);
+    try writer.writeAll(bytes);
+}
+
+fn writeTestTarOctal(field: []u8, value: u64) !void {
+    @memset(field, '0');
+    field[field.len - 1] = 0;
+    var remaining = value;
+    var offset = field.len - 1;
+    while (remaining != 0) {
+        if (offset == 0) return error.TarHeader;
+        offset -= 1;
+        field[offset] = @intCast('0' + remaining % 8);
+        remaining /= 8;
+    }
 }
 
 const TestPaxAttribute = struct { key: []const u8, value: []const u8 };

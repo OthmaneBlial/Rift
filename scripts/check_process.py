@@ -66,6 +66,8 @@ def main() -> int:
         probe = Path(home) / "rift-xattr-probe"
         probe_source.write_text(r'''#include <stdio.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <sys/sysmacros.h>
 #include <sys/types.h>
 #include <sys/xattr.h>
 
@@ -75,7 +77,21 @@ static int matches(const char *path, const char *name, const unsigned char *expe
     return length == (ssize_t)size && memcmp(actual, expected, size) == 0;
 }
 
-int main(void) {
+static int matches_device(const char *path, mode_t type, mode_t mode, uid_t uid, gid_t gid,
+                          unsigned int major_number, unsigned int minor_number, time_t mtime) {
+    struct stat info;
+    return lstat(path, &info) == 0 && (info.st_mode & S_IFMT) == type && (info.st_mode & 07777) == mode &&
+           info.st_uid == uid && info.st_gid == gid && major(info.st_rdev) == major_number &&
+           minor(info.st_rdev) == minor_number && info.st_mtime == mtime;
+}
+
+int main(int argc, char **argv) {
+    if (argc == 2 && strcmp(argv[1], "devices") == 0) {
+        if (!matches_device("/etc/rift-character", S_IFCHR, 0640, 1234, 2345, 1, 9, 1700000000)) return 21;
+        if (!matches_device("/etc/rift-block", S_IFBLK, 0600, 0, 0, 8, 1, 1700000001)) return 22;
+        puts("RIFT_DEVICE_NODES_OK");
+        return 0;
+    }
     static const unsigned char binary[] = { 'A', 0, 0xff };
     static const unsigned char capability[] = { 1, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
     static const unsigned char empty[] = "";
@@ -240,6 +256,39 @@ int main(void) {
         )
         if owner_check.returncode != 0 or owner_check.stdout.strip() != "RIFT_OWNER_OK":
             raise RuntimeError(f"OCI file and directory ownership check failed: {owner_check!r}")
+        device_archive = io.BytesIO()
+        with tarfile.open(fileobj=device_archive, mode="w", format=tarfile.PAX_FORMAT) as layer:
+            character = tarfile.TarInfo("etc/rift-character")
+            character.type = tarfile.CHRTYPE
+            character.mode = 0o640
+            character.uid = 1234
+            character.gid = 2345
+            character.devmajor = 1
+            character.devminor = 9
+            character.mtime = 1_700_000_000
+            character.pax_headers = {"SCHILY.xattr.user.rift-device": "guest-value"}
+            layer.addfile(character)
+            block = tarfile.TarInfo("etc/rift-block")
+            block.type = tarfile.BLKTYPE
+            block.mode = 0o600
+            block.devmajor = 8
+            block.devminor = 1
+            block.mtime = 1_700_000_001
+            layer.addfile(block)
+            executable = tarfile.TarInfo("usr/bin/rift-xattr-probe")
+            executable.mode = 0o755
+            executable.size = probe.stat().st_size
+            with probe.open("rb") as executable_body:
+                layer.addfile(executable, executable_body)
+        append_layer(device_archive.getvalue())
+        select_user("0:0")
+        devices = subprocess.run(
+            [binary, "run", "alpine", "/usr/bin/rift-xattr-probe", "devices"],
+            env=env, capture_output=True, text=True, timeout=60,
+        )
+        if devices.returncode != 0 or devices.stdout.strip() != "RIFT_DEVICE_NODES_OK":
+            raise RuntimeError(f"OCI character/block device node check failed: {devices!r}")
+        select_user("1000:1000")
         writable_tmp = subprocess.run(
             [binary, "run", "alpine", "/bin/busybox", "sh", "-c", "touch /tmp/rift-user-write && test -f /tmp/rift-user-write && echo RIFT_TMP_WRITABLE"],
             env=env, capture_output=True, text=True, timeout=60,
@@ -264,7 +313,7 @@ int main(void) {
             raise RuntimeError(f"fixture still contains a working shell: {removed_shell!r}")
         if list((data / "runtime").iterdir()):
             raise RuntimeError("process settings run left runtime staging behind")
-    print("Rift process and ownership check passed: capability profiles, no_new_privs, root mount denial, users, groups, OCI ownership, xattrs, FIFOs, writable /tmp, shell-free image")
+    print("Rift process and ownership check passed: capability profiles, no_new_privs, root mount denial, users, groups, OCI ownership, file xattrs, character/block devices, FIFOs, writable /tmp, shell-free image")
     return 0
 
 
