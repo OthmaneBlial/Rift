@@ -29,6 +29,34 @@ The first launch already has the image and guest files cached. It is **not** a f
 
 ## Latest cached benchmark
 
+Apple M2, macOS 26.6, Zig 0.16.0, `ReleaseSafe`, runtime commit `3ad3b27`, benchmark script commit `fc4c3e5`, 2026-09-28 04:36:11 UTC. One run with the cached store:
+
+| Metric | Result |
+| --- | ---: |
+| Local executable size | 2,039,216 bytes |
+| First Alpine launch with cached assets | 1,196.7 ms |
+| Subsequent Alpine launches, median of 5 | 1,140.1 ms |
+| Subsequent Alpine launch samples | 1,146.9, 1,140.1, 1,140.8, 1,109.7, 1,120.8 ms |
+| VM start to guest control ready | 429.3 ms |
+| Detached run to workload-ready marker | 971.1 ms |
+| Warm detached `rift exec <id> /bin/true`, median of 5 | 77.1 ms |
+| Warm detached exec samples | 69.3, 122.0, 76.7, 77.1, 79.7 ms |
+| `rift version`, median of 5 | 7.0 ms |
+| Detached Rift worker RSS | 10,784 KiB |
+| Virtualization.framework VM-service RSS | 207,024 KiB |
+| VM-service process footprint | 160,645,936 bytes (153.2 MiB) |
+| Worker and VM-service combined process footprint | 163,317,008 bytes (155.8 MiB) |
+| Whole-Mac physical RAM | 16 GiB |
+| Whole-Mac memory pressure available | 66% before VM; 66% across 3 idle-guest samples |
+| Whole-Mac free pages | 32,262 before VM; 20,738–20,789 across 3 idle-guest samples |
+| Copied store, logical file bytes | 151,145,470 bytes |
+| Host load average, 1/5/15 minute, before | 2.22 / 3.48 / 3.61 |
+| Host load average, 1/5/15 minute, after | 2.19 / 3.44 / 3.59 |
+
+This is one local sample. The small differences from recent samples do not establish a performance change. The warm exec figure is command overhead through the guest control path, not isolated IPC latency. The whole-Mac memory values include unrelated host processes and must not be attributed to Rift. The VM-start metric ends at guest control-share readiness, before overlay setup and workload startup.
+
+## Previous cached benchmark
+
 Apple M2, macOS 26.6, Zig 0.16.0, `ReleaseSafe`, runtime commit `a272cef`, benchmark script commit `fc4c3e5`, 2026-09-28 02:56:35 UTC. One run with the cached store:
 
 | Metric | Result |
@@ -55,7 +83,7 @@ Apple M2, macOS 26.6, Zig 0.16.0, `ReleaseSafe`, runtime commit `a272cef`, bench
 
 This is one local sample. It does not establish a performance change against earlier samples. The warm exec figure is command overhead through the guest control path, not isolated IPC latency. The whole-Mac memory values include unrelated host processes and must not be attributed to Rift. The VM-start metric ends at guest control-share readiness, before overlay setup and workload startup.
 
-## Previous cached benchmark
+## Earlier cached benchmark
 
 Apple M2, macOS 26.6, Zig 0.16.0, `ReleaseSafe`, runtime commit `cdeb627`, benchmark script commit `fc4c3e5`, 2026-09-27 22:18:39 UTC. One run with the cached store:
 
@@ -83,7 +111,7 @@ Apple M2, macOS 26.6, Zig 0.16.0, `ReleaseSafe`, runtime commit `cdeb627`, bench
 
 This is one local sample. The warm exec figure is command overhead through the guest control path, not isolated IPC latency. The whole-Mac memory values include unrelated host processes and must not be attributed to Rift. The VM-start metric ends at guest control-share readiness, before overlay setup and workload startup.
 
-## Earlier cached benchmark
+## Older cached benchmark
 
 Apple M2, macOS 26.6, Zig 0.16.0, `ReleaseSafe`, runtime commit `c5c3dd6`, 2026-09-27 20:36:44 UTC. One run with the cached store:
 
