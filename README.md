@@ -1,7 +1,7 @@
 <div align="center">
   <img src="site/favicon.svg" alt="Rift logo" width="76" height="76">
   <h1>Rift</h1>
-  <p><strong>Lightweight Linux containers for macOS.</strong></p>
+  <p><strong>Ridiculously lightweight containers for macOS.</strong></p>
   <p>No Docker. No daemon. No Docker Desktop. Just one binary.</p>
   <p>
     <a href="https://othmaneblial.github.io/Rift/">Website</a> ·
@@ -14,6 +14,16 @@
 Rift runs Linux containers on Apple Silicon Macs using Apple's Virtualization.framework. Each run gets a lightweight Linux VM. Rift needs no Docker Engine, Docker CLI, Docker Desktop, or always-on service.
 
 > **Source preview:** Rift is under active development. Install from source with Homebrew; signed and notarized macOS downloads are not available yet.
+
+## Quick start
+
+```sh
+brew install OthmaneBlial/rift/rift
+rift pull alpine
+rift run --rm alpine echo "Hello from Rift"
+```
+
+Homebrew uses Zig to build Rift from source. The installed Rift binary needs neither Zig nor Docker.
 
 ## Why Rift on macOS?
 
@@ -33,22 +43,7 @@ Docker Desktop is free for personal, education, non-commercial open-source use, 
 
 Rift is an early source preview, not a drop-in replacement for Docker Desktop. Docker has a broader, mature ecosystem, including workflows Rift does not support. Rift currently targets Apple Silicon and `linux/arm64`, implements a subset of Dockerfile instructions, maps one TCP port per run, and does not yet provide signed or notarized downloads. Choose Rift when a small, local container runtime on macOS matters more than broad Docker compatibility.
 
-## Install
-
-```sh
-brew install OthmaneBlial/rift/rift
-```
-
-Homebrew builds Rift from source and installs Zig for the build. Zig is not needed to run Rift.
-
-## Try it
-
-```sh
-rift pull alpine
-rift run --rm alpine echo "Hello from Rift"
-```
-
-Start a small web server:
+## Run a web server
 
 ```sh
 id=$(rift run -d -p 8080:80 nginx)

@@ -9,10 +9,10 @@ for (const button of document.querySelectorAll("[data-copy]")) {
     try {
       await navigator.clipboard.writeText(source.innerText.trim());
       button.textContent = "Copied";
-      status.textContent = "Build commands copied to clipboard.";
+      status.textContent = "Install command copied to clipboard.";
     } catch {
       button.textContent = "Select code";
-      status.textContent = "Clipboard access unavailable. Select the commands to copy them.";
+      status.textContent = "Clipboard access unavailable. Select the command to copy it.";
     }
 
     status.classList.add("is-visible");
