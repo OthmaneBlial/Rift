@@ -4,6 +4,7 @@
 import argparse
 import datetime
 import json
+import math
 import os
 from pathlib import Path
 import platform
@@ -112,6 +113,26 @@ def virtualization_processes() -> dict[int, int]:
     }
 
 
+def benchmark_duration_ms(control: Path, name: str) -> float:
+    try:
+        elapsed_ns = int((control / name).read_text().strip())
+    except (OSError, ValueError) as error:
+        raise RuntimeError(f"missing or invalid benchmark duration {name}") from error
+    if elapsed_ns < 0:
+        raise RuntimeError(f"negative benchmark duration {name}")
+    return elapsed_ns / 1_000_000
+
+
+def benchmark_measurement_ms(control: Path, name: str) -> float:
+    try:
+        measurement = float((control / name).read_text().strip())
+    except (OSError, ValueError) as error:
+        raise RuntimeError(f"missing or invalid benchmark measurement {name}") from error
+    if not math.isfinite(measurement) or measurement < 0:
+        raise RuntimeError(f"invalid benchmark measurement {name}")
+    return measurement
+
+
 def process_footprints(pids: list[int]) -> Optional[tuple[int, dict[int, int]]]:
     with tempfile.TemporaryDirectory(prefix="rift-footprint-") as directory:
         report = Path(directory) / "footprint.json"
@@ -139,11 +160,13 @@ def measure_worker(binary: Path, env: dict[str, str]) -> dict[str, object]:
     vm_processes_before = set(virtualization_processes())
     system_memory_before = system_memory_snapshot()
     run_started_ns = time.perf_counter_ns()
-    started = run(binary, env, "run", "-d", "alpine", "/bin/sh", "-c", "echo RIFT_BENCH_READY; sleep 60")
+    measurement_env = dict(env, RIFT_BENCHMARK_GUEST_BOOT="1")
+    started = run(binary, measurement_env, "run", "-d", "alpine", "/bin/sh", "-c", "echo RIFT_BENCH_READY; sleep 60")
     identifier = started.stdout.strip()
     if re.fullmatch(r"[0-9a-f]{32}", identifier) is None:
         raise RuntimeError(f"invalid detached container ID: {identifier!r}")
-    boot_measurement = Path(env["HOME"]) / "Library/Application Support/Rift/runtime" / f"run-{identifier}" / "control/guest-boot-ms"
+    control_directory = Path(env["HOME"]) / "Library/Application Support/Rift/runtime" / f"run-{identifier}" / "control"
+    boot_measurement = control_directory / "guest-boot-ms"
     guest_boot_ms = None
     stop_complete = False
     try:
@@ -158,6 +181,18 @@ def measure_worker(binary: Path, env: dict[str, str]) -> dict[str, object]:
                 if guest_boot_ms is None:
                     raise RuntimeError("detached VM exited or became ready without a guest boot measurement")
                 detached_ready_ms = round((time.perf_counter_ns() - run_started_ns) / 1_000_000, 1)
+                network_measurements = [control_directory / name for name in ("guest-network-start-ms", "guest-network-ready-ms")]
+                measurement_deadline = time.monotonic() + 2
+                while not all(path.is_file() for path in network_measurements) and time.monotonic() < measurement_deadline:
+                    time.sleep(0.01)
+                rootfs_assembly_ms = benchmark_duration_ms(control_directory, "benchmark-rootfs-ns")
+                initramfs_write_ms = benchmark_duration_ms(control_directory, "benchmark-initramfs-ns")
+                host_pre_vm_setup_ms = benchmark_duration_ms(control_directory, "benchmark-pre-vm-ns")
+                guest_network_start_ms = benchmark_measurement_ms(control_directory, "guest-network-start-ms")
+                guest_network_ready_ms = benchmark_measurement_ms(control_directory, "guest-network-ready-ms")
+                guest_network_address_acquired = (control_directory / "guest-ip").is_file()
+                if guest_network_start_ms < guest_boot_ms or guest_network_ready_ms < guest_network_start_ms:
+                    raise RuntimeError("guest startup stage measurements are out of order")
                 exec_samples = [timed(binary, env, "exec", identifier, "/bin/true") for _ in range(5)]
                 worker_rss = []
                 vm_rss = []
@@ -196,6 +231,12 @@ def measure_worker(binary: Path, env: dict[str, str]) -> dict[str, object]:
                 return {
                     "vm_start_to_guest_control_ready_ms": guest_boot_ms,
                     "detached_run_to_guest_ready_ms": detached_ready_ms,
+                    "host_pre_vm_setup_ms": round(host_pre_vm_setup_ms, 3),
+                    "rootfs_assembly_ms": round(rootfs_assembly_ms, 3),
+                    "initramfs_write_ms": round(initramfs_write_ms, 3),
+                    "guest_overlay_and_applet_setup_ms": round(guest_network_start_ms - guest_boot_ms, 1),
+                    "guest_network_setup_ms": round(guest_network_ready_ms - guest_network_start_ms, 1),
+                    "guest_network_address_acquired": guest_network_address_acquired,
                     "detached_graceful_stop_ms": detached_stop_ms,
                     "warm_detached_exec_true_ms": [round(sample, 1) for sample in exec_samples],
                     "warm_detached_exec_true_median_ms": round(statistics.median(exec_samples), 1),
@@ -230,7 +271,7 @@ def main() -> None:
     source = Path.home() / "Library/Application Support/Rift"
     with tempfile.TemporaryDirectory(prefix="rift-benchmark-") as home:
         copy_cache(source, Path(home) / "Library/Application Support/Rift")
-        env = dict(os.environ, HOME=home, RIFT_BENCHMARK_GUEST_BOOT="1")
+        env = dict(os.environ, HOME=home)
         before = total_bytes(binary, env)
         load_before = os.getloadavg()
         first = timed(binary, env, "run", "alpine", "/bin/true")

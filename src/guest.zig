@@ -86,6 +86,7 @@ fn makeScript(allocator: std.mem.Allocator, command: []const []const u8, environ
             "     /usr/bin/busybox mount -t overlay overlay -o metacopy=on,lowerdir=/mnt/rift,upperdir=/mnt/state/upper,workdir=/mnt/state/work /mnt/root; then\n" ++
             "    /usr/bin/busybox --install -s /usr/bin >/dev/null 2>&1\n",
     );
+    if (measure_guest_boot) try writer.writeAll("    : > /mnt/control/guest-network-start-ready\n");
     if (network_enabled) {
         try writer.writeAll(
             "    /usr/bin/busybox ip link set eth0 up >/dev/null 2>&1\n" ++
@@ -111,6 +112,7 @@ fn makeScript(allocator: std.mem.Allocator, command: []const []const u8, environ
                 "    fi\n",
         );
     }
+    if (measure_guest_boot) try writer.writeAll("    : > /mnt/control/guest-network-ready\n");
     if (require_network) try writer.writeAll("    if [ -s /mnt/control/guest-ip ]; then\n");
     try writer.writeAll("    /usr/bin/busybox env -i");
     for (environment) |variable| {
@@ -203,6 +205,10 @@ test "shell arguments remain quoted" {
     try std.testing.expect(std.mem.indexOf(u8, script, ": > /mnt/control/guest-boot-ready").? < std.mem.indexOf(u8, script, "mount -t tmpfs -o size=256m").?);
     try std.testing.expect(std.mem.indexOf(u8, script, "if [ -s /mnt/control/guest-ip ]; then") != null);
     try std.testing.expect(std.mem.indexOf(u8, script, "udhcpc -i eth0") != null);
+    const network_start = std.mem.indexOf(u8, script, ": > /mnt/control/guest-network-start-ready").?;
+    const network_setup = std.mem.indexOf(u8, script, "udhcpc -i eth0").?;
+    const network_ready = std.mem.indexOf(u8, script, ": > /mnt/control/guest-network-ready").?;
+    try std.testing.expect(network_start < network_setup and network_setup < network_ready);
     const bare = try makeScript(std.testing.allocator, &.{ "echo", "hello" }, &.{}, "/", "", 15, &.{}, true, false, false, false, false, .{}, .{});
     defer std.testing.allocator.free(bare);
     try std.testing.expect(std.mem.indexOf(u8, bare, "/rift-exec /mnt/root '/' '' 15 0 'echo' 'hello'") != null);
@@ -212,6 +218,7 @@ test "shell arguments remain quoted" {
     try std.testing.expect(std.mem.indexOf(u8, bare, "virtio_net") == null);
     try std.testing.expect(std.mem.indexOf(u8, bare, "udhcpc") == null);
     try std.testing.expect(std.mem.indexOf(u8, bare, "guest-boot-ready") == null);
+    try std.testing.expect(std.mem.indexOf(u8, bare, "guest-network-ready") == null);
     try std.testing.expect(std.mem.indexOf(u8, bare, "wait \"$workload_pid\"") != null);
     const workdir = try makeScript(std.testing.allocator, &.{"/bin/pwd"}, &.{}, "/tmp/a'b", "nobody", 15, &.{}, false, false, false, false, false, .{}, .{});
     defer std.testing.allocator.free(workdir);

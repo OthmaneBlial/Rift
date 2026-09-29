@@ -12,6 +12,8 @@ const vm = @import("vm.zig");
 
 pub fn execute(init: std.process.Init, arguments: []const []const u8, stop_path: ?[]const u8, kill_path: ?[]const u8, container_id: ?[]const u8) !u8 {
     if (builtin.os.tag != .macos or builtin.cpu.arch != .aarch64) return error.UnsupportedHost;
+    const measure_guest_boot = if (init.environ_map.get("RIFT_BENCHMARK_GUEST_BOOT")) |value| std.mem.eql(u8, value, "1") else false;
+    const benchmark_started_ns: ?i96 = if (measure_guest_boot) Io.Clock.now(.awake, init.io).nanoseconds else null;
     const allocator = init.arena.allocator();
     const options = try parseOptions(allocator, arguments);
     try validateResources(options);
@@ -93,12 +95,15 @@ pub fn execute(init: std.process.Init, arguments: []const []const u8, stop_path:
     const staged_volumes = try stageFileVolumes(allocator, init.io, run_dir, volumes);
     var image_root = try run_dir.openDir(init.io, "rootfs", .{});
     defer image_root.close(init.io);
+    const rootfs_assembly_started_ns: ?i96 = if (measure_guest_boot) Io.Clock.now(.awake, init.io).nanoseconds else null;
     try rootfs.assemble(allocator, init.io, image_root, control, store, manifest_digest);
+    if (rootfs_assembly_started_ns) |started_ns| try writeBenchmarkDuration(allocator, init.io, control, "benchmark-rootfs-ns", started_ns);
     store.unlock();
     cache_locked = false;
     const interactive = try Io.File.stdin().isTty(init.io);
-    const measure_guest_boot = if (init.environ_map.get("RIFT_BENCHMARK_GUEST_BOOT")) |value| std.mem.eql(u8, value, "1") else false;
+    const initramfs_write_started_ns: ?i96 = if (measure_guest_boot) Io.Clock.now(.awake, init.io).nanoseconds else null;
     try guest.writeInitramfs(allocator, init.io, base_initramfs, run_dir, command, environment, working_dir, process.User orelse "", stop_signal, staged_volumes, interactive, options.network_enabled, port != null, measure_guest_boot, false, .{ .pids = options.pids_limit, .cpu_milli = options.cpu_limit_milli, .memory_bytes = options.memory_limit_bytes }, .{ .none = options.capability_profile == .none, .add_mask = options.capability_add_mask, .drop_mask = options.capability_drop_mask });
+    if (initramfs_write_started_ns) |started_ns| try writeBenchmarkDuration(allocator, init.io, control, "benchmark-initramfs-ns", started_ns);
 
     var root_path_buffer: [Io.Dir.max_path_bytes]u8 = undefined;
     var control_path_buffer: [Io.Dir.max_path_bytes]u8 = undefined;
@@ -111,6 +116,7 @@ pub fn execute(init: std.process.Init, arguments: []const []const u8, stop_path:
     const kernel_path = try std.fmt.allocPrint(allocator, "{s}/Image", .{guest_path});
     const initramfs_path = try std.fmt.allocPrint(allocator, "{s}/initramfs", .{run_path});
 
+    if (benchmark_started_ns) |started_ns| try writeBenchmarkDuration(allocator, init.io, control, "benchmark-pre-vm-ns", started_ns);
     vm.run(allocator, kernel_path, initramfs_path, "console=hvc0 quiet loglevel=0 rdinit=/rift-init", root_path, control_path, stop_path, kill_path, staged_volumes, options.network_enabled, port, measure_guest_boot, options.cpu_count, options.memory_size, 0, 1) catch |err| {
         if (container_id) |id| {
             control.writeFile(init.io, .{ .sub_path = "host-exit", .data = "" }) catch {};
@@ -133,6 +139,14 @@ pub fn execute(init: std.process.Init, arguments: []const []const u8, stop_path:
     if (code > 255) return error.GuestStatusInvalid;
     if (container_id) |id| try waitForExecClients(init, id);
     return @intCast(code);
+}
+
+fn writeBenchmarkDuration(allocator: std.mem.Allocator, io: Io, control: Io.Dir, name: []const u8, started_ns: i96) !void {
+    const elapsed_ns = Io.Clock.now(.awake, io).nanoseconds - started_ns;
+    if (elapsed_ns < 0) return error.MonotonicClockWentBackwards;
+    const contents = try std.fmt.allocPrint(allocator, "{d}\n", .{elapsed_ns});
+    defer allocator.free(contents);
+    try control.writeFile(io, .{ .sub_path = name, .data = contents });
 }
 
 fn waitForExecClients(init: std.process.Init, id: []const u8) !void {

@@ -1,5 +1,6 @@
 #import <Foundation/Foundation.h>
 #import <Virtualization/Virtualization.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
 #include <stdio.h>
@@ -33,11 +34,11 @@ static int request_guest_stop(const char *control_path) {
     return close(descriptor);
 }
 
-static int write_guest_boot_ms(const char *control_path, double milliseconds) {
+static int write_guest_measurement_ms(const char *control_path, const char *name, double milliseconds) {
     char temporary_path[PATH_MAX];
     char result_path[PATH_MAX];
-    int temporary_length = snprintf(temporary_path, sizeof(temporary_path), "%s/guest-boot-ms.tmp", control_path);
-    int result_length = snprintf(result_path, sizeof(result_path), "%s/guest-boot-ms", control_path);
+    int temporary_length = snprintf(temporary_path, sizeof(temporary_path), "%s/%s.tmp", control_path, name);
+    int result_length = snprintf(result_path, sizeof(result_path), "%s/%s", control_path, name);
     if (temporary_length < 0 || temporary_length >= (int)sizeof(temporary_path) ||
         result_length < 0 || result_length >= (int)sizeof(result_path)) return -1;
     int descriptor = open(temporary_path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
@@ -51,6 +52,19 @@ static int write_guest_boot_ms(const char *control_path, double milliseconds) {
         return -1;
     }
     return 0;
+}
+
+static int record_guest_marker_ms(const char *control_path, const char *marker, const char *result,
+                                  const struct timespec *started) {
+    char ready_path[PATH_MAX];
+    int ready_length = snprintf(ready_path, sizeof(ready_path), "%s/%s", control_path, marker);
+    if (ready_length < 0 || ready_length >= (int)sizeof(ready_path)) return -1;
+    if (access(ready_path, F_OK) != 0) return errno == ENOENT ? 0 : -1;
+    struct timespec finished;
+    if (clock_gettime(CLOCK_MONOTONIC, &finished) != 0) return -1;
+    double milliseconds = (finished.tv_sec - started->tv_sec) * 1000.0 +
+        (finished.tv_nsec - started->tv_nsec) / 1000000.0;
+    return write_guest_measurement_ms(control_path, result, milliseconds) == 0 ? 1 : -1;
 }
 
 @interface RiftVMDelegate : NSObject <VZVirtualMachineDelegate>
@@ -177,26 +191,30 @@ int rift_vm_run(const char *kernel_path, const char *initramfs_path, const char 
         NSTimeInterval stopRequestedAt = 0;
         BOOL guestBootMeasured = NO;
         BOOL guestBootMeasurementFailed = NO;
+        BOOL guestNetworkStartMeasured = NO;
+        BOOL guestNetworkStartMeasurementFailed = NO;
+        BOOL guestNetworkReadyMeasured = NO;
+        BOOL guestNetworkReadyMeasurementFailed = NO;
         while (!delegate.finished) {
             if (measure_guest_boot && !guestBootMeasured) {
-                char ready_path[PATH_MAX];
-                int ready_length = snprintf(ready_path, sizeof(ready_path), "%s/guest-boot-ready", control_path);
-                if (ready_length < 0 || ready_length >= (int)sizeof(ready_path)) {
-                    guestBootMeasurementFailed = YES;
+                int result = record_guest_marker_ms(control_path, "guest-boot-ready", "guest-boot-ms", &guestBootStarted);
+                if (result != 0) {
+                    guestBootMeasurementFailed = result < 0;
                     guestBootMeasured = YES;
-                } else if (access(ready_path, F_OK) == 0) {
-                    struct timespec guestBootFinished;
-                    if (clock_gettime(CLOCK_MONOTONIC, &guestBootFinished) != 0) {
-                        guestBootMeasurementFailed = YES;
-                    } else {
-                        double milliseconds = (guestBootFinished.tv_sec - guestBootStarted.tv_sec) * 1000.0 +
-                            (guestBootFinished.tv_nsec - guestBootStarted.tv_nsec) / 1000000.0;
-                        if (write_guest_boot_ms(control_path, milliseconds) != 0) {
-                            fprintf(stderr, "rift-vm: could not record guest boot measurement\n");
-                            guestBootMeasurementFailed = YES;
-                        }
-                    }
-                    guestBootMeasured = YES;
+                }
+            }
+            if (measure_guest_boot && !guestNetworkStartMeasured) {
+                int result = record_guest_marker_ms(control_path, "guest-network-start-ready", "guest-network-start-ms", &guestBootStarted);
+                if (result != 0) {
+                    guestNetworkStartMeasurementFailed = result < 0;
+                    guestNetworkStartMeasured = YES;
+                }
+            }
+            if (measure_guest_boot && !guestNetworkReadyMeasured) {
+                int result = record_guest_marker_ms(control_path, "guest-network-ready", "guest-network-ready-ms", &guestBootStarted);
+                if (result != 0) {
+                    guestNetworkReadyMeasurementFailed = result < 0;
+                    guestNetworkReadyMeasured = YES;
                 }
             }
             if (stop_path && !stopRequested && access(stop_path, F_OK) == 0 && machine.state == VZVirtualMachineStateRunning) {
@@ -227,8 +245,10 @@ int rift_vm_run(const char *kernel_path, const char *initramfs_path, const char 
         }
         machine.delegate = nil;
         rift_forward_stop(forwarder);
-        if (measure_guest_boot && (!guestBootMeasured || guestBootMeasurementFailed)) {
-            fprintf(stderr, "rift-vm: guest boot measurement did not complete\n");
+        if (measure_guest_boot && (!guestBootMeasured || guestBootMeasurementFailed ||
+                                   !guestNetworkStartMeasured || guestNetworkStartMeasurementFailed ||
+                                   !guestNetworkReadyMeasured || guestNetworkReadyMeasurementFailed)) {
+            fprintf(stderr, "rift-vm: guest startup measurements did not complete\n");
             return 1;
         }
         if (killRequested && !stopFailed && delegate.result == 0) return 5;
