@@ -127,7 +127,7 @@ These gates are tracked separately from the local completion score. Remaining wo
 - [ ] Repeat performance measurements across more Macs.
 - [ ] Run the full runtime workflow on macOS 12 to verify the oldest declared host version.
 - [ ] Sign and notarize macOS binaries; publish release assets and checksums.
-- [x] Refresh and verify the live [GitHub Pages site](https://othmaneblial.github.io/Rift/) with the Docker Desktop comparison (Pages commit `08637e3`).
+- [x] Refresh and verify the live [GitHub Pages site](https://othmaneblial.github.io/Rift/) with the Docker Desktop comparison and v0.2.0 install path (Pages commit `e767737`).
 - [ ] Complete an independent adversarial assessment of the VM boundary and residual host/guest races.
 
 Rift remains an early source preview. Local checks do not establish registry-wide compatibility, a complete Docker replacement, or a signed and notarized release.
