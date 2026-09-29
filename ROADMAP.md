@@ -120,14 +120,14 @@ This roadmap carries the original plan forward from the first project commit. `[
 
 ## External verification gates
 
-These need another host, provider credentials, Apple signing credentials, an independent reviewer, or publication to the public Pages repository. They are excluded from the local completion score and remain unchecked.
+These gates are tracked separately from the local completion score. Remaining work depends on additional hosts, registry credentials, Apple signing, or an independent reviewer.
 
 - [ ] Extend host and guest architecture support beyond Apple Silicon macOS and `linux/arm64`.
 - [ ] Verify private registry providers beyond the local Bearer-auth fixture.
 - [ ] Repeat performance measurements across more Macs.
 - [ ] Run the full runtime workflow on macOS 12 to verify the oldest declared host version.
 - [ ] Sign and notarize macOS binaries; publish release assets and checksums.
-- [ ] Refresh and verify the live GitHub Pages site after the local scope is complete.
+- [x] Refresh and verify the live [GitHub Pages site](https://othmaneblial.github.io/Rift/) with the Docker Desktop comparison (Pages commit `08637e3`).
 - [ ] Complete an independent adversarial assessment of the VM boundary and residual host/guest races.
 
 Rift remains an early source preview. Local checks do not establish registry-wide compatibility, a complete Docker replacement, or a signed and notarized release.
