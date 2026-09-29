@@ -29,6 +29,7 @@
       </a>
       <span class="topbar-note">A small Linux runtime for macOS</span>
       <nav aria-label="Main navigation">
+        <a href="#comparison">Why Rift</a>
         <a href="#how-it-works">How it works</a>
         <a href="#build">Build</a>
         <a href="https://github.com/OthmaneBlial/Rift/releases/tag/v0.1.0">Release</a>
@@ -76,6 +77,44 @@
         <p class="spec-caveat">Configuration values; total host resource use varies. <a href="https://github.com/OthmaneBlial/Rift/blob/main/docs/BENCHMARKS.md">See benchmark method ↗</a></p>
       </section>
 
+      <section class="comparison section-wrap" id="comparison">
+        <div class="comparison-heading">
+          <div>
+            <p class="eyebrow">A LIGHTER WAY TO RUN CONTAINERS</p>
+            <h2>Docker is capable.<br><span>Rift keeps it small.</span></h2>
+          </div>
+          <p>Docker Desktop is a mature, full-featured platform. For a few local Linux workloads on an Apple Silicon Mac, its managed VM, desktop app, and supporting services may be more than you need.</p>
+        </div>
+
+        <div class="comparison-grid">
+          <article class="comparison-card comparison-docker">
+            <p class="comparison-label">DOCKER DESKTOP FOR MAC</p>
+            <h3>A complete container workspace</h3>
+            <dl>
+              <div><dt>Runtime</dt><dd>Docker Engine inside a Linux VM managed by Docker Desktop. A backend also handles networking, control-plane calls, and host-file access.</dd></div>
+              <div><dt>Memory</dt><dd>4 GB host RAM minimum. VM memory limit defaults to 50% of host RAM, plus 1 GB swap. On a 16 GB Mac, that is an 8 GB VM limit—not a claim of actual use.</dd></div>
+              <div><dt>Disk and files</dt><dd>Images and containers live in a VM disk image; its maximum is not the same as space used. Sharing many host files can add CPU and filesystem overhead.</dd></div>
+              <div><dt>Idle</dt><dd>Resource Saver can power down the VM. Docker documents a 3–10 second restart when it is needed again.</dd></div>
+            </dl>
+          </article>
+
+          <article class="comparison-card comparison-rift">
+            <p class="comparison-label">RIFT · SOURCE PREVIEW</p>
+            <h3>A focused runtime for macOS</h3>
+            <dl>
+              <div><dt>Runtime</dt><dd>One CLI starts one disposable Linux VM per run through Apple’s Virtualization.framework. No Docker Engine, Docker Desktop, or shared Rift daemon.</dd></div>
+              <div><dt>Memory</dt><dd>2 vCPU and 256 MiB guest RAM by default. Three idle M2 samples measured a median 154.7 MiB process footprint for the Rift worker and VM service; this excludes kernel and other host memory.</dd></div>
+              <div><dt>Disk</dt><dd>2.06 MB optimized executable. A measured Homebrew install plus first-use guest boot files occupied 45.9 MiB, before image downloads.</dd></div>
+              <div><dt>Startup and files</dt><dd>Cached Alpine launch median: 1.13 seconds on one M2 Mac. Mount only requested host paths; up to 16 volumes and one localhost TCP mapping per run.</dd></div>
+            </dl>
+          </article>
+        </div>
+
+        <p class="comparison-note">These are different measurements, not a head-to-head benchmark: Docker’s figure is a configurable VM memory limit; Rift’s is an idle process-footprint sample. Active workloads and other Macs will differ. See the <a href="https://docs.docker.com/desktop/setup/install/mac-install/">Docker Mac requirements</a>, <a href="https://docs.docker.com/desktop/features/networking/">VM architecture</a>, <a href="https://docs.docker.com/desktop/settings-and-maintenance/settings/">resource settings</a>, <a href="https://docs.docker.com/desktop/troubleshoot-and-support/faqs/macfaqs/">disk-image FAQ</a>, and <a href="https://github.com/OthmaneBlial/Rift/blob/main/docs/BENCHMARKS.md">Rift benchmark notes</a>.</p>
+        <p class="comparison-scope">Docker Desktop has a broader, mature ecosystem. Rift is an early Apple Silicon preview: `linux/arm64` images, a subset of Dockerfile, and no signed or notarized downloads yet. Choose Rift for a small local workflow; use Docker Desktop when your work depends on features Rift does not support.</p>
+        <p class="comparison-license">Docker Desktop is free for personal, education, non-commercial open-source use, and small businesses below both 250 employees and $10 million annual revenue. Larger businesses and government use require a paid subscription under <a href="https://docs.docker.com/subscription-billing/desktop-license/">Docker’s license terms</a>.</p>
+      </section>
+
       <section class="architecture section-wrap" id="how-it-works">
         <div class="section-heading">
           <p class="eyebrow">02 / UNDER THE SURFACE</p>
@@ -112,7 +151,7 @@
           <article class="cap-item"><span class="cap-number">C</span><div><h3>Networking and shares</h3><p>Outbound networking, one localhost TCP port, and explicit read-only or writable file and directory volumes.</p></div></article>
           <article class="cap-item"><span class="cap-number">D</span><div><h3>Detached lifecycle</h3><p>Run, list containers, read logs, stop or kill a container, and reclaim unreferenced image data.</p></div></article>
         </div>
-        <div class="scope-note"><span class="scope-mark">!</span><p><strong>Early-stage software.</strong> OCI ownership, PAX metadata, extended attributes, special files and broader process isolation are still incomplete. Rift is not a Docker replacement yet.</p><a href="https://github.com/OthmaneBlial/Rift#status">Full status ↗</a></div>
+        <div class="scope-note"><span class="scope-mark">!</span><p><strong>Early-stage software.</strong> OCI ownership, PAX metadata, extended attributes, special files and broader process isolation are still incomplete. Rift is not a Docker replacement yet.</p><a href="https://github.com/OthmaneBlial/Rift#requirements-and-limits">Full status ↗</a></div>
       </section>
 
       <section class="build-section" id="build">

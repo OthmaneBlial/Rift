@@ -81,6 +81,30 @@ h1 span, h2 span { color: var(--rust); }
 .spec-caveat { margin: 0; color: #767c73; font-size: .58rem; line-height: 1.6; }
 .spec-caveat a { display: inline-block; margin-top: .4rem; color: var(--forest); text-underline-offset: 3px; }
 
+.comparison { padding-block: 7rem; }
+.comparison-heading { display: grid; grid-template-columns: 1fr .78fr; align-items: end; gap: 4rem; margin-bottom: 2.3rem; }
+.comparison-heading h2 { margin: 0; }
+.comparison-heading > p { max-width: 450px; margin: 0 0 .25rem; color: var(--ink-muted); font-size: .9rem; line-height: 1.75; }
+.comparison-grid { display: grid; grid-template-columns: 1fr 1fr; border: 1px solid var(--line); background: var(--paper-deep); }
+.comparison-card { padding: 1.7rem 1.8rem; }
+.comparison-docker { border-right: 1px solid var(--line); }
+.comparison-rift { background: var(--forest-dark); color: var(--paper); }
+.comparison-label { margin-bottom: .75rem; color: var(--rust); font: .58rem var(--mono); letter-spacing: .08em; }
+.comparison-rift .comparison-label { color: var(--acid); }
+.comparison-card h3 { margin-bottom: 1.2rem; font-family: var(--display); font-size: 1.8rem; font-weight: 600; letter-spacing: -.02em; }
+.comparison-card dl { margin: 0; }
+.comparison-card dl > div { display: grid; grid-template-columns: 6.8rem 1fr; gap: .9rem; padding-block: .85rem; border-top: 1px solid var(--line); }
+.comparison-rift dl > div { border-color: rgba(255,255,255,.18); }
+.comparison-card dt { color: var(--forest); font: 600 .6rem var(--mono); letter-spacing: .035em; text-transform: uppercase; }
+.comparison-rift dt { color: var(--acid); }
+.comparison-card dd { margin: 0; color: var(--ink-muted); font-size: .74rem; line-height: 1.65; }
+.comparison-rift dd { color: #c0cabd; }
+.comparison-note, .comparison-license { color: #777c73; font: .58rem/1.7 var(--mono); }
+.comparison-note { margin: 1rem 0 0; }
+.comparison-note a, .comparison-license a { color: var(--forest); text-underline-offset: 3px; }
+.comparison-scope { margin: 1.35rem 0 .9rem; padding: .95rem 1.1rem; border-left: 3px solid var(--rust); background: var(--paper-deep); color: var(--ink-muted); font-size: .78rem; line-height: 1.7; }
+.comparison-license { margin-bottom: 0; }
+
 .architecture { display: grid; grid-template-columns: .82fr 1.18fr; align-items: center; gap: 5rem; padding-block: 8rem; }
 .section-heading { max-width: 410px; }
 h2 { margin-bottom: 1rem; font-size: clamp(3rem, 4.5vw, 4.5rem); line-height: .95; }
@@ -160,6 +184,9 @@ h2 { margin-bottom: 1rem; font-size: clamp(3rem, 4.5vw, 4.5rem); line-height: .9
 @media (max-width: 900px) {
   .topbar-note { display: none; }
   .hero { grid-template-columns: 1fr 1fr; gap: 2rem; }
+  .comparison-heading { gap: 2rem; }
+  .comparison-card { padding: 1.4rem; }
+  .comparison-card dl > div { grid-template-columns: 5.5rem 1fr; gap: .7rem; }
   .architecture { grid-template-columns: 1fr; gap: 2rem; padding-block: 6rem; }
   .section-heading { max-width: 600px; }
   .architecture-map { max-width: 720px; width: 100%; justify-self: center; }
@@ -196,6 +223,18 @@ h2 { margin-bottom: 1rem; font-size: clamp(3rem, 4.5vw, 4.5rem); line-height: .9
   .spec-value small { font-size: .56rem; }
   .spec-label { padding-right: .4rem; font-size: .51rem; }
   .spec-caveat { font-size: .52rem; }
+  .comparison { padding-block: 4.5rem; }
+  .comparison-heading { grid-template-columns: 1fr; gap: .9rem; margin-bottom: 1.5rem; }
+  .comparison-heading > p { font-size: .84rem; }
+  .comparison-grid { grid-template-columns: 1fr; }
+  .comparison-docker { border-right: 0; border-bottom: 1px solid var(--line); }
+  .comparison-card { padding: 1.15rem; }
+  .comparison-card h3 { font-size: 1.55rem; }
+  .comparison-card dl > div { grid-template-columns: 5.3rem 1fr; gap: .55rem; padding-block: .72rem; }
+  .comparison-card dt { font-size: .53rem; }
+  .comparison-card dd { font-size: .69rem; }
+  .comparison-note, .comparison-license { font-size: .53rem; }
+  .comparison-scope { padding: .8rem; font-size: .71rem; }
   .architecture { gap: 1.5rem; padding-block: 4.5rem; }
   h2 { font-size: clamp(2.85rem, 12vw, 3.7rem); }
   .section-heading > p:last-child { font-size: .86rem; }
