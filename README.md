@@ -15,6 +15,24 @@ Rift runs Linux containers on Apple Silicon Macs using Apple's Virtualization.fr
 
 > **Source preview:** Rift is under active development. Install from source with Homebrew; signed and notarized macOS downloads are not available yet.
 
+## Why Rift on macOS?
+
+Docker Desktop is a capable, mature platform. Its extra VM, desktop app, and background services can be more than you need when you only want to run a few Linux containers locally. Rift is built for that smaller job.
+
+| | Docker Desktop for Mac | Rift |
+| --- | --- | --- |
+| Runtime | Docker Engine runs inside a Linux VM managed by Docker Desktop, alongside its macOS app and supporting services. | One small CLI starts a Linux VM for each run through Apple's Virtualization.framework. No Docker Engine, Docker Desktop, or persistent Rift daemon. |
+| Memory | Docker lists 4 GB of host RAM as its minimum. Its Linux VM memory limit defaults to 50% of host RAM, with 1 GB swap. On a 16 GB Mac, that is an 8 GB VM limit; it is a configurable ceiling, not a claim that Docker always uses 8 GB. | Each VM defaults to 2 CPUs and 256 MiB of guest RAM. In one idle sample on an M2 Mac, the Rift worker and VM service together had a 151.3 MiB process footprint. That excludes kernel and other system memory; it is one measurement, not a universal total-RAM figure. |
+| Disk | Images and containers live in a VM disk image. Its configured maximum is not the same as actual disk space used. | A measured Homebrew install plus first-use guest boot files occupied 45.9 MiB, before image downloads. |
+| Idle behavior | Resource Saver can stop the Linux VM while idle; Docker documents a 3–10 second restart when it is needed again. | No always-on Rift service to keep running. Starting a container still boots its VM. |
+| Host files | File sharing into the Linux VM can add overhead; Docker notes that sharing many files can increase CPU use and slow filesystem operations. | Mount only the host files or directories you specify. Rift currently supports up to 16 volumes per run. |
+
+Docker Desktop's macOS installer requires a supported macOS release (the current and two previous major releases) and at least 4 GB of RAM. See Docker's [Mac requirements](https://docs.docker.com/desktop/setup/install/mac-install/), [VM and backend architecture](https://docs.docker.com/desktop/features/networking/), [resource settings](https://docs.docker.com/desktop/settings-and-maintenance/settings/), and [disk-image FAQ](https://docs.docker.com/desktop/troubleshoot-and-support/faqs/macfaqs/). Rift's measurements and exact method are in [benchmarks](docs/BENCHMARKS.md).
+
+Docker Desktop is free for personal, education, non-commercial open-source use, and small businesses with fewer than 250 employees and under $10 million in annual revenue. Larger businesses and government use require a paid subscription under Docker's [license terms](https://docs.docker.com/subscription-billing/desktop-license/).
+
+Rift is an early source preview, not a drop-in replacement for Docker Desktop. Docker has a broader, mature ecosystem, including workflows Rift does not support. Rift currently targets Apple Silicon and `linux/arm64`, implements a subset of Dockerfile instructions, maps one TCP port per run, and does not yet provide signed or notarized downloads. Choose Rift when a small, local container runtime on macOS matters more than broad Docker compatibility.
+
 ## Install
 
 ```sh
