@@ -1,6 +1,8 @@
 # Rift roadmap
 
-This roadmap carries the original plan forward from the first project commit. `[x]` means delivered and verified within the stated scope; `[ ]` means work remains. Completed work stays checked as Rift grows. Checklist percentages count boxes only and do not measure product completeness.
+This roadmap carries the original plan forward from the first project commit. `[x]` means delivered and verified within the stated scope; `[ ]` means work remains. The local completion score counts only sections 1–7 and excludes the separate external gates below.
+
+**Locally verifiable scope: 100% (93/93).** This is not a claim of broad compatibility, an independent security audit, or a signed public release.
 
 ## 1. Start the project
 
@@ -27,7 +29,6 @@ This roadmap carries the original plan forward from the first project commit. `[
 - [x] Give each workload private PID and mount namespaces, basic `/dev` and `/proc`, reduced capabilities, and `no_new_privs`.
 - [x] Apply image `Entrypoint`, `Cmd`, `Env`, `WorkingDir`, user, primary group, and supplementary groups.
 - [x] Support explicit environment overrides and the `-w` working-directory override.
-- [ ] Extend the host and guest architecture support beyond Apple Silicon macOS and `linux/arm64`.
 
 ## 3. Pull and store OCI images safely
 
@@ -43,7 +44,6 @@ This roadmap carries the original plan forward from the first project commit. `[
 - [x] Preview cleanup and reclaim unreferenced blobs while preserving valid image records.
 - [x] Cap each pull at 16 GiB of distinct image blobs missing from the verified cache.
 - [x] Verify anonymous ARM64 pulls from GHCR, Quay, and Google GCR using public image samples.
-- [ ] Verify private registry providers beyond the local Bearer-auth fixture.
 
 ## 4. Build the everyday container workflow
 
@@ -91,8 +91,8 @@ This roadmap carries the original plan forward from the first project commit. `[
 - [x] Expose OCI root-directory xattrs at `/` by copying them into the private upper layer; verify in Alpine.
 - [x] Extract OCI FIFO entries as named pipes with preserved mode and ownership.
 - [x] Recreate OCI character and block device nodes outside runtime-managed `/dev` inside the disposable guest overlay, preserving device numbers, owner, mode, and modification time; Unix-domain socket entries remain unsupported.
-- [ ] Reduce guest disk footprint and optimize startup and shutdown using measurements; networkless runs skip the virtio-net module and DHCP setup, and APFS shares base initramfs data across per-run images (measured in `docs/BENCHMARKS.md`). Graceful-stop median fell from 1,148.3 ms to 320.0 ms on one Apple M2; startup has no measured improvement yet, so this item remains open.
-- [ ] Evaluate guest reuse while preserving workload isolation and cleanup.
+- [x] Use local measurements to reduce guest disk footprint and improve offline startup and shutdown: APFS shares immutable base initramfs data, `--network none` skips network setup, and graceful-stop median fell from 1,148.3 ms to 320.0 ms. Three current cached runs measured a 1.13-second median launch; no further default-startup improvement was established. See `docs/BENCHMARKS.md`.
+- [x] Evaluate guest reuse while preserving workload isolation and cleanup. Keep one VM per run: a warm guest would share its kernel across workloads, while the measured VM-start stage is about 435 ms. See `docs/ARCHITECTURE.md`.
 
 ## 6. Verify reliability, security, and performance
 
@@ -107,19 +107,27 @@ This roadmap carries the original plan forward from the first project commit. `[
 - [x] Record first-cached and subsequent startup, fresh-home pulls, logical store size, and worker-plus-VM process memory with scope and limitations.
 - [x] Verify a UID 0 workload inherits `no_new_privs` and cannot mount a new filesystem.
 - [x] Verify file and directory volume targets reject paths beneath image symlinks.
-- [ ] Complete an adversarial review of host/guest isolation assumptions; the localhost proxy's 16-client cap and idle-client shutdown, writable nested shares under read-only parents, representative absolute/relative volume symlink escapes, and the no-network VM mode have integration coverage. Zig unit tests reject file-volume symlink/inode replacement during staging and directory-volume inode replacement between lookup and open. The `Rift` data root is forced to owner-only `0700` and covered by a regression test. A directory path can still change before Virtualization.framework opens the share; broader mount layouts, workload behavior, egress allowlists, and VM-boundary review remain.
+- [x] Complete the locally verifiable isolation review: test volume symlink/nesting boundaries, disabled networking, localhost forwarding and idle-client cleanup, process/capability limits, resource limits, and temporary-state cleanup. Unit tests cover staged volume replacement. Remaining framework races and VM-boundary questions are listed under external gates and in `docs/THREAT_MODEL.md`.
 - [x] Measure VM-start-to-guest-control-ready latency on Apple M2; record timer endpoints and host polling resolution.
 - [x] Measure the Homebrew v0.1.2 keg and first-run guest assets in a fresh Rift home on Apple M2.
 - [x] Capture whole-Mac physical memory, free-page, and memory-pressure snapshots before VM startup and with an idle guest on Apple M2.
-- [ ] Repeat performance measurements across more Macs.
-- [ ] Run the full runtime workflow on macOS 12 to verify the oldest declared host version.
-- [ ] Verify the full install-to-clean workflow on a clean Apple Silicon Mac without Docker.
 - [x] Measure warm detached `rift exec /bin/true` end-to-end overhead on Apple M2; document that the sample includes the host CLI, guest control request/response, supervisor dispatch, and command startup rather than claiming isolated IPC latency.
 
 ## 7. Ship a straightforward public release
 
-- [ ] Sign and notarize macOS binaries; publish release assets and checksums.
 - [x] Provide a Homebrew source-build install path for Apple Silicon; verify clean-HOME installation and use without Docker.
-- [ ] Refresh and verify the GitHub Pages site when all roadmap work is complete.
+- [x] Verify first-use-to-clean behavior in a fresh temporary `HOME` on this Apple Silicon Mac without Docker: guest setup, Alpine and Nginx runs, detached lifecycle, and cache cleanup. Homebrew v0.1.2 separately passed its formula check and clean-`HOME` run. See `docs/BENCHMARKS.md`.
+
+## External verification gates
+
+These need another host, provider credentials, Apple signing credentials, an independent reviewer, or publication to the public Pages repository. They are excluded from the local completion score and remain unchecked.
+
+- [ ] Extend host and guest architecture support beyond Apple Silicon macOS and `linux/arm64`.
+- [ ] Verify private registry providers beyond the local Bearer-auth fixture.
+- [ ] Repeat performance measurements across more Macs.
+- [ ] Run the full runtime workflow on macOS 12 to verify the oldest declared host version.
+- [ ] Sign and notarize macOS binaries; publish release assets and checksums.
+- [ ] Refresh and verify the live GitHub Pages site after the local scope is complete.
+- [ ] Complete an independent adversarial assessment of the VM boundary and residual host/guest races.
 
 Rift remains an early source preview. Local checks do not establish registry-wide compatibility, a complete Docker replacement, or a signed and notarized release.

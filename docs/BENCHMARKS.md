@@ -15,6 +15,8 @@ zig build -Doptimize=ReleaseSafe benchmark
 
 The benchmark copies local image blobs, image records, and guest boot files into a temporary `HOME`; setup and copying are outside the timed region. It measures one Alpine `/bin/true` launch, five subsequent launches, five `rift version` calls, VM-start-to-guest-control-ready latency, detached-run-to-workload-ready latency, and five warm `rift exec <id> /bin/true` calls. The VM timer starts immediately before `startWithCompletionHandler` and stops when the host observes an initramfs marker written after the guest mounts the rootfs and control VirtioFS shares, before overlay setup, DHCP, or workload execution. Host polling checks for this marker about every 10 ms.
 
+Benchmark-only stage instrumentation is enabled only for the detailed detached VM sample; timed foreground launches do not write or poll benchmark markers. The detached duration is captured as soon as its workload-ready log appears. The script then allows up to two seconds for the host-side marker measurements to arrive, outside that duration, and reads the guest DHCP address before stopping the VM removes its temporary control directory.
+
 Warm `exec` timing starts a fresh host CLI process for each call against the already-ready detached VM. It includes host request creation, guest control-share polling and dispatch, `/bin/true` startup, and result collection. It is end-to-end command overhead, not an isolated VirtioFS latency measurement. The five calls run before the idle-guest memory samples.
 
 The detached timer starts before `rift run -d` and stops when the first `rift logs` poll returns the workload-ready marker. It includes host rootfs setup, VM startup, workload execution, and log polling; it excludes the later RSS and footprint sampling. Each launch starts a new VM. Graceful shutdown timing starts immediately before `rift stop` on that ready VM and ends when the command returns; it includes guest stop delivery and teardown plus the Virtualization.framework stop callback, but excludes `rift rm`.
@@ -34,6 +36,27 @@ On APFS, Rift uses `fclonefileat` to clone the immutable installed `initramfs-vi
 To measure the base-file storage effect, 12 temporary clones of the installed 10,161,578-byte initramfs reduced free space by 12,288 bytes. After removing those clones, 12 full copies reduced free space by 121,958,400 bytes for 121,938,936 logical bytes. Both groups were created under `~/Library/Application Support/Rift`; the temporary directory was removed. `shutil.disk_usage` reports free space for the whole volume, so the 12 KiB clone delta includes filesystem metadata and measurement noise. Each actual run also appends its own script and guest executor CPIO entries, which consume space in both cases. Treat this as evidence that cloning avoids roughly 122 MB of duplicate base data across these 12 files on this volume, not an exact per-file allocation guarantee.
 
 The cached runtime benchmark showed no startup improvement: one pre-change sample measured 1,100.0 ms for subsequent Alpine launches and 433.828 ms to guest control readiness; one post-change sample measured 1,109.4 ms and 435.95 ms. One sample per revision is insufficient to infer a difference. Guest shutdown was not changed in those samples.
+
+## Startup stages after profiling
+
+Apple M2, macOS 26.6, Zig 0.16.0, `ReleaseSafe`, source tree committed as `73e7935`; three independent runs on 2026-09-29 at 08:18, 08:27, and 08:28 UTC. Each used the same cached Alpine store (151,145,470 logical bytes). Five normal foreground launches were timed per run; stage markers were enabled only for the separate detailed detached sample.
+
+| Metric | Run 1 | Run 2 | Run 3 | Median |
+| --- | ---: | ---: | ---: | ---: |
+| Optimized executable size | 2,060,048 bytes | 2,060,048 bytes | 2,060,048 bytes | 2,060,048 bytes |
+| Subsequent Alpine launches, median of 5 | 1,125.4 ms | 1,146.6 ms | 1,128.8 ms | 1,128.8 ms |
+| VM start to guest control ready | 436.056 ms | 434.024 ms | 434.928 ms | 434.928 ms |
+| Host setup before VM, including rootfs and initramfs | 304.050 ms | 305.956 ms | 307.186 ms | 305.956 ms |
+| Rootfs assembly (part of host setup above) | 262.744 ms | 264.175 ms | 266.066 ms | 264.175 ms |
+| Initramfs writing (part of host setup above) | 0.758 ms | 0.779 ms | 0.696 ms | 0.758 ms |
+| Guest overlay and applet setup | 0.4 ms | 0.3 ms | 0.4 ms | 0.4 ms |
+| Guest networking and DHCP | 204.1 ms | 216.4 ms | 215.1 ms | 215.1 ms |
+| Detached run to workload ready | 943.8 ms | 969.9 ms | 975.4 ms | 969.9 ms |
+| Graceful `rift stop` | 322.4 ms | 330.7 ms | 331.3 ms | 330.7 ms |
+| Worker and VM-service process footprint | 151.3 MiB | 158.6 MiB | 154.7 MiB | 154.7 MiB |
+| DHCP address acquired | Yes | Yes | Yes | Yes |
+
+The host-setup row includes the rootfs and initramfs sub-rows; do not add them twice. The detached timing includes benchmark marker creation and host polling, so it is diagnostic and not directly comparable with uninstrumented detached launches. The guest stage timestamps are observations from the host, not kernel-only timings. These are three samples on one Mac, not a cross-machine performance claim. Cached foreground startup remains about 1.13 seconds; the measurement did not establish a startup improvement over earlier samples.
 
 ## Graceful shutdown baseline
 
