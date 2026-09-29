@@ -16,7 +16,7 @@ This roadmap carries the original plan forward from the first project commit. `[
 - [x] Write the README with working setup steps, examples, status, and limitations.
 - [x] Link this cumulative roadmap from the README.
 - [x] Add the project logo, 17 repository topics, and the first GitHub Pages site.
-- [x] Publish the Apache-2.0 `v0.1.0` source-preview tag and release notes.
+- [x] Publish Apache-2.0 source-preview tags and release notes through `v0.2.0`.
 
 ## 2. Boot Linux and run the first real container
 
@@ -116,7 +116,7 @@ This roadmap carries the original plan forward from the first project commit. `[
 ## 7. Ship a straightforward public release
 
 - [x] Provide a Homebrew source-build install path for Apple Silicon; verify clean-HOME installation and use without Docker.
-- [x] Verify first-use-to-clean behavior in a fresh temporary `HOME` on this Apple Silicon Mac without Docker: guest setup, Alpine and Nginx runs, detached lifecycle, and cache cleanup. Homebrew v0.1.2 separately passed its formula check and clean-`HOME` run. See `docs/BENCHMARKS.md`.
+- [x] Verify first-use-to-clean behavior in a fresh temporary `HOME` on this Apple Silicon Mac without Docker: guest setup, Alpine and Nginx runs, detached lifecycle, and cache cleanup. Homebrew v0.2.0 passed formula audit/test, source build, and the same installed-binary workflow. See `docs/BENCHMARKS.md`.
 
 ## External verification gates
 

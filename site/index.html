@@ -104,7 +104,7 @@
             <dl>
               <div><dt>Runtime</dt><dd>One CLI starts one disposable Linux VM per run through Apple’s Virtualization.framework. No Docker Engine, Docker Desktop, or shared Rift daemon.</dd></div>
               <div><dt>Memory</dt><dd>2 vCPU and 256 MiB guest RAM by default. Three idle M2 samples measured a median 154.7 MiB process footprint for the Rift worker and VM service; this excludes kernel and other host memory.</dd></div>
-              <div><dt>Disk</dt><dd>2.06 MB optimized executable. A measured Homebrew install plus first-use guest boot files occupied 45.9 MiB, before image downloads.</dd></div>
+              <div><dt>Disk</dt><dd>2.06 MB optimized executable. A measured Homebrew v0.2.0 install plus first-use guest boot files occupied 46.25 MiB, before image downloads.</dd></div>
               <div><dt>Startup and files</dt><dd>Cached Alpine launch median: 1.13 seconds on one M2 Mac. Mount only requested host paths; up to 16 volumes and one localhost TCP mapping per run.</dd></div>
             </dl>
           </article>

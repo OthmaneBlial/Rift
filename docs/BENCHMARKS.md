@@ -207,7 +207,21 @@ Apple M2, macOS 26.6, Zig 0.16.0, `ReleaseSafe`, runtime commit `c5c3dd6`, 2026-
 
 The VM-start metric ends at guest control-share readiness, before overlay setup and workload startup. This and the `3ea8402` sample below recorded detached latency after RSS and footprint sampling; those values include that post-ready work and are not comparable with the corrected marker timestamp above.
 
-## Homebrew first-use footprint
+## Homebrew v0.2.0 first-use footprint
+
+Apple M2, macOS 26.6, Homebrew formula `rift` v0.2.0, 2026-09-29. The formula passed `brew audit --strict`, a source-build upgrade, and `brew test`. A separate clean temporary `HOME` ran `rift run --rm alpine /bin/true` to create the first-use guest files. The installed binary also passed a fresh-home Alpine and detached Nginx HTTP workflow, followed by `system df`, `clean`, `stop`, and `rm`, with Docker CLI and Docker Desktop absent.
+
+| Component | Result |
+| --- | ---: |
+| Homebrew keg disk allocation (`du -sk`) | 2,044 KiB |
+| Installed executable logical size | 2,060,256 bytes |
+| First-use Alpine kernel and initramfs logical size | 46,402,986 bytes (44.3 MiB) |
+| Guest asset directory disk allocation (`du -sk`) | 45,316 KiB |
+| Keg plus guest asset disk allocation | 47,360 KiB (46.25 MiB) |
+
+The combined allocation excludes image-cache data, Zig as a build dependency, and unrelated files. Reproduce the directory sizes with `du -sk /opt/homebrew/Cellar/rift/0.2.0 "$HOME/Library/Application Support/Rift/guest"` after a fresh-home first run; measure the executable with `stat -f '%z' /opt/homebrew/Cellar/rift/0.2.0/bin/rift`.
+
+## Homebrew v0.1.2 first-use footprint
 
 Apple M2, macOS 26.6, Homebrew formula `rift` v0.1.2, 2026-09-27. `brew test rift` passed. A clean temporary `HOME` ran `rift run --rm alpine echo RIFT_BREW_CLEAN_HOME_OK` successfully with both the Docker CLI and Docker Desktop absent.
 
